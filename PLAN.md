@@ -615,3 +615,219 @@ Do not silently move a recipient from OpenCode Go to Alibaba or another provider
 4. Observe usage, IPs, errors, and upstream billing.
 5. Add a second profile only after attribution and emergency stop are reliable.
 6. Add optional fallback only after explicit operator review and per-key opt-in.
+
+## 18. Full OpenRouter-style operator system
+
+The target is an OpenRouter-like control plane for this private sponsored service: one stable API endpoint, multiple operator-owned upstream connections, and many independently controlled client/agent keys. This is a capability map, not a promise to reproduce another service's private implementation or terms.
+
+### Core objects
+
+#### Upstream connection
+
+An upstream connection represents a provider credential you own:
+
+```text
+id
+name                         # e.g. Alibaba Student, OpenCode Go, OpenRouter
+provider_kind
+base_url
+secret_ref / encrypted_secret
+auth_scheme
+enabled
+models
+model_aliases
+input/output pricing
+priority
+fallback_enabled
+health state
+last model sync
+```
+
+The dashboard needs an `Add upstream` form with:
+
+- display name;
+- provider type;
+- base URL;
+- API key/credential input;
+- authentication header mode;
+- model discovery button;
+- model selection and aliases;
+- price fields;
+- enabled/disabled toggle;
+- health-check button;
+- privacy/terms acknowledgment;
+- save-and-test action.
+
+The secret is submitted only over HTTPS or the private SSH tunnel, encrypted at rest with a `PROVIDER_SECRET_KEY`, never returned after save, and never shown in logs. A safer Nest deployment may store only a secret reference and keep the actual value in the environment/secret store. UI entry must not turn the request `base_url` into an arbitrary SSRF target: enforce HTTPS, hostname allowlists, and private-network rejection for remotely exposed deployments.
+
+#### Sponsored client/agent key
+
+A client key represents one agent, person, or application consuming the stable provider endpoint:
+
+```text
+id
+label
+description
+key_prefix / key_hash
+created_at / last_used_at / expires_at
+enabled / revoked_at
+risk_profile / risk_approved
+allowed_upstreams
+allowed_models
+model_aliases
+spend_limit_usd
+spend_used_usd
+token_limit / token_used
+requests_per_minute
+requests_per_day
+tokens_per_minute
+max_concurrency
+max_input_tokens / max_output_tokens
+allowed_ips / blocked_ips
+budget_period: lifetime | daily | weekly | monthly
+budget_reset_at
+```
+
+### Key creation wizard
+
+The `Create key` flow should ask for:
+
+1. agent/application name;
+2. owner label and optional description;
+3. upstream connection(s);
+4. model(s) or aliases;
+5. budget amount and reset period;
+6. RPM, TPM, concurrency, and request-size limits;
+7. expiry date;
+8. risk profile and approval;
+9. optional allowed IPs;
+10. confirmation screen showing the effective policy.
+
+After creation, show the complete client key exactly once with copy/download buttons and an explicit warning. Later views show only the prefix/hash and usage; the raw key cannot be retrieved. This mirrors the important operational behavior of provider key-management systems, where limits, expiry, and usage are attached to each key.
+
+### Per-key “wallet” model
+
+Use clear terminology in the UI:
+
+- `Allocation` — maximum internal budget assigned to this key;
+- `Used` — locally recorded estimated cost;
+- `Available` — allocation minus used;
+- `Reset` — daily/weekly/monthly/lifetime policy;
+- `Upstream balance` — external provider state, read-only and reconciled separately.
+
+Do not claim that an Alibaba or OpenCode Go coupon has been transferred into a key wallet. The key wallet is an internal gate that prevents this provider from sending more requests for that key.
+
+### Dashboard information architecture
+
+#### 1. Overview
+
+- total spend and global allocation;
+- requests/minute and active concurrency;
+- tokens in/out and tokens/minute;
+- budget runway;
+- upstream health cards;
+- top models, keys, agents, and IPs;
+- recent policy blocks and errors;
+- emergency stop.
+
+#### 2. Upstreams
+
+- add/edit/remove connection;
+- enter credential and base URL;
+- sync `/models`;
+- show model availability and pricing;
+- test one cheap request only after confirmation;
+- view health, latency, errors, and spend by upstream;
+- configure priority and explicit fallback.
+
+#### 3. Keys / agents
+
+- create key wizard;
+- search/filter by owner, status, upstream, model, risk, and expiry;
+- click a key to open a detail drawer/page;
+- current allocation, used, available, reset time;
+- request/token/concurrency limits;
+- model/upstream permissions;
+- last-used IPs and recent activity;
+- disable, enable, rotate, and revoke;
+- export a safe client configuration snippet without exposing upstream secrets.
+
+#### 4. Usage explorer
+
+- time range: last hour/day/week/month/custom;
+- filters: key, agent, upstream, model, IP, status, stream;
+- requests and tokens over time;
+- spend over time;
+- latency p50/p95 and time-to-first-token when available;
+- success/4xx/5xx/429 rates;
+- CSV/JSON export of metadata only;
+- no prompt storage by default.
+
+#### 5. Guardrails and abuse
+
+- global budget and warning/hard-stop;
+- per-key policies;
+- IP blocklist and unblock;
+- suspicious rate/error/spend signals;
+- manual review queue;
+- audit log of every policy change;
+- provider-wide emergency stop.
+
+#### 6. Settings and audit
+
+- admin sessions and rotation;
+- secret-store status;
+- trusted proxy configuration;
+- retention period;
+- data export/delete;
+- configuration history and rollback;
+- deployment version and service health.
+
+### Routing behavior
+
+The incoming request contains only a client key and model alias. The router resolves:
+
+```text
+client key
+  -> key policy
+  -> requested model alias
+  -> permitted upstream profile
+  -> model mapping
+  -> budget/rate/concurrency checks
+  -> upstream adapter
+  -> usage and audit record
+```
+
+If one key is assigned to multiple providers, the operator must choose either:
+
+- pinned provider;
+- ordered fallback;
+- explicit per-model provider mapping.
+
+The router must not silently switch a key to a more expensive or less private provider. Fallback is only allowed for explicitly configured transient failures.
+
+### Live versus persistent configuration
+
+Dashboard changes must eventually persist in SQLite/Postgres rather than only mutating the process environment. Every mutation needs:
+
+- authenticated admin identity;
+- before/after values with secrets redacted;
+- timestamp and reason;
+- audit record;
+- validation before activation;
+- rollback path.
+
+The migration order is:
+
+1. add encrypted upstream profile storage;
+2. add profile-aware model discovery;
+3. add key-to-profile assignments;
+4. persist key policies and budget periods;
+5. add usage explorer filters and time-series rollups;
+6. add concurrency/TPM enforcement;
+7. add provider health and explicit fallback;
+8. migrate Nest from environment-only settings to persistent admin configuration.
+
+### Reference alignment
+
+This design takes the useful public concepts from OpenRouter: separate management credentials, one-time key display, key spending limits, expiry/reset periods, usage history, model/provider restrictions, and BYOK-style upstream connections. OpenRouter documents these as separate management, credits, guardrail, and BYOK concepts; our implementation should preserve that separation while keeping this project smaller and operator-owned.
