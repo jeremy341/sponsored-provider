@@ -18,7 +18,7 @@ Open http://127.0.0.1:8000/dashboard for the usage dashboard.
 Create a provider key locally:
 
 ```bash
-python -m app.cli keys create --label CamberCloud
+python -m app.cli keys create --label local-client
 ```
 
 The key is shown once. Do not commit `.env`, the database, or any real credentials.

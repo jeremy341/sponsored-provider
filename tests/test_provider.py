@@ -19,7 +19,7 @@ def test_dashboard_starts_empty(client):
 
 def test_admin_can_create_and_disable_provider_key(client):
     test_client, _, db = client
-    created = test_client.post("/api/admin/keys", headers={"X-Admin-Token": "admin"}, json={"label": "CamberCloud"})
+    created = test_client.post("/api/admin/keys", headers={"X-Admin-Token": "admin"}, json={"label": "local-client"})
     assert created.status_code == 200
     raw_key = created.json()["key"]
     key_id = created.json()["id"]
