@@ -239,6 +239,30 @@ async def admin_update_upstream(profile_id: str, request: Request, x_admin_token
     return {"ok": True, "profile_id": profile_id, "base_url": base_url}
 
 
+@app.post("/api/admin/upstreams/{profile_id}/pricing")
+async def admin_upstream_pricing(profile_id: str, request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    payload = await request.json()
+    pricing = payload.get("pricing", payload)
+    if not isinstance(pricing, dict):
+        raise ProviderError("Pricing must be a model-to-price object.", "invalid_pricing", 400)
+    normalized = {}
+    for model, values in pricing.items():
+        if not isinstance(model, str) or not isinstance(values, dict):
+            raise ProviderError("Each model needs input and output prices.", "invalid_pricing", 400)
+        try:
+            input_price, output_price = float(values.get("input", 0)), float(values.get("output", 0))
+        except (TypeError, ValueError) as exc:
+            raise ProviderError("Model prices must be numeric.", "invalid_pricing", 400) from exc
+        if input_price < 0 or output_price < 0:
+            raise ProviderError("Model prices cannot be negative.", "invalid_pricing", 400)
+        normalized[model] = {"input": input_price, "output": output_price}
+    if not db.get_upstream(profile_id):
+        raise ProviderError("Upstream profile not found.", "upstream_not_found", 404)
+    db.update_upstream_pricing(profile_id, normalized)
+    return {"ok": True, "profile_id": profile_id, "pricing": normalized}
+
+
 @app.get("/api/admin/blocked-ips")
 async def admin_blocked_ips(x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
     require_admin(x_admin_token, settings)
@@ -315,11 +339,14 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
         raise ProviderError("messages must be a non-empty list.", "invalid_request", 400)
     if sum(len(str(item.get("content", ""))) for item in messages if isinstance(item, dict)) > settings.max_input_chars:
         raise ProviderError("Input content is too large.", "input_too_large", 413)
-    if settings.input_price_per_million <= 0 or settings.output_price_per_million <= 0:
+    upstream_ids = [item.strip() for item in (key["allowed_upstreams"] or "").split(",") if item.strip()]
+    client, upstream_id = upstream_client(upstream_ids[0] if upstream_ids else "configured", db, settings)
+    input_price, output_price = db.model_pricing(upstream_id, model, settings.input_price_per_million, settings.output_price_per_million)
+    if input_price <= 0 or output_price <= 0:
         raise ProviderError("Official model input/output prices must be configured before live requests.", "pricing_not_configured", 503)
     payload["max_tokens"] = min(int(payload.get("max_tokens", settings.max_output_tokens)), settings.max_output_tokens)
     current_input_estimate = sum(len(str(item.get("content", ""))) for item in messages if isinstance(item, dict)) / 4
-    projected_cost = estimate_cost(current_input_estimate, payload["max_tokens"], settings)
+    projected_cost = estimate_cost(current_input_estimate, payload["max_tokens"], settings, input_price, output_price)
     projected_tokens = current_input_estimate + payload["max_tokens"]
     if key["spend_limit_usd"] is not None and key["spend_limit_usd"] > 0 and key_usage["estimated_cost_usd"] + projected_cost >= key["spend_limit_usd"]:
         db.set_key_state(key["id"], False)
@@ -328,37 +355,39 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
         db.set_key_state(key["id"], False)
         raise ProviderError("This provider key cannot safely accept the request within its token limit.", "key_token_limit_exhausted", 429)
     if used + projected_cost + settings.provider_estimate_reserve_usd >= settings.provider_hard_stop_usd:
-        db.set_key_state(key["id"], False)
         raise ProviderError("The provider budget cannot safely accept this request.", "budget_exhausted", 429)
     payload["model"] = model
-    upstream_ids = [item.strip() for item in (key["allowed_upstreams"] or "").split(",") if item.strip()]
-    client, upstream_id = upstream_client(upstream_ids[0] if upstream_ids else "configured", db, settings)
+    reservation_id = db.reserve_budget(key["id"], upstream_id, model, projected_cost, projected_tokens, settings.provider_hard_stop_usd, key["spend_limit_usd"])
+    if not reservation_id:
+        raise ProviderError("The provider budget cannot safely accept this request.", "budget_exhausted", 429)
     if payload.get("stream"):
         async def stream_body():
             try:
                 async for chunk in client.stream_chat_completion(payload):
                     yield chunk
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
             except ProviderError as exc:
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, error_category=exc.code)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code)
                 yield f'data: {json.dumps({"error": {"message": exc.message, "code": exc.code}})}\n\n'
         return StreamingResponse(stream_body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     started = time.perf_counter()
     try:
         body, latency = await client.chat_completion(payload)
     except ProviderError as exc:
-        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, error_category=exc.code)
+        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code)
         raise
     usage = body.get("usage") or {}
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
-    estimated_cost = estimate_cost(input_tokens, output_tokens, settings)
-    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id)
+    estimated_cost = estimate_cost(input_tokens, output_tokens, settings, input_price, output_price)
+    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
     if db.usage_summary()["totals"]["estimated_cost_usd"] >= settings.provider_hard_stop_usd:
         db.set_key_state(key["id"], False)
     return body
 
 
-def estimate_cost(input_tokens, output_tokens, settings: Settings) -> float:
-    return round((input_tokens or 0) / 1_000_000 * settings.input_price_per_million + (output_tokens or 0) / 1_000_000 * settings.output_price_per_million, 6)
+def estimate_cost(input_tokens, output_tokens, settings: Settings, input_price=None, output_price=None) -> float:
+    input_price = settings.input_price_per_million if input_price is None else input_price
+    output_price = settings.output_price_per_million if output_price is None else output_price
+    return round((input_tokens or 0) / 1_000_000 * input_price + (output_tokens or 0) / 1_000_000 * output_price, 6)
