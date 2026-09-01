@@ -271,8 +271,10 @@ async def models(request: Request, settings: Settings = Depends(get_settings), a
     client_ip = request.client.host if request.client else None
     if db.is_ip_blocked(client_ip):
         raise ProviderError("Requests from this IP address are blocked.", "ip_blocked", 403)
-    provider_key(authorization, db)
-    return {"object": "list", "data": [{"id": model, "object": "model", "owned_by": "sponsored-provider"} for model in sorted(settings.model_allowlist)]}
+    key = provider_key(authorization, db)
+    key_models = {item.strip() for item in (key["allowed_models"] or "").split(",") if item.strip()}
+    effective_models = key_models or settings.model_allowlist
+    return {"object": "list", "data": [{"id": model, "object": "model", "owned_by": "sponsored-provider"} for model in sorted(effective_models)]}
 
 
 @app.post("/v1/chat/completions")
