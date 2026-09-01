@@ -91,6 +91,19 @@ def test_chat_proxy_forwards_allowlisted_model_and_records_usage(client):
     assert route.called
     assert db.usage_summary()["totals"]["requests"] == 1
     assert db.usage_summary()["totals"]["total_tokens"] == 1500
+    assert db.usage_summary()["recent"][0]["client_ip"] == "testclient"
+    assert db.usage_summary()["by_ip"][0]["requests"] == 1
+
+
+def test_key_policy_can_require_approval_and_limit_models(client):
+    test_client, _, db = client
+    raw_key, metadata = db.create_key("restricted")
+    policy = test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"risk_profile": "strict", "risk_approved": False, "allowed_models": "qwen-other", "requests_per_minute": 2, "token_limit": 1000, "spend_limit_usd": 1})
+    assert policy.status_code == 200
+    assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 403
+    test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"risk_approved": True})
+    response = test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json={"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]})
+    assert response.status_code == 404
 
 
 def test_chat_rejects_non_allowlisted_model_without_upstream(client):

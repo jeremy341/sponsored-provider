@@ -36,7 +36,13 @@ class Database:
               created_at TEXT NOT NULL,
               last_used_at TEXT,
               request_count INTEGER NOT NULL DEFAULT 0,
-              estimated_cost_usd REAL NOT NULL DEFAULT 0
+              estimated_cost_usd REAL NOT NULL DEFAULT 0,
+              spend_limit_usd REAL,
+              requests_per_minute INTEGER,
+              token_limit INTEGER,
+              allowed_models TEXT NOT NULL DEFAULT '',
+              risk_profile TEXT NOT NULL DEFAULT 'standard',
+              risk_approved INTEGER NOT NULL DEFAULT 1
             );
             CREATE TABLE IF NOT EXISTS usage_records (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,6 +60,19 @@ class Database:
               FOREIGN KEY(provider_key_id) REFERENCES provider_api_keys(id)
             );
             """)
+            for statement in (
+                "ALTER TABLE usage_records ADD COLUMN client_ip TEXT",
+                "ALTER TABLE provider_api_keys ADD COLUMN spend_limit_usd REAL",
+                "ALTER TABLE provider_api_keys ADD COLUMN requests_per_minute INTEGER",
+                "ALTER TABLE provider_api_keys ADD COLUMN token_limit INTEGER",
+                "ALTER TABLE provider_api_keys ADD COLUMN allowed_models TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE provider_api_keys ADD COLUMN risk_profile TEXT NOT NULL DEFAULT 'standard'",
+                "ALTER TABLE provider_api_keys ADD COLUMN risk_approved INTEGER NOT NULL DEFAULT 1",
+            ):
+                try:
+                    conn.execute(statement)
+                except sqlite3.OperationalError:
+                    pass
 
     def digest(self, raw_key: str) -> str:
         return hashlib.sha256((self.pepper + raw_key).encode()).hexdigest()
@@ -67,7 +86,7 @@ class Database:
                 (raw[:14], self.digest(raw), label, created),
             )
             key_id = cur.lastrowid
-        return raw, {"id": key_id, "key_prefix": raw[:14], "label": label, "created_at": created, "enabled": True}
+        return raw, {"id": key_id, "key_prefix": raw[:14], "label": label, "created_at": created, "enabled": True, "risk_profile": "standard", "risk_approved": True}
 
     def find_key(self, raw_key: str):
         with self.connect() as conn:
@@ -84,11 +103,22 @@ class Database:
                 (int(enabled and not revoke), int(revoke), now_iso(), key_id),
             )
 
-    def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, error_category=None):
+    def update_key_policy(self, key_id: int, *, spend_limit_usd=None, requests_per_minute=None, token_limit=None, allowed_models=None, risk_profile=None, risk_approved=None):
+        fields, values = [], []
+        for name, value in (("spend_limit_usd", spend_limit_usd), ("requests_per_minute", requests_per_minute), ("token_limit", token_limit), ("allowed_models", allowed_models), ("risk_profile", risk_profile), ("risk_approved", risk_approved)):
+            if value is not None:
+                fields.append(f"{name}=?")
+                values.append(value)
+        if fields:
+            values.append(key_id)
+            with self.connect() as conn:
+                conn.execute(f"UPDATE provider_api_keys SET {', '.join(fields)} WHERE id=?", values)
+
+    def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, error_category=None):
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO usage_records(provider_key_id,timestamp,model,input_tokens,output_tokens,total_tokens,estimated_cost_usd,latency_ms,status,stream,error_category) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                (key_id, now_iso(), model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, int(stream), error_category),
+                "INSERT INTO usage_records(provider_key_id,timestamp,model,input_tokens,output_tokens,total_tokens,estimated_cost_usd,latency_ms,status,stream,error_category,client_ip) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (key_id, now_iso(), model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, int(stream), error_category, client_ip),
             )
             conn.execute(
                 "UPDATE provider_api_keys SET request_count=request_count+1, estimated_cost_usd=estimated_cost_usd+?, last_used_at=? WHERE id=?",
@@ -98,7 +128,12 @@ class Database:
     def usage_summary(self):
         with self.connect() as conn:
             totals = conn.execute("SELECT COUNT(*) requests, COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records").fetchone()
-            recent = [dict(r) for r in conn.execute("SELECT timestamp, model, total_tokens, estimated_cost_usd, latency_ms, status, stream FROM usage_records ORDER BY id DESC LIMIT 20")]
+            recent = [dict(r) for r in conn.execute("SELECT timestamp, model, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip, provider_key_id FROM usage_records ORDER BY id DESC LIMIT 50")]
             by_model = [dict(r) for r in conn.execute("SELECT model, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY model ORDER BY estimated_cost_usd DESC")]
-        return {"totals": dict(totals), "recent": recent, "by_model": by_model, "keys": self.list_keys()}
+            by_ip = [dict(r) for r in conn.execute("SELECT COALESCE(client_ip,'unknown') client_ip, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY client_ip ORDER BY requests DESC")]
+        return {"totals": dict(totals), "recent": recent, "by_model": by_model, "by_ip": by_ip, "keys": self.list_keys()}
 
+    def key_usage(self, key_id: int):
+        with self.connect() as conn:
+            row = conn.execute("SELECT COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records WHERE provider_key_id=?", (key_id,)).fetchone()
+        return dict(row)
