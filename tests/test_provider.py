@@ -15,6 +15,7 @@ def test_dashboard_starts_empty(client):
     assert response.status_code == 200
     assert response.json()["budget"]["used_usd"] == 0
     assert response.json()["totals"]["requests"] == 0
+    assert response.json()["billing"]["reconciled"] is False
 
 
 def test_admin_can_create_and_disable_provider_key(client):
@@ -137,6 +138,18 @@ def test_zero_key_rpm_means_unlimited_not_inherit_global_limit(client):
     payload = {"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]}
     assert test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json=payload).status_code == 200
     assert test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json=payload).status_code == 200
+
+
+@respx.mock
+def test_key_spend_cap_blocks_before_upstream_request(client):
+    test_client, settings, db = client
+    raw_key, metadata = db.create_key("small-budget")
+    test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"spend_limit_usd": 0.001})
+    route = respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}}))
+    response = test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json={"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]})
+    assert response.status_code == 429
+    assert response.json()["error"]["code"] == "key_budget_exhausted"
+    assert route.called is False
 
 
 def test_chat_rejects_non_allowlisted_model_without_upstream(client):

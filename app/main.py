@@ -62,7 +62,7 @@ async def dashboard_data(x_admin_token: str | None = Header(default=None), db: D
     require_admin(x_admin_token, settings)
     summary = db.usage_summary()
     used = float(summary["totals"]["estimated_cost_usd"])
-    return {"budget": {"hard_stop_usd": settings.provider_hard_stop_usd, "warning_usd": settings.provider_warning_usd, "used_usd": used, "remaining_usd": max(0, settings.provider_hard_stop_usd - used), "percent": min(100, used / settings.provider_hard_stop_usd * 100 if settings.provider_hard_stop_usd else 0)}, "stopped": settings.emergency_stop or used >= settings.provider_hard_stop_usd, "config": {"allowed_models": sorted(settings.model_allowlist), "input_price_per_million": settings.input_price_per_million, "output_price_per_million": settings.output_price_per_million, "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute}, **summary}
+    return {"budget": {"hard_stop_usd": settings.provider_hard_stop_usd, "warning_usd": settings.provider_warning_usd, "used_usd": used, "remaining_usd": max(0, settings.provider_hard_stop_usd - used), "percent": min(100, used / settings.provider_hard_stop_usd * 100 if settings.provider_hard_stop_usd else 0)}, "stopped": settings.emergency_stop or used >= settings.provider_hard_stop_usd, "billing": {"source": "local_estimate", "reconciled": False, "note": "Reconcile against upstream billing before treating spend as final."}, "config": {"allowed_models": sorted(settings.model_allowlist), "input_price_per_million": settings.input_price_per_million, "output_price_per_million": settings.output_price_per_million, "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute}, **summary}
 
 
 @app.get("/api/admin/keys")
@@ -208,10 +208,10 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
         raise ProviderError("Too many requests for this provider key.", "rate_limited", 429)
     used = db.usage_summary()["totals"]["estimated_cost_usd"]
     key_usage = db.key_usage(key["id"])
-    if key["spend_limit_usd"] is not None and key_usage["estimated_cost_usd"] >= key["spend_limit_usd"]:
+    if key["spend_limit_usd"] is not None and key["spend_limit_usd"] > 0 and key_usage["estimated_cost_usd"] >= key["spend_limit_usd"]:
         db.set_key_state(key["id"], False)
         raise ProviderError("This provider key has reached its spend limit.", "key_budget_exhausted", 429)
-    if key["token_limit"] is not None and key_usage["total_tokens"] >= key["token_limit"]:
+    if key["token_limit"] is not None and key["token_limit"] > 0 and key_usage["total_tokens"] >= key["token_limit"]:
         db.set_key_state(key["id"], False)
         raise ProviderError("This provider key has reached its token limit.", "key_token_limit_exhausted", 429)
     if used >= settings.provider_hard_stop_usd:
@@ -238,6 +238,13 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     payload["max_tokens"] = min(int(payload.get("max_tokens", settings.max_output_tokens)), settings.max_output_tokens)
     current_input_estimate = sum(len(str(item.get("content", ""))) for item in messages if isinstance(item, dict)) / 4
     projected_cost = estimate_cost(current_input_estimate, payload["max_tokens"], settings)
+    projected_tokens = current_input_estimate + payload["max_tokens"]
+    if key["spend_limit_usd"] is not None and key["spend_limit_usd"] > 0 and key_usage["estimated_cost_usd"] + projected_cost >= key["spend_limit_usd"]:
+        db.set_key_state(key["id"], False)
+        raise ProviderError("This provider key cannot safely accept the request within its spend limit.", "key_budget_exhausted", 429)
+    if key["token_limit"] is not None and key["token_limit"] > 0 and key_usage["total_tokens"] + projected_tokens >= key["token_limit"]:
+        db.set_key_state(key["id"], False)
+        raise ProviderError("This provider key cannot safely accept the request within its token limit.", "key_token_limit_exhausted", 429)
     if used + projected_cost + settings.provider_estimate_reserve_usd >= settings.provider_hard_stop_usd:
         db.set_key_state(key["id"], False)
         raise ProviderError("The provider budget cannot safely accept this request.", "budget_exhausted", 429)
