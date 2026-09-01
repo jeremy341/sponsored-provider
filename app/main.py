@@ -1,6 +1,7 @@
 import json
 import ipaddress
 import time
+from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -14,7 +15,16 @@ from .database import Database
 from .errors import ProviderError
 from .rate_limit import RateLimiter
 
-app = FastAPI(title="Sponsored Provider", version="0.1.0")
+@asynccontextmanager
+async def lifespan(_app):
+    settings = get_settings()
+    print("Dashboard ready at /dashboard")
+    if settings._bootstrap_generated:
+        print(f"First-run dashboard token: {settings.admin_token}")
+    yield
+
+
+app = FastAPI(title="Sponsored Provider", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 rate_limiter = RateLimiter()
 
