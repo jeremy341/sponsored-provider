@@ -508,6 +508,58 @@ Add routing fields to the existing key policy editor:
 
 Keep Alibaba as the first profile and use the custom provider URL for all clients. Add other providers only when their official API compatibility, pricing, terms, and secret-management path are verified. This preserves one stable client interface while keeping upstream choice under operator control.
 
+## 16A. Mainstream provider compatibility matrix
+
+The final router should support mainstream providers through official API credentials and documented protocols:
+
+| Provider | Credential accepted | Protocols to support | Billing source |
+|---|---|---|---|
+| Alibaba Model Studio | Model Studio API key | OpenAI-compatible Chat/Responses or native adapter | Alibaba usage/billing |
+| OpenAI API | OpenAI API key or project/service credential | Chat Completions and Responses | OpenAI Usage/Costs API |
+| OpenCode Go | OpenCode Go API key | Chat Completions, Responses, and Anthropic Messages depending on model | OpenCode Go account limits plus provider telemetry |
+| OpenRouter | OpenRouter API key | OpenAI-compatible Chat/Responses | OpenRouter credits/activity |
+| Other compatible provider | Official API credential | Declared compatible protocol | Provider-specific usage API |
+| ChatGPT Free/Plus/Pro subscription | Not an API credential | Not supported as a proxy upstream | Separate ChatGPT subscription billing |
+
+ChatGPT subscription access and OpenAI API billing are separate products. The router must not ask for a ChatGPT login, session cookie, browser token, or subscription credential. A separate OpenAI API project/key is required for OpenAI API routing. OpenAI also recommends unique API keys and says API keys should not be shared; recipients should receive our scoped provider keys, never the upstream key.
+
+### Protocol adapter requirement
+
+Each model catalog entry must declare its protocol and upstream model ID:
+
+```text
+client_model: approved-model
+upstream_profile: opencode-go
+upstream_model: kimi-k3
+protocol: chat_completions
+```
+
+The public provider can continue exposing one stable endpoint, but internally it needs adapters for:
+
+- `/v1/chat/completions`;
+- `/v1/responses`;
+- Anthropic-compatible `/v1/messages` where the upstream model requires it;
+- streaming translation for each protocol;
+- usage extraction and cost calculation for each response shape.
+
+If a client requests a model whose protocol adapter is unavailable, return `unsupported_protocol` before making an upstream call. Never guess a protocol from the model name.
+
+### Provider onboarding checklist
+
+For every new upstream added through the UI:
+
+1. verify the credential type is an official API credential;
+2. verify the base URL and region/account match the credential;
+3. call the provider model catalog endpoint;
+4. store protocol, model ID, context/output limits, and price metadata;
+5. run one operator-approved low-cost health probe;
+6. test non-streaming and streaming if supported;
+7. configure provider-level and global budgets;
+8. record terms/privacy acknowledgment and last reconciliation time;
+9. only then make the profile selectable in sponsored-key creation.
+
+This preserves the user-facing experience you want—choose a provider, discover its models, set a key budget, and issue a stable provider key—without treating consumer subscriptions or browser sessions as reusable API backends.
+
 ## 17. Sponsored access mode
 
 ### Goal
