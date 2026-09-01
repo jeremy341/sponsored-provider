@@ -147,6 +147,17 @@ async def admin_config(request: Request, x_admin_token: str | None = Header(defa
     return {"ok": True, "config": {"allowed_models": sorted(settings.model_allowlist), "provider_hard_stop_usd": settings.provider_hard_stop_usd, "provider_warning_usd": settings.provider_warning_usd, "input_price_per_million": settings.input_price_per_million, "output_price_per_million": settings.output_price_per_million, "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute, "emergency_stop": settings.emergency_stop}}
 
 
+@app.get("/api/admin/upstream-models")
+async def admin_upstream_models(x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
+    require_admin(x_admin_token, settings)
+    if not settings.alibaba_api_key:
+        raise ProviderError("Alibaba API credentials are not configured.", "upstream_not_configured", 503)
+    payload = await AlibabaClient(settings.normalized_base_url, settings.alibaba_api_key, settings.upstream_timeout_seconds).list_models()
+    items = payload.get("data", payload if isinstance(payload, list) else [])
+    model_ids = sorted({item.get("id") for item in items if isinstance(item, dict) and item.get("id")})
+    return {"models": model_ids}
+
+
 @app.get("/v1/models")
 async def models(settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
     provider_key(authorization, db)

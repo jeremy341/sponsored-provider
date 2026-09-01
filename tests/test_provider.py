@@ -70,6 +70,16 @@ def test_admin_can_update_guardrails_and_emergency_stop(client):
 
 
 @respx.mock
+def test_admin_can_load_models_from_private_upstream_key(client):
+    test_client, settings, _ = client
+    route = respx.get(f"{settings.normalized_base_url}/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "qwen-a"}, {"id": "qwen-a"}, {"id": "qwen-b"}]}))
+    response = test_client.get("/api/admin/upstream-models", headers={"X-Admin-Token": "admin"})
+    assert response.status_code == 200
+    assert response.json()["models"] == ["qwen-a", "qwen-b"]
+    assert route.called
+
+
+@respx.mock
 def test_rate_limit_blocks_before_upstream(client):
     test_client, settings, db = client
     settings.rate_limit_requests_per_minute = 1
