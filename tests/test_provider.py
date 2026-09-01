@@ -117,6 +117,17 @@ def test_admin_can_store_model_specific_pricing(client):
     assert response.status_code == 200
 
 
+def test_pricing_updates_merge_without_removing_existing_entries(client):
+    test_client, _, _ = client
+    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "Priced merge", "provider_kind": "openai", "base_url": "https://provider.example/v1", "api_key": "secret"})
+    profile_id = created.json()["id"]
+    test_client.post(f"/api/admin/upstreams/{profile_id}/pricing", headers={"X-Admin-Token": "admin"}, json={"pricing": {"model-a": {"input": 0.1, "output": 0.2}}})
+    test_client.post(f"/api/admin/upstreams/{profile_id}/pricing", headers={"X-Admin-Token": "admin"}, json={"pricing": {"model-b": {"input": 0.3, "output": 0.4}}})
+    stored = test_client.get("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}).json()["upstreams"]
+    profile = next(item for item in stored if item["id"] == profile_id)
+    assert set(profile["pricing"]) == {"model-a", "model-b"}
+
+
 def test_budget_reservation_counts_active_requests(client):
     _, _, db = client
     reservation = db.reserve_budget(1, "provider", "model", 0.006, 100, 0.01, None)

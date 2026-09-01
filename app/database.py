@@ -216,7 +216,10 @@ class Database:
 
     def update_upstream_pricing(self, profile_id: str, pricing: dict):
         with self.connect() as conn:
-            conn.execute("UPDATE upstream_profiles SET pricing_json=? WHERE id=?", (json.dumps(pricing), profile_id))
+            row = conn.execute("SELECT pricing_json FROM upstream_profiles WHERE id=?", (profile_id,)).fetchone()
+            existing = json.loads(row[0] or "{}") if row else {}
+            existing.update(pricing)
+            conn.execute("UPDATE upstream_profiles SET pricing_json=? WHERE id=?", (json.dumps(existing), profile_id))
 
     def model_pricing(self, profile_id: str | None, model: str, fallback_input: float, fallback_output: float):
         if not profile_id or profile_id == "configured":
