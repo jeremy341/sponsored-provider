@@ -404,3 +404,106 @@ The page should refresh operational metrics every 10 seconds and show a clear `l
 ## 15. Explicitly out of scope for v1
 
 Frontend dashboard, registration, customer billing, subscriptions, multi-tenant organizations, image/video/speech proxying, embeddings, arbitrary tool calls, prompt persistence, automatic model routing, benchmark suites, public admin endpoints, multi-replica deployment, and public anonymous access.
+
+## 16. Multi-provider router plan
+
+### Custom base URL
+
+The service already has the shape of a custom OpenAI-compatible base URL. Clients should call the provider, not Alibaba directly:
+
+```text
+Local:  http://127.0.0.1:8000/v1
+Nest:   https://your-provider-host/v1
+```
+
+The client supplies a provider-issued `sp_sk_...` key and an allowlisted model. The provider chooses the upstream route. Alibaba's base URL and credential remain private server configuration.
+
+### Key terminology
+
+- **Client/provider key:** issued by this service to a person or application; supports spend, token, request-rate, model, approval, and IP policies.
+- **Upstream credential:** owned by the operator for Alibaba or another provider; never returned to clients and never accepted from an ordinary request.
+- **Admin credential:** controls the dashboard and router configuration; never usable as a model-invocation key.
+
+### Upstream profile model
+
+Replace the single Alibaba configuration with an admin-managed `upstream_profiles` registry:
+
+```text
+upstream_profiles
+  id
+  display_name
+  provider_kind              # alibaba, openai_compatible, local
+  base_url
+  secret_reference           # reference to an environment/secret-store name
+  enabled
+  health_status
+  allowed_models
+  model_aliases              # optional client model -> upstream model mapping
+  input_price_per_million
+  output_price_per_million
+  priority
+  created_at
+  last_checked_at
+```
+
+The first migration keeps Alibaba as the default profile. Adding another profile should not require changing client configuration; clients continue using the same `/v1` URL and provider key.
+
+### Routing modes
+
+Start with explicit routing, then add carefully bounded fallback:
+
+1. **Pinned model route:** each client key may be limited to specific model aliases, and each alias maps to one upstream profile/model.
+2. **Operator-selected profile:** the dashboard can enable/disable a profile and set its priority.
+3. **Fallback:** only retry a request on a configured fallback when the failure is clearly transient; never fallback after auth, model-not-found, policy, or quota errors.
+4. **No automatic cheapest/best routing initially:** it makes cost and behavior harder to explain and audit.
+
+### Dashboard additions
+
+Add an `Upstreams` tab with:
+
+- profile name and provider kind;
+- masked credential status;
+- fixed base URL with hostname display;
+- enabled/disabled state;
+- model catalog and alias mapping;
+- official input/output prices;
+- health-check result and last checked time;
+- priority/fallback order;
+- per-profile and total usage.
+
+Add routing fields to the existing key policy editor:
+
+- allowed model aliases;
+- allowed upstream profile IDs;
+- maximum spend/tokens/requests per profile;
+- approval/risk state.
+
+### Security rules for arbitrary providers
+
+“Plug in any key” must mean an operator adds a provider profile, not that a client can submit `base_url` or an upstream key in a request. Enforce:
+
+- profile creation is admin-only;
+- base URLs are HTTPS outside local development;
+- reject localhost, link-local, private-network, metadata-service, and non-routable targets for remotely reachable deployments;
+- use an explicit hostname/domain allowlist;
+- do not follow arbitrary redirects;
+- never log query strings or authorization headers;
+- store only secret references in the database, with actual values in environment/secret storage;
+- validate the profile with a controlled `/models` check before enabling it;
+- keep per-profile budgets and a global hard stop;
+- record profile ID, upstream model, provider key ID, client IP, latency, status, and reported usage for every request.
+
+### Migration sequence
+
+1. Extract the current Alibaba client behind an `UpstreamAdapter` interface without changing the public API.
+2. Add the upstream profile table and migrate the current Alibaba environment values into a default profile.
+3. Add profile-aware model discovery and pricing.
+4. Add admin-only profile create/edit/enable/disable/health controls.
+5. Add explicit model-to-profile routing.
+6. Add per-profile dashboard usage and reconciliation.
+7. Add transient-only fallback with tests proving policy/auth failures never fallback.
+8. Only then consider multiple active providers in production.
+
+### Recommended operating posture
+
+Keep Alibaba as the first profile and use the custom provider URL for all clients. Add other providers only when their official API compatibility, pricing, terms, and secret-management path are verified. This preserves one stable client interface while keeping upstream choice under operator control.
