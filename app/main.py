@@ -203,7 +203,7 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     key = provider_key(authorization, db)
     if settings.emergency_stop:
         raise ProviderError("The provider is temporarily stopped.", "provider_stopped", 503)
-    key_rate_limit = key["requests_per_minute"] or settings.rate_limit_requests_per_minute
+    key_rate_limit = settings.rate_limit_requests_per_minute if key["requests_per_minute"] is None else key["requests_per_minute"]
     if not rate_limiter.allow(f"{db.path}:{key['id']}", key_rate_limit):
         raise ProviderError("Too many requests for this provider key.", "rate_limited", 429)
     used = db.usage_summary()["totals"]["estimated_cost_usd"]
