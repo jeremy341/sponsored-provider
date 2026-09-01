@@ -59,6 +59,12 @@ class Database:
               error_category TEXT,
               FOREIGN KEY(provider_key_id) REFERENCES provider_api_keys(id)
             );
+            CREATE TABLE IF NOT EXISTS blocked_ips (
+              ip TEXT PRIMARY KEY,
+              reason TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              expires_at TEXT
+            );
             """)
             for statement in (
                 "ALTER TABLE usage_records ADD COLUMN client_ip TEXT",
@@ -131,9 +137,34 @@ class Database:
             recent = [dict(r) for r in conn.execute("SELECT timestamp, model, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip, provider_key_id FROM usage_records ORDER BY id DESC LIMIT 50")]
             by_model = [dict(r) for r in conn.execute("SELECT model, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY model ORDER BY estimated_cost_usd DESC")]
             by_ip = [dict(r) for r in conn.execute("SELECT COALESCE(client_ip,'unknown') client_ip, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY client_ip ORDER BY requests DESC")]
-        return {"totals": dict(totals), "recent": recent, "by_model": by_model, "by_ip": by_ip, "keys": self.list_keys()}
+            daily = [dict(r) for r in conn.execute("SELECT substr(timestamp,1,10) day, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY substr(timestamp,1,10) ORDER BY day DESC LIMIT 14")]
+        return {"totals": dict(totals), "recent": recent, "by_model": by_model, "by_ip": by_ip, "daily": list(reversed(daily)), "keys": self.list_keys(), "blocked_ips": self.list_blocked_ips()}
 
     def key_usage(self, key_id: int):
         with self.connect() as conn:
             row = conn.execute("SELECT COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records WHERE provider_key_id=?", (key_id,)).fetchone()
         return dict(row)
+
+    def is_ip_blocked(self, ip: str | None) -> bool:
+        if not ip:
+            return False
+        with self.connect() as conn:
+            row = conn.execute("SELECT expires_at FROM blocked_ips WHERE ip=?", (ip,)).fetchone()
+            if not row:
+                return False
+            if row["expires_at"] and row["expires_at"] <= now_iso():
+                conn.execute("DELETE FROM blocked_ips WHERE ip=?", (ip,))
+                return False
+            return True
+
+    def list_blocked_ips(self):
+        with self.connect() as conn:
+            return [dict(row) for row in conn.execute("SELECT ip, reason, created_at, expires_at FROM blocked_ips ORDER BY created_at DESC")]
+
+    def block_ip(self, ip: str, reason: str, expires_at: str | None = None):
+        with self.connect() as conn:
+            conn.execute("INSERT INTO blocked_ips(ip,reason,created_at,expires_at) VALUES(?,?,?,?) ON CONFLICT(ip) DO UPDATE SET reason=excluded.reason, expires_at=excluded.expires_at", (ip, reason, now_iso(), expires_at))
+
+    def unblock_ip(self, ip: str):
+        with self.connect() as conn:
+            conn.execute("DELETE FROM blocked_ips WHERE ip=?", (ip,))
