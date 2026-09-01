@@ -127,6 +127,18 @@ def test_key_policy_can_require_approval_and_limit_models(client):
     assert response.status_code == 404
 
 
+@respx.mock
+def test_zero_key_rpm_means_unlimited_not_inherit_global_limit(client):
+    test_client, settings, db = client
+    settings.rate_limit_requests_per_minute = 1
+    raw_key, metadata = db.create_key("unlimited-rpm")
+    test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"requests_per_minute": 0})
+    respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}))
+    payload = {"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]}
+    assert test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json=payload).status_code == 200
+    assert test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json=payload).status_code == 200
+
+
 def test_chat_rejects_non_allowlisted_model_without_upstream(client):
     test_client, _, db = client
     raw_key, _ = db.create_key("test")
