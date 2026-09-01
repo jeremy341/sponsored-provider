@@ -507,3 +507,111 @@ Add routing fields to the existing key policy editor:
 ### Recommended operating posture
 
 Keep Alibaba as the first profile and use the custom provider URL for all clients. Add other providers only when their official API compatibility, pricing, terms, and secret-management path are verified. This preserves one stable client interface while keeping upstream choice under operator control.
+
+## 17. Sponsored access mode
+
+### Goal
+
+Allow the operator to add one upstream credential, create a separate limited client key for a recipient, and give that recipient a stable provider endpoint:
+
+```text
+Provider URL: https://your-provider-host/v1
+Client key:   sp_sk_recipient...
+Model:        operator-approved model
+```
+
+The recipient never receives the upstream OpenCode Go, Alibaba, or other provider credential. The provider key is the only credential they use.
+
+### OpenCode Go compatibility
+
+OpenCode Go currently exposes OpenAI-compatible endpoints for its listed models, and OpenCode supports custom OpenAI-compatible providers configured with a base URL and model IDs. That makes it technically suitable for an upstream profile. Compatibility does not establish permission to share or resell a subscription credential; before enabling it, verify the current OpenCode Go terms, account limits, and whether proxying usage to another person is allowed.
+
+### Recipient policy
+
+Each sponsored client key should have an explicit policy:
+
+```text
+enabled / disabled / revoked
+risk_profile: strict | standard | trusted
+risk_approved: true | false
+allowed_upstreams: [profile ids]
+allowed_models: [model ids or aliases]
+spend_limit_usd
+token_limit
+requests_per_minute
+requests_per_day
+expires_at
+allowed_ips / blocked_ips (optional)
+```
+
+Use conservative defaults: pending approval, one model, one upstream, low RPM, low token cap, short expiry, and no tool/search/image/video capability unless explicitly enabled.
+
+### Request decision order
+
+```text
+client request
+  -> source IP block check
+  -> provider-key lookup
+  -> enabled/revoked/approval check
+  -> key expiry check
+  -> key model/upstream policy check
+  -> key RPM/day/token/spend check
+  -> global budget and emergency-stop check
+  -> upstream profile health check
+  -> upstream request
+  -> usage/cost/audit record
+```
+
+Every rejection should be cheap and happen before an upstream call. Every accepted request should record provider key ID, upstream profile ID, model ID, client IP as observed at the trusted edge, timestamps, latency, status, and reported usage. Never record prompts by default.
+
+### Stable endpoint and client setup
+
+The recipient configures one custom provider, for example in OpenCode:
+
+```json
+{
+  "provider": {
+    "sponsored": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Sponsored Provider",
+      "options": { "baseURL": "https://your-provider-host/v1" },
+      "models": { "approved-model": { "name": "Approved Model" } }
+    }
+  }
+}
+```
+
+The recipient stores only the issued provider key in their client. The server maps `approved-model` to the configured upstream model. If the key is disabled, expired, over limit, or the IP is blocked, the endpoint returns a stable policy error without touching the upstream.
+
+### Dashboard screens for sponsored access
+
+Add these views to the dashboard:
+
+1. `Overview` — global spend, request rate, token rate, hard stop, warning state, and upstream health.
+2. `Sponsored keys` — recipient label, masked key, approval/risk badge, expiry, limits, current usage, last use, and actions.
+3. `Key policy editor` — upstream/model selection, spend, token, RPM/day, expiry, IP restrictions, approval, and revoke.
+4. `Usage explorer` — time range, key, upstream, model, IP, status, and stream filters; daily/hourly charts; exportable metadata only.
+5. `Abuse & blocks` — blocked IPs, reason, timestamps, request/error counts, and unblock action.
+6. `Upstreams` — credential status without revealing secrets, model catalog, prices, health, and routing priority.
+
+### Budget behavior
+
+Use two ceilings:
+
+- **Per-key ceiling:** stops that recipient's key.
+- **Global ceiling:** stops all sponsored keys before the upstream coupon/account budget is at risk.
+
+Use a warning threshold and reserve. Do not authorize a request when its worst-case estimated input plus `max_tokens` plus reserve would cross either ceiling. Reconcile against delayed upstream billing separately; local estimates are the pre-call control, not proof of the final bill.
+
+### Fallback policy
+
+Do not silently move a recipient from OpenCode Go to Alibaba or another provider. If fallback is later enabled, it must be an explicit per-key policy with separate model compatibility, price, privacy, and budget checks. Never fallback on authentication, model policy, quota, or abuse blocks; only clearly transient upstream failures may qualify.
+
+### Rollout stages
+
+1. Add one upstream profile and one recipient key.
+2. Test model discovery and a mocked request through the stable `/v1` endpoint.
+3. Enable strict policy with a small spend/token/RPM cap and short expiry.
+4. Observe usage, IPs, errors, and upstream billing.
+5. Add a second profile only after attribution and emergency stop are reliable.
+6. Add optional fallback only after explicit operator review and per-key opt-in.
