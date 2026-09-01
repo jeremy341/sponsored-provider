@@ -97,7 +97,13 @@ async def admin_keys(x_admin_token: str | None = Header(default=None), settings:
 async def admin_create_key(request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
     require_admin(x_admin_token, settings)
     payload = await request.json()
-    raw, metadata = db.create_key(str(payload.get("label") or "client"))
+    policy = {field: payload[field] for field in ("spend_limit_usd", "requests_per_minute", "token_limit", "allowed_models", "allowed_upstreams", "risk_profile", "risk_approved") if field in payload}
+    for field in ("spend_limit_usd", "requests_per_minute", "token_limit"):
+        if field in policy and policy[field] is not None and (not isinstance(policy[field], (int, float)) or policy[field] < 0):
+            raise ProviderError(f"{field} must be a non-negative number or null.", "invalid_key_policy", 400)
+    if policy.get("risk_profile") not in (None, "strict", "standard", "trusted"):
+        raise ProviderError("risk_profile must be strict, standard, or trusted.", "invalid_key_policy", 400)
+    raw, metadata = db.create_key(str(payload.get("label") or "client"), policy)
     return {"key": raw, **metadata}
 
 
