@@ -44,6 +44,7 @@ function render(data) {
   setStatus(stopped ? "stopped" : "live", stopped ? "stopped" : "live");
   $("#signal-title").textContent = stopped ? "Provider stopped" : (used >= Number(budget.warning_usd || 25) ? "Approaching limit" : "Within guardrails");
   $("#signal-copy").textContent = stopped ? "New requests are blocked until an operator resumes the provider." : "Requests are accepted only for allowlisted models and tracked against the local budget.";
+  $("#billing-source").textContent = data.billing?.reconciled ? `Billing source: ${data.billing.source}` : "Billing source: local estimate · reconcile upstream before final accounting";
   $("#requests").textContent = number(totals.requests); $("#tokens").textContent = number(totals.total_tokens); $("#input").textContent = number(totals.input_tokens); $("#output").textContent = number(totals.output_tokens);
   $("#quick-activity").innerHTML = activityRows(data.recent, true); $("#activity").innerHTML = activityRows(data.recent); $("#updated").textContent = `updated ${new Date().toLocaleTimeString()}`;
   $("#models").innerHTML = data.by_model?.length ? data.by_model.map((item) => `<div class="model-row"><div><span class="model-name">${item.model}</span><span class="row-meta">${number(item.requests)} requests · ${number(item.total_tokens)} tokens</span></div><div class="row-cost">${money(item.estimated_cost_usd)}</div></div>`).join("") : '<p class="empty">No usage recorded yet.</p>';
