@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     allowed_models: str = ""
     database_path: str = "./provider.db"
     provider_key_pepper: str = ""
+    provider_secret_key: str = ""
     admin_token: str = ""
     max_request_bytes: int = 1_048_576
     max_input_chars: int = 50_000

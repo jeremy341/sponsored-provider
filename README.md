@@ -25,6 +25,10 @@ python -m app.cli keys create --label local-client
 
 The key is shown once. Do not commit `.env`, the database, or any real credentials.
 
+## Provider profiles
+
+Set `PROVIDER_SECRET_KEY` once in the server environment. It encrypts upstream credentials stored by the dashboard. After that bootstrap step, use the `Upstreams` tab to add providers with a name, base URL, API key, model discovery, and health check. Provider secrets are never returned by the API.
+
 ## Safety status
 
 The server does not call Alibaba at startup. Tests use mocked HTTP responses. Configure `ALLOWED_MODELS` and official input/output prices before making live calls. The dashboard reports local estimated usage, not a replacement for Alibaba's delayed billing view.

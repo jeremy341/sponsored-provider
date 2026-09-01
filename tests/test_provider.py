@@ -80,6 +80,22 @@ def test_admin_can_load_models_from_private_upstream_key(client):
     assert route.called
 
 
+@respx.mock
+def test_admin_can_add_encrypted_upstream_profile_and_sync_models(client):
+    test_client, settings, _ = client
+    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "OpenAI test", "provider_kind": "openai", "base_url": "https://provider.example/v1", "api_key": "upstream-secret"})
+    assert created.status_code == 200
+    profile_id = created.json()["id"]
+    listed = test_client.get("/api/admin/upstreams", headers={"X-Admin-Token": "admin"})
+    assert listed.status_code == 200
+    assert listed.json()["upstreams"][0]["secret_configured"] is True
+    assert "upstream-secret" not in listed.text
+    respx.get("https://provider.example/v1/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "gpt-test"}]}))
+    synced = test_client.get(f"/api/admin/upstream-models?profile_id={profile_id}", headers={"X-Admin-Token": "admin"})
+    assert synced.status_code == 200
+    assert synced.json()["models"] == ["gpt-test"]
+
+
 def test_admin_can_block_client_ip_before_key_validation(client):
     test_client, _, db = client
     raw_key, _ = db.create_key("blocked-client")
