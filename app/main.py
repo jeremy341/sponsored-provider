@@ -190,7 +190,7 @@ async def admin_upstream_models(profile_id: str | None = None, x_admin_token: st
     items = payload.get("data", payload if isinstance(payload, list) else [])
     model_ids = sorted({item.get("id") for item in items if isinstance(item, dict) and item.get("id")})
     if resolved_id != "configured":
-        db.update_upstream_models(resolved_id, model_ids, "healthy")
+        db.update_upstream_models(resolved_id, model_ids, "healthy" if model_ids else "empty_catalog")
     return {"profile_id": resolved_id, "models": model_ids}
 
 
@@ -218,6 +218,19 @@ async def admin_create_upstream(request: Request, x_admin_token: str | None = He
     except ValueError as exc:
         raise ProviderError(str(exc), "secret_storage_not_configured", 503) from exc
     return profile
+
+
+@app.post("/api/admin/upstreams/{profile_id}")
+async def admin_update_upstream(profile_id: str, request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    payload = await request.json()
+    base_url = str(payload.get("base_url", "")).strip().rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+        raise ProviderError("Provider base URL must be a public HTTPS URL.", "invalid_upstream", 400)
+    with db.connect() as conn:
+        conn.execute("UPDATE upstream_profiles SET base_url=? WHERE id=?", (base_url, profile_id))
+    return {"ok": True, "profile_id": profile_id, "base_url": base_url}
 
 
 @app.get("/api/admin/blocked-ips")
