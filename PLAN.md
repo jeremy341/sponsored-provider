@@ -1,10 +1,10 @@
 # Sponsored Alibaba Cloud Provider — Delivery Plan
 
-> Terminology: this plan assumes **Hack Club Nest**, not Heroku. Nest is Hack Club's Linux hosting service. The project will use GitHub as the source repository, Figma as the design/specification workspace, and SSH for deployment/operations.
+> Terminology: this plan assumes **Hack Club Nest**, not Heroku. Nest is Hack Club's Linux hosting service. The project will use GitHub as the source repository and SSH for deployment/operations.
 
 ## 1. Goal
 
-Run a small OpenAI-compatible provider on Hack Club Nest that uses the owner's Alibaba Cloud Model Studio account, keeps the Alibaba credential private, and allows an explicitly approved student client such as CamberCloud Chat to use an allowlisted model.
+Run a small OpenAI-compatible provider on Hack Club Nest that uses the owner's Alibaba Cloud Model Studio account, keeps the Alibaba credential private, and allows explicitly approved clients to use an allowlisted model.
 
 The provider is a controlled proxy, not a billing system. The $40 coupon remains attached to the Alibaba account. The service must stop or reject traffic before the account can create unexpected paid charges.
 
@@ -23,7 +23,7 @@ Do not sell, transfer, or represent the coupon as transferable credit. Alibaba's
 ## 3. Recommended topology
 
 ```text
-CamberCloud / approved OpenAI client
+Approved OpenAI-compatible client
               |
       HTTPS + provider API key
               |
@@ -51,13 +51,13 @@ Start with one Python modular monolith and one CLI. Use SQLite for the first sin
 - Caddy or Nginx for TLS if Nest networking requires a reverse proxy
 - systemd user service or the hosting platform's documented process supervisor
 
-Rejected for v1: Kubernetes, Docker orchestration, Redis, Postgres, a multi-provider abstraction, and a custom dashboard. They increase operational surface without helping the first safety and integration milestones.
+Rejected for v1: Kubernetes, Docker orchestration, Redis, Postgres, a multi-provider abstraction, and a separate dashboard service. They increase operational surface without helping the first safety and integration milestones.
 
 ## 3A. Dashboard-first product plan
 
-Skip Figma. The first interface is the working `/dashboard` page served by the provider itself. It shows local usage, estimated cost, budget remaining, request activity, model breakdown, and provider-key state. The dashboard is operational rather than decorative: every displayed number comes from the SQLite usage ledger or current configuration.
+The first interface is the working `/dashboard` page served by the provider itself. It shows local usage, estimated cost, budget remaining, request activity, model breakdown, and provider-key state. The dashboard is operational rather than decorative: every displayed number comes from the SQLite usage ledger or current configuration.
 
-The dashboard is read-only in v1. Key creation, enable, disable, and revoke remain CLI/admin-token operations until the authentication boundary has been tested in deployment.
+The dashboard is read-only for usage data in the current slice. Key creation, enable, disable, and revoke are available through CLI/admin-token operations; the next dashboard slice can expose those same operations behind a protected admin session.
 
 ## 3B. GitHub repository plan
 
@@ -165,7 +165,7 @@ Deleting an Alibaba API key is irreversible, so it must be documented as emergen
 
 ### What “stop the key” means
 
-Normal stop: disable the provider key in SQLite. This blocks CamberCloud immediately while preserving the Alibaba credential for investigation.
+Normal stop: disable the provider key in SQLite. This blocks the client immediately while preserving the Alibaba credential for investigation.
 
 Emergency stop: set `EMERGENCY_STOP=true`, stop the systemd service, and disable or delete the dedicated Alibaba API key in Alibaba's console. This is used for leakage, unexpected traffic, or billing anomalies—not merely normal quota exhaustion.
 
@@ -178,7 +178,7 @@ For v1, run a manual billing check at least daily during the pilot. A later vers
 ### Secrets
 
 - Alibaba API key exists only in a protected `.env`/secret store on Nest.
-- Never put it in CamberCloud settings, source control, reports, issue posts, or logs.
+- Never put it in client settings, source control, reports, issue posts, or logs.
 - Create a separate provider key for each approved client/person.
 - Show each provider key only once; store only its hash and a short prefix.
 - Rotate the Alibaba key if it is ever exposed.
@@ -304,9 +304,9 @@ Forward SSE chunks incrementally, record final/interrupted/failed status, close 
 
 Deploy from a tagged GitHub commit over SSH on Hack Club Nest, restrict inbound access where possible, terminate TLS, run as a non-root/dedicated user, protect the database and `.env`, configure systemd restart behavior, and test reboot/recovery. Do not expose an admin route.
 
-### Phase 6 — CamberCloud integration
+### Phase 6 — Client integration
 
-First identify whether CamberCloud supports a custom OpenAI-compatible base URL, model name, API key, and streaming. If it does, configure it with the provider URL and the dedicated provider key. If it does not, do not attempt to scrape or impersonate the chat UI; use a documented API/integration path or treat CamberCloud as a manual client.
+Configure any approved OpenAI-compatible client with the provider URL, a dedicated provider key, and the selected allowlisted model. Do not couple the provider to a named client or scrape an undocumented UI.
 
 ## 10. Verification checklist
 
@@ -350,7 +350,7 @@ Keep a small change log for model allowlist, quotas, provider keys, and deployme
 | Client sends expensive requests | high output limits, long prompts, unexpected model IDs | allowlist, caps, rate limits, per-key quotas |
 | Alibaba key leaks | key appears in logs, client config, or repo | redaction, secret rotation, provider-only credential |
 | Nest service is publicly abused | unfamiliar key use or traffic spike | unique keys, low quotas, TLS, access restriction, emergency stop |
-| CamberCloud lacks custom provider support | no base URL/API-key settings or documented API | validate first; do not automate against undocumented UI |
+| Client lacks custom provider support | no base URL/API-key settings or documented API | validate first; do not automate against undocumented UI |
 | Single SQLite process becomes a bottleneck | lock errors or multiple replicas | remain single-instance; migrate to Postgres/Redis only with evidence |
 
 ## 13. Success metrics for the pilot
@@ -367,12 +367,39 @@ Keep a small change log for model allowlist, quotas, provider keys, and deployme
 ## 14. Immediate next actions
 
 1. Confirm the Alibaba coupon's exact eligible Model Studio products/models and expiration.
-2. Confirm CamberCloud's supported custom-provider/API settings from its student documentation or account UI.
+2. Confirm the approved client's supported custom-provider/API settings from its documentation or account UI.
 3. Choose a Nest hostname, TLS approach, and private access policy.
 4. Implement Phases 0–2 with mocks.
 5. Run discovery only and review `results/models.md`.
 6. Pause for explicit approval before any paid probe.
 7. Select one eligible model, set a conservative budget, and run a one-key private pilot.
+
+## 14A. Dashboard access and next UI slice
+
+### Private local-browser access through Nest
+
+Keep Uvicorn bound to `127.0.0.1:8000` on Nest. From the owner's computer, create an SSH tunnel:
+
+```bash
+ssh -N -L 8000:127.0.0.1:8000 nest-user@your-nest-host
+```
+
+Then open `http://127.0.0.1:8000/dashboard` in a local browser. The browser is local, but traffic is carried through the encrypted SSH connection to the Nest service. This is the recommended first operating mode because the admin dashboard is not exposed to the public internet.
+
+### Optional public access
+
+Only after the private tunnel works, add a Nest hostname, HTTPS reverse proxy, and an additional access boundary. The dashboard API must remain admin-token protected; do not expose the admin token in a URL, source code, or client API key.
+
+### Dashboard information architecture
+
+The dashboard should have four focused areas:
+
+1. `Overview` — current requests/minute, requests today, input/output/total tokens, estimated spend, remaining hard-stop budget, warning threshold, and live service status.
+2. `Activity` — recent request ledger with time, model, duration, status, stream flag, tokens, and estimated cost; no prompt content.
+3. `Keys` — create a key with a label, show the raw key exactly once, list masked prefixes, set per-key request/token budgets, disable/enable, and permanently revoke.
+4. `Models & safeguards` — show allowlisted models, set the selected model's official input/output prices, configure warning/hard-stop values, toggle emergency stop, and show the last billing reconciliation time.
+
+The page should refresh operational metrics every 10 seconds and show a clear `local estimate` label until Alibaba billing reconciliation is connected. Mutating controls require a separate confirmation and an audit entry. The first interactive dashboard slice should implement key creation, disable/enable, and emergency stop; model pricing and allowlist editing should remain owner-only configuration until tested.
 
 ## 15. Explicitly out of scope for v1
 
