@@ -104,16 +104,17 @@ class Database:
     def digest(self, raw_key: str) -> str:
         return hashlib.sha256((self.pepper + raw_key).encode()).hexdigest()
 
-    def create_key(self, label: str) -> tuple[str, dict]:
+    def create_key(self, label: str, policy: dict | None = None) -> tuple[str, dict]:
         raw = "sp_sk_" + secrets.token_urlsafe(32)
         created = now_iso()
+        policy = policy or {}
         with self.connect() as conn:
             cur = conn.execute(
-                "INSERT INTO provider_api_keys(key_prefix,key_hash,label,created_at) VALUES(?,?,?,?)",
-                (raw[:14], self.digest(raw), label, created),
+                "INSERT INTO provider_api_keys(key_prefix,key_hash,label,created_at,spend_limit_usd,requests_per_minute,token_limit,allowed_models,allowed_upstreams,risk_profile,risk_approved) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (raw[:14], self.digest(raw), label, created, policy.get("spend_limit_usd"), policy.get("requests_per_minute"), policy.get("token_limit"), policy.get("allowed_models", ""), policy.get("allowed_upstreams", ""), policy.get("risk_profile", "standard"), int(policy.get("risk_approved", True))),
             )
             key_id = cur.lastrowid
-        return raw, {"id": key_id, "key_prefix": raw[:14], "label": label, "created_at": created, "enabled": True, "risk_profile": "standard", "risk_approved": True}
+        return raw, {"id": key_id, "key_prefix": raw[:14], "label": label, "created_at": created, "enabled": True, "risk_profile": policy.get("risk_profile", "standard"), "risk_approved": bool(policy.get("risk_approved", True))}
 
     def find_key(self, raw_key: str):
         with self.connect() as conn:

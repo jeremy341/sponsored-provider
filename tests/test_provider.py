@@ -34,6 +34,12 @@ def test_admin_can_create_and_disable_provider_key(client):
     assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 401
 
 
+def test_key_creation_accepts_policy_atomically(client):
+    test_client, _, _ = client
+    response = test_client.post("/api/admin/keys", headers={"X-Admin-Token": "admin"}, json={"label": "atomic", "allowed_upstreams": "provider-1", "allowed_models": "model-a, model-b", "spend_limit_usd": 35, "requests_per_minute": 0, "token_limit": 0, "risk_approved": True})
+    assert response.status_code == 200
+
+
 def test_admin_can_revoke_key_permanently(client):
     test_client, _, db = client
     raw_key, metadata = db.create_key("revoke-me")
