@@ -29,6 +29,15 @@ def test_admin_can_create_and_disable_provider_key(client):
     assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 401
 
 
+def test_admin_can_revoke_key_permanently(client):
+    test_client, _, db = client
+    raw_key, metadata = db.create_key("revoke-me")
+    response = test_client.post(f"/api/admin/keys/{metadata['id']}/revoke", headers={"X-Admin-Token": "admin"})
+    assert response.status_code == 200
+    assert db.find_key(raw_key)["revoked_at"] is not None
+    assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 401
+
+
 def test_models_requires_key_and_returns_allowlist(client):
     test_client, _, db = client
     raw_key, _ = db.create_key("test")
@@ -47,6 +56,17 @@ def test_dashboard_page_and_static_assets_are_served(client):
     test_client, _, _ = client
     assert test_client.get("/dashboard").status_code == 200
     assert test_client.get("/static/style.css").status_code == 200
+
+
+def test_admin_can_update_guardrails_and_emergency_stop(client):
+    test_client, settings, _ = client
+    response = test_client.post("/api/admin/config", headers={"X-Admin-Token": "admin"}, json={"allowed_models": "qwen-a, qwen-b", "provider_hard_stop_usd": 35, "rate_limit_requests_per_minute": 4})
+    assert response.status_code == 200
+    assert settings.model_allowlist == {"qwen-a", "qwen-b"}
+    assert settings.rate_limit_requests_per_minute == 4
+    stopped = test_client.post("/api/admin/config", headers={"X-Admin-Token": "admin"}, json={"emergency_stop": True})
+    assert stopped.json()["config"]["emergency_stop"] is True
+    assert test_client.get("/health").json()["ok"] is False
 
 
 @respx.mock

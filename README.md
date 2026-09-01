@@ -15,6 +15,8 @@ uvicorn app.main:app --reload
 
 Open http://127.0.0.1:8000/dashboard for the usage dashboard.
 
+The dashboard accepts the `ADMIN_TOKEN` in its unlock field. It can create one-time provider keys, disable/enable/revoke keys, update the in-process model/budget/rate settings, and trigger or clear the emergency stop. For Nest, keep the service on localhost and use an SSH tunnel so the dashboard is available in your local browser without public admin exposure.
+
 Create a provider key locally:
 
 ```bash
@@ -35,3 +37,4 @@ The server does not call Alibaba at startup. Tests use mocked HTTP responses. Co
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `GET/POST /api/admin/keys` with `X-Admin-Token`
+- `POST /api/admin/keys/{id}/disable|enable|revoke` with `X-Admin-Token`

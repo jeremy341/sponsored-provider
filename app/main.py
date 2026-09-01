@@ -59,7 +59,7 @@ async def dashboard_data(x_admin_token: str | None = Header(default=None), db: D
     require_admin(x_admin_token, settings)
     summary = db.usage_summary()
     used = float(summary["totals"]["estimated_cost_usd"])
-    return {"budget": {"hard_stop_usd": settings.provider_hard_stop_usd, "warning_usd": settings.provider_warning_usd, "used_usd": used, "remaining_usd": max(0, settings.provider_hard_stop_usd - used), "percent": min(100, used / settings.provider_hard_stop_usd * 100 if settings.provider_hard_stop_usd else 0)}, "stopped": settings.emergency_stop or used >= settings.provider_hard_stop_usd, **summary}
+    return {"budget": {"hard_stop_usd": settings.provider_hard_stop_usd, "warning_usd": settings.provider_warning_usd, "used_usd": used, "remaining_usd": max(0, settings.provider_hard_stop_usd - used), "percent": min(100, used / settings.provider_hard_stop_usd * 100 if settings.provider_hard_stop_usd else 0)}, "stopped": settings.emergency_stop or used >= settings.provider_hard_stop_usd, "config": {"allowed_models": sorted(settings.model_allowlist), "input_price_per_million": settings.input_price_per_million, "output_price_per_million": settings.output_price_per_million, "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute}, **summary}
 
 
 @app.get("/api/admin/keys")
@@ -88,6 +88,36 @@ async def admin_enable_key(key_id: int, x_admin_token: str | None = Header(defau
     require_admin(x_admin_token, settings)
     db.set_key_state(key_id, True)
     return {"ok": True, "id": key_id, "enabled": True}
+
+
+@app.post("/api/admin/keys/{key_id}/revoke")
+async def admin_revoke_key(key_id: int, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    db.set_key_state(key_id, False, revoke=True)
+    return {"ok": True, "id": key_id, "revoked": True}
+
+
+@app.post("/api/admin/config")
+async def admin_config(request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
+    require_admin(x_admin_token, settings)
+    payload = await request.json()
+    if "allowed_models" in payload:
+        models_value = payload["allowed_models"]
+        if not isinstance(models_value, str):
+            raise ProviderError("allowed_models must be a comma-separated string.", "invalid_config", 400)
+        settings.allowed_models = models_value
+    for field in ("provider_hard_stop_usd", "provider_warning_usd", "input_price_per_million", "output_price_per_million", "rate_limit_requests_per_minute"):
+        if field in payload:
+            try:
+                value = float(payload[field]) if field != "rate_limit_requests_per_minute" else int(payload[field])
+            except (TypeError, ValueError) as exc:
+                raise ProviderError(f"{field} must be numeric.", "invalid_config", 400) from exc
+            if value < 0:
+                raise ProviderError(f"{field} cannot be negative.", "invalid_config", 400)
+            setattr(settings, field, value)
+    if "emergency_stop" in payload:
+        settings.emergency_stop = bool(payload["emergency_stop"])
+    return {"ok": True, "config": {"allowed_models": sorted(settings.model_allowlist), "provider_hard_stop_usd": settings.provider_hard_stop_usd, "provider_warning_usd": settings.provider_warning_usd, "input_price_per_million": settings.input_price_per_million, "output_price_per_million": settings.output_price_per_million, "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute, "emergency_stop": settings.emergency_stop}}
 
 
 @app.get("/v1/models")
