@@ -109,6 +109,24 @@ def test_admin_can_add_encrypted_upstream_profile_and_sync_models(client):
     assert synced.json()["models"] == ["gpt-test"]
 
 
+def test_admin_can_store_model_specific_pricing(client):
+    test_client, _, _ = client
+    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "Priced", "provider_kind": "openai", "base_url": "https://provider.example/v1", "api_key": "secret"})
+    profile_id = created.json()["id"]
+    response = test_client.post(f"/api/admin/upstreams/{profile_id}/pricing", headers={"X-Admin-Token": "admin"}, json={"pricing": {"model-a": {"input": 0.1, "output": 0.2}}})
+    assert response.status_code == 200
+
+
+def test_budget_reservation_counts_active_requests(client):
+    _, _, db = client
+    reservation = db.reserve_budget(1, "provider", "model", 0.006, 100, 0.01, None)
+    assert reservation
+    blocked = db.reserve_budget(1, "provider", "model", 0.006, 100, 0.01, None)
+    assert blocked is None
+    db.finish_reservation(reservation)
+    assert db.reserve_budget(1, "provider", "model", 0.006, 100, 0.01, None)
+
+
 def test_admin_can_block_client_ip_before_key_validation(client):
     test_client, _, db = client
     raw_key, _ = db.create_key("blocked-client")

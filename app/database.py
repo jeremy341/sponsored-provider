@@ -82,7 +82,18 @@ class Database:
               models_json TEXT NOT NULL DEFAULT '[]',
               created_at TEXT NOT NULL,
               last_checked_at TEXT,
-              health_status TEXT NOT NULL DEFAULT 'unknown'
+              health_status TEXT NOT NULL DEFAULT 'unknown',
+              pricing_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS budget_reservations (
+              id TEXT PRIMARY KEY,
+              provider_key_id INTEGER NOT NULL,
+              upstream_profile_id TEXT,
+              model TEXT NOT NULL,
+              estimated_cost_usd REAL NOT NULL,
+              estimated_tokens REAL NOT NULL,
+              created_at TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'active'
             );
             """)
             for statement in (
@@ -95,6 +106,7 @@ class Database:
                 "ALTER TABLE provider_api_keys ADD COLUMN allowed_upstreams TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE provider_api_keys ADD COLUMN risk_profile TEXT NOT NULL DEFAULT 'standard'",
                 "ALTER TABLE provider_api_keys ADD COLUMN risk_approved INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE upstream_profiles ADD COLUMN pricing_json TEXT NOT NULL DEFAULT '{}'",
             ):
                 try:
                     conn.execute(statement)
@@ -145,7 +157,7 @@ class Database:
             with self.connect() as conn:
                 conn.execute(f"UPDATE provider_api_keys SET {', '.join(fields)} WHERE id=?", values)
 
-    def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, upstream_profile_id=None, error_category=None):
+    def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, upstream_profile_id=None, reservation_id=None, error_category=None):
         with self.connect() as conn:
             conn.execute(
                 "INSERT INTO usage_records(provider_key_id,timestamp,model,input_tokens,output_tokens,total_tokens,estimated_cost_usd,latency_ms,status,stream,error_category,client_ip,upstream_profile_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -155,6 +167,8 @@ class Database:
                 "UPDATE provider_api_keys SET request_count=request_count+1, estimated_cost_usd=estimated_cost_usd+?, last_used_at=? WHERE id=?",
                 (estimated_cost_usd, now_iso(), key_id),
             )
+            if reservation_id:
+                conn.execute("UPDATE budget_reservations SET status='released' WHERE id=? AND status='active'", (reservation_id,))
 
     def usage_summary(self):
         with self.connect() as conn:
@@ -182,7 +196,7 @@ class Database:
 
     def list_upstreams(self):
         with self.connect() as conn:
-            return [dict(row) | {"secret_configured": True, "models": json.loads(row["models_json"] or "[]")} for row in conn.execute("SELECT id,name,provider_kind,base_url,enabled,models_json,created_at,last_checked_at,health_status FROM upstream_profiles ORDER BY created_at")]
+            return [dict(row) | {"secret_configured": True, "models": json.loads(row["models_json"] or "[]"), "pricing": json.loads(row["pricing_json"] or "{}")} for row in conn.execute("SELECT id,name,provider_kind,base_url,enabled,models_json,created_at,last_checked_at,health_status,pricing_json FROM upstream_profiles ORDER BY created_at")]
 
     def get_upstream(self, profile_id: str):
         with self.connect() as conn:
@@ -191,6 +205,7 @@ class Database:
             return None
         data = dict(row)
         data["models"] = json.loads(data.pop("models_json") or "[]")
+        data["pricing"] = json.loads(data.pop("pricing_json") or "{}")
         if self.secret_box:
             data["api_key"] = self.secret_box.decrypt(data.pop("encrypted_api_key").encode()).decode()
         return data
@@ -198,6 +213,38 @@ class Database:
     def update_upstream_models(self, profile_id: str, models: list[str], health_status: str):
         with self.connect() as conn:
             conn.execute("UPDATE upstream_profiles SET models_json=?, last_checked_at=?, health_status=? WHERE id=?", (json.dumps(sorted(set(models))), now_iso(), health_status, profile_id))
+
+    def update_upstream_pricing(self, profile_id: str, pricing: dict):
+        with self.connect() as conn:
+            conn.execute("UPDATE upstream_profiles SET pricing_json=? WHERE id=?", (json.dumps(pricing), profile_id))
+
+    def model_pricing(self, profile_id: str | None, model: str, fallback_input: float, fallback_output: float):
+        if not profile_id or profile_id == "configured":
+            return fallback_input, fallback_output
+        profile = self.get_upstream(profile_id)
+        price = (profile or {}).get("pricing", {}).get(model, {})
+        return float(price.get("input", 0)), float(price.get("output", 0))
+
+    def reserve_budget(self, key_id: int, upstream_profile_id: str | None, model: str, estimated_cost_usd: float, estimated_tokens: float, global_limit: float, key_limit: float | None):
+        reservation_id = uuid.uuid4().hex
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            totals = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM usage_records").fetchone()[0]
+            active = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM budget_reservations WHERE status='active'").fetchone()[0]
+            key_used = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM usage_records WHERE provider_key_id=?", (key_id,)).fetchone()[0]
+            key_active = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM budget_reservations WHERE provider_key_id=? AND status='active'", (key_id,)).fetchone()[0]
+            if global_limit > 0 and totals + active + estimated_cost_usd >= global_limit:
+                return None
+            if key_limit is not None and key_limit > 0 and key_used + key_active + estimated_cost_usd >= key_limit:
+                return None
+            conn.execute("INSERT INTO budget_reservations(id,provider_key_id,upstream_profile_id,model,estimated_cost_usd,estimated_tokens,created_at) VALUES(?,?,?,?,?,?,?)", (reservation_id, key_id, upstream_profile_id, model, estimated_cost_usd, estimated_tokens, now_iso()))
+        return reservation_id
+
+    def finish_reservation(self, reservation_id: str | None):
+        if not reservation_id:
+            return
+        with self.connect() as conn:
+            conn.execute("UPDATE budget_reservations SET status='released' WHERE id=? AND status='active'", (reservation_id,))
 
     def set_upstream_state(self, profile_id: str, enabled: bool):
         with self.connect() as conn:
