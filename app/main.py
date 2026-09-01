@@ -105,23 +105,31 @@ async def admin_key_policy(key_id: int, request: Request, x_admin_token: str | N
     require_admin(x_admin_token, settings)
     payload = await request.json()
     values = {}
+    clear_fields = [field for field in payload.get("clear_fields", []) if field in {"spend_limit_usd", "requests_per_minute", "token_limit", "allowed_models"}] if isinstance(payload.get("clear_fields", []), list) else []
     for field in ("spend_limit_usd", "requests_per_minute", "token_limit"):
         if field in payload:
             value = payload[field]
+            if value is None:
+                clear_fields.append(field)
+                continue
             if value is not None and (not isinstance(value, (int, float)) or value < 0):
                 raise ProviderError(f"{field} must be a non-negative number or null.", "invalid_key_policy", 400)
             values[field] = value
     if "allowed_models" in payload:
         if not isinstance(payload["allowed_models"], str):
-            raise ProviderError("allowed_models must be a comma-separated string.", "invalid_key_policy", 400)
-        values["allowed_models"] = payload["allowed_models"]
+            if payload["allowed_models"] is None:
+                clear_fields.append("allowed_models")
+            else:
+                raise ProviderError("allowed_models must be a comma-separated string.", "invalid_key_policy", 400)
+        else:
+            values["allowed_models"] = payload["allowed_models"]
     if "risk_profile" in payload:
         if payload["risk_profile"] not in ("strict", "standard", "trusted"):
             raise ProviderError("risk_profile must be strict, standard, or trusted.", "invalid_key_policy", 400)
         values["risk_profile"] = payload["risk_profile"]
     if "risk_approved" in payload:
         values["risk_approved"] = bool(payload["risk_approved"])
-    db.update_key_policy(key_id, **values)
+    db.update_key_policy(key_id, clear_fields=clear_fields, **values)
     return {"ok": True, "id": key_id, "key": next((item for item in db.list_keys() if item["id"] == key_id), None)}
 
 

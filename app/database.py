@@ -109,10 +109,13 @@ class Database:
                 (int(enabled and not revoke), int(revoke), now_iso(), key_id),
             )
 
-    def update_key_policy(self, key_id: int, *, spend_limit_usd=None, requests_per_minute=None, token_limit=None, allowed_models=None, risk_profile=None, risk_approved=None):
+    def update_key_policy(self, key_id: int, *, spend_limit_usd=None, requests_per_minute=None, token_limit=None, allowed_models=None, risk_profile=None, risk_approved=None, clear_fields=None):
         fields, values = [], []
+        for name in clear_fields or []:
+            if name in {"spend_limit_usd", "requests_per_minute", "token_limit", "allowed_models", "risk_profile", "risk_approved"}:
+                fields.append(f"{name}=NULL")
         for name, value in (("spend_limit_usd", spend_limit_usd), ("requests_per_minute", requests_per_minute), ("token_limit", token_limit), ("allowed_models", allowed_models), ("risk_profile", risk_profile), ("risk_approved", risk_approved)):
-            if value is not None:
+            if value is not None and name not in (clear_fields or []):
                 fields.append(f"{name}=?")
                 values.append(value)
         if fields:
