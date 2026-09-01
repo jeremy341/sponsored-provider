@@ -1,6 +1,7 @@
 import json
 import ipaddress
 import time
+from urllib.parse import urlparse
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -19,7 +20,18 @@ rate_limiter = RateLimiter()
 
 
 def get_db(settings: Settings = Depends(get_settings)):
-    return Database(settings.database_path, settings.provider_key_pepper)
+    return Database(settings.database_path, settings.provider_key_pepper, settings.provider_secret_key)
+
+
+def upstream_client(profile_id: str | None, db: Database, settings: Settings):
+    if not profile_id or profile_id == "configured":
+        if not settings.alibaba_api_key:
+            raise ProviderError("No default upstream credential is configured.", "upstream_not_configured", 503)
+        return AlibabaClient(settings.normalized_base_url, settings.alibaba_api_key, settings.upstream_timeout_seconds), "configured"
+    profile = db.get_upstream(profile_id)
+    if not profile or not profile["enabled"]:
+        raise ProviderError("The selected upstream is unavailable.", "upstream_not_found", 404)
+    return AlibabaClient(profile["base_url"], profile["api_key"], settings.upstream_timeout_seconds), profile_id
 
 
 def provider_key(authorization: str | None, db: Database):
@@ -123,6 +135,10 @@ async def admin_key_policy(key_id: int, request: Request, x_admin_token: str | N
                 raise ProviderError("allowed_models must be a comma-separated string.", "invalid_key_policy", 400)
         else:
             values["allowed_models"] = payload["allowed_models"]
+    if "allowed_upstreams" in payload:
+        if not isinstance(payload["allowed_upstreams"], str):
+            raise ProviderError("allowed_upstreams must be a comma-separated string.", "invalid_key_policy", 400)
+        values["allowed_upstreams"] = payload["allowed_upstreams"]
     if "risk_profile" in payload:
         if payload["risk_profile"] not in ("strict", "standard", "trusted"):
             raise ProviderError("risk_profile must be strict, standard, or trusted.", "invalid_key_policy", 400)
@@ -157,14 +173,41 @@ async def admin_config(request: Request, x_admin_token: str | None = Header(defa
 
 
 @app.get("/api/admin/upstream-models")
-async def admin_upstream_models(x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
+async def admin_upstream_models(profile_id: str | None = None, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
     require_admin(x_admin_token, settings)
-    if not settings.alibaba_api_key:
-        raise ProviderError("Alibaba API credentials are not configured.", "upstream_not_configured", 503)
-    payload = await AlibabaClient(settings.normalized_base_url, settings.alibaba_api_key, settings.upstream_timeout_seconds).list_models()
+    client, resolved_id = upstream_client(profile_id, db, settings)
+    payload = await client.list_models()
     items = payload.get("data", payload if isinstance(payload, list) else [])
     model_ids = sorted({item.get("id") for item in items if isinstance(item, dict) and item.get("id")})
-    return {"models": model_ids}
+    if resolved_id != "configured":
+        db.update_upstream_models(resolved_id, model_ids, "healthy")
+    return {"profile_id": resolved_id, "models": model_ids}
+
+
+@app.get("/api/admin/upstreams")
+async def admin_upstreams(x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    profiles = db.list_upstreams()
+    if settings.alibaba_api_key:
+        profiles.insert(0, {"id": "configured", "name": "Configured environment upstream", "provider_kind": "configured", "base_url": settings.normalized_base_url, "enabled": True, "secret_configured": True, "models": sorted(settings.model_allowlist), "health_status": "configured"})
+    return {"upstreams": profiles}
+
+
+@app.post("/api/admin/upstreams")
+async def admin_create_upstream(request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    payload = await request.json()
+    name, provider_kind, base_url, api_key = (str(payload.get(field, "")).strip() for field in ("name", "provider_kind", "base_url", "api_key"))
+    parsed = urlparse(base_url)
+    if not name or not api_key or parsed.scheme != "https" or not parsed.netloc:
+        raise ProviderError("Provider name, HTTPS base URL, and API key are required.", "invalid_upstream", 400)
+    if parsed.hostname in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}:
+        raise ProviderError("Local upstream URLs are not allowed in provider profiles.", "invalid_upstream", 400)
+    try:
+        profile = db.create_upstream(name, provider_kind or "openai_compatible", base_url, api_key)
+    except ValueError as exc:
+        raise ProviderError(str(exc), "secret_storage_not_configured", 503) from exc
+    return profile
 
 
 @app.get("/api/admin/blocked-ips")
@@ -257,29 +300,30 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
         db.set_key_state(key["id"], False)
         raise ProviderError("The provider budget cannot safely accept this request.", "budget_exhausted", 429)
     payload["model"] = model
-    client = AlibabaClient(settings.normalized_base_url, settings.alibaba_api_key, settings.upstream_timeout_seconds)
+    upstream_ids = [item.strip() for item in (key["allowed_upstreams"] or "").split(",") if item.strip()]
+    client, upstream_id = upstream_client(upstream_ids[0] if upstream_ids else "configured", db, settings)
     if payload.get("stream"):
         async def stream_body():
             try:
                 async for chunk in client.stream_chat_completion(payload):
                     yield chunk
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True, client_ip=client_ip)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id)
             except ProviderError as exc:
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, client_ip=client_ip, error_category=exc.code)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, error_category=exc.code)
                 yield f'data: {json.dumps({"error": {"message": exc.message, "code": exc.code}})}\n\n'
         return StreamingResponse(stream_body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     started = time.perf_counter()
     try:
         body, latency = await client.chat_completion(payload)
     except ProviderError as exc:
-        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, error_category=exc.code)
+        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, error_category=exc.code)
         raise
     usage = body.get("usage") or {}
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
     estimated_cost = estimate_cost(input_tokens, output_tokens, settings)
-    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip)
+    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id)
     if db.usage_summary()["totals"]["estimated_cost_usd"] >= settings.provider_hard_stop_usd:
         db.set_key_state(key["id"], False)
     return body

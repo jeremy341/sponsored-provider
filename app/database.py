@@ -2,8 +2,12 @@ import hashlib
 import hmac
 import secrets
 import sqlite3
+import json
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+from cryptography.fernet import Fernet
 
 
 def now_iso() -> str:
@@ -11,9 +15,10 @@ def now_iso() -> str:
 
 
 class Database:
-    def __init__(self, path: str, pepper: str = ""):
+    def __init__(self, path: str, pepper: str = "", secret_key: str = ""):
         self.path = path
         self.pepper = pepper
+        self.secret_box = Fernet(secret_key.encode()) if secret_key else None
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.init_schema()
@@ -41,6 +46,7 @@ class Database:
               requests_per_minute INTEGER,
               token_limit INTEGER,
               allowed_models TEXT NOT NULL DEFAULT '',
+              allowed_upstreams TEXT NOT NULL DEFAULT '',
               risk_profile TEXT NOT NULL DEFAULT 'standard',
               risk_approved INTEGER NOT NULL DEFAULT 1
             );
@@ -57,6 +63,7 @@ class Database:
               status TEXT NOT NULL,
               stream INTEGER NOT NULL DEFAULT 0,
               error_category TEXT,
+              upstream_profile_id TEXT,
               FOREIGN KEY(provider_key_id) REFERENCES provider_api_keys(id)
             );
             CREATE TABLE IF NOT EXISTS blocked_ips (
@@ -65,13 +72,27 @@ class Database:
               created_at TEXT NOT NULL,
               expires_at TEXT
             );
+            CREATE TABLE IF NOT EXISTS upstream_profiles (
+              id TEXT PRIMARY KEY,
+              name TEXT NOT NULL,
+              provider_kind TEXT NOT NULL,
+              base_url TEXT NOT NULL,
+              encrypted_api_key TEXT NOT NULL,
+              enabled INTEGER NOT NULL DEFAULT 1,
+              models_json TEXT NOT NULL DEFAULT '[]',
+              created_at TEXT NOT NULL,
+              last_checked_at TEXT,
+              health_status TEXT NOT NULL DEFAULT 'unknown'
+            );
             """)
             for statement in (
                 "ALTER TABLE usage_records ADD COLUMN client_ip TEXT",
+                "ALTER TABLE usage_records ADD COLUMN upstream_profile_id TEXT",
                 "ALTER TABLE provider_api_keys ADD COLUMN spend_limit_usd REAL",
                 "ALTER TABLE provider_api_keys ADD COLUMN requests_per_minute INTEGER",
                 "ALTER TABLE provider_api_keys ADD COLUMN token_limit INTEGER",
                 "ALTER TABLE provider_api_keys ADD COLUMN allowed_models TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE provider_api_keys ADD COLUMN allowed_upstreams TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE provider_api_keys ADD COLUMN risk_profile TEXT NOT NULL DEFAULT 'standard'",
                 "ALTER TABLE provider_api_keys ADD COLUMN risk_approved INTEGER NOT NULL DEFAULT 1",
             ):
@@ -109,12 +130,12 @@ class Database:
                 (int(enabled and not revoke), int(revoke), now_iso(), key_id),
             )
 
-    def update_key_policy(self, key_id: int, *, spend_limit_usd=None, requests_per_minute=None, token_limit=None, allowed_models=None, risk_profile=None, risk_approved=None, clear_fields=None):
+    def update_key_policy(self, key_id: int, *, spend_limit_usd=None, requests_per_minute=None, token_limit=None, allowed_models=None, allowed_upstreams=None, risk_profile=None, risk_approved=None, clear_fields=None):
         fields, values = [], []
         for name in clear_fields or []:
-            if name in {"spend_limit_usd", "requests_per_minute", "token_limit", "allowed_models", "risk_profile", "risk_approved"}:
+            if name in {"spend_limit_usd", "requests_per_minute", "token_limit", "allowed_models", "allowed_upstreams", "risk_profile", "risk_approved"}:
                 fields.append(f"{name}=NULL")
-        for name, value in (("spend_limit_usd", spend_limit_usd), ("requests_per_minute", requests_per_minute), ("token_limit", token_limit), ("allowed_models", allowed_models), ("risk_profile", risk_profile), ("risk_approved", risk_approved)):
+        for name, value in (("spend_limit_usd", spend_limit_usd), ("requests_per_minute", requests_per_minute), ("token_limit", token_limit), ("allowed_models", allowed_models), ("allowed_upstreams", allowed_upstreams), ("risk_profile", risk_profile), ("risk_approved", risk_approved)):
             if value is not None and name not in (clear_fields or []):
                 fields.append(f"{name}=?")
                 values.append(value)
@@ -123,11 +144,11 @@ class Database:
             with self.connect() as conn:
                 conn.execute(f"UPDATE provider_api_keys SET {', '.join(fields)} WHERE id=?", values)
 
-    def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, error_category=None):
+    def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, upstream_profile_id=None, error_category=None):
         with self.connect() as conn:
             conn.execute(
-                "INSERT INTO usage_records(provider_key_id,timestamp,model,input_tokens,output_tokens,total_tokens,estimated_cost_usd,latency_ms,status,stream,error_category,client_ip) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                (key_id, now_iso(), model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, int(stream), error_category, client_ip),
+                "INSERT INTO usage_records(provider_key_id,timestamp,model,input_tokens,output_tokens,total_tokens,estimated_cost_usd,latency_ms,status,stream,error_category,client_ip,upstream_profile_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (key_id, now_iso(), model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, int(stream), error_category, client_ip, upstream_profile_id),
             )
             conn.execute(
                 "UPDATE provider_api_keys SET request_count=request_count+1, estimated_cost_usd=estimated_cost_usd+?, last_used_at=? WHERE id=?",
@@ -137,7 +158,7 @@ class Database:
     def usage_summary(self):
         with self.connect() as conn:
             totals = conn.execute("SELECT COUNT(*) requests, COALESCE(SUM(input_tokens),0) input_tokens, COALESCE(SUM(output_tokens),0) output_tokens, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records").fetchone()
-            recent = [dict(r) for r in conn.execute("SELECT timestamp, model, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip, provider_key_id FROM usage_records ORDER BY id DESC LIMIT 50")]
+            recent = [dict(r) for r in conn.execute("SELECT timestamp, model, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip, provider_key_id, upstream_profile_id FROM usage_records ORDER BY id DESC LIMIT 50")]
             by_model = [dict(r) for r in conn.execute("SELECT model, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY model ORDER BY estimated_cost_usd DESC")]
             by_ip = [dict(r) for r in conn.execute("SELECT COALESCE(client_ip,'unknown') client_ip, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY client_ip ORDER BY requests DESC")]
             daily = [dict(r) for r in conn.execute("SELECT substr(timestamp,1,10) day, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY substr(timestamp,1,10) ORDER BY day DESC LIMIT 14")]
@@ -147,6 +168,39 @@ class Database:
         with self.connect() as conn:
             row = conn.execute("SELECT COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records WHERE provider_key_id=?", (key_id,)).fetchone()
         return dict(row)
+
+    def create_upstream(self, name: str, provider_kind: str, base_url: str, api_key: str):
+        if not self.secret_box:
+            raise ValueError("PROVIDER_SECRET_KEY is not configured")
+        profile_id = uuid.uuid4().hex
+        created = now_iso()
+        encrypted = self.secret_box.encrypt(api_key.encode()).decode()
+        with self.connect() as conn:
+            conn.execute("INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,created_at) VALUES(?,?,?,?,?,?)", (profile_id, name, provider_kind, base_url.rstrip("/"), encrypted, created))
+        return {"id": profile_id, "name": name, "provider_kind": provider_kind, "base_url": base_url.rstrip("/"), "secret_configured": True, "enabled": True, "models": [], "created_at": created, "health_status": "unknown"}
+
+    def list_upstreams(self):
+        with self.connect() as conn:
+            return [dict(row) | {"secret_configured": True, "models": json.loads(row["models_json"] or "[]")} for row in conn.execute("SELECT id,name,provider_kind,base_url,enabled,models_json,created_at,last_checked_at,health_status FROM upstream_profiles ORDER BY created_at")]
+
+    def get_upstream(self, profile_id: str):
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM upstream_profiles WHERE id=?", (profile_id,)).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["models"] = json.loads(data.pop("models_json") or "[]")
+        if self.secret_box:
+            data["api_key"] = self.secret_box.decrypt(data.pop("encrypted_api_key").encode()).decode()
+        return data
+
+    def update_upstream_models(self, profile_id: str, models: list[str], health_status: str):
+        with self.connect() as conn:
+            conn.execute("UPDATE upstream_profiles SET models_json=?, last_checked_at=?, health_status=? WHERE id=?", (json.dumps(sorted(set(models))), now_iso(), health_status, profile_id))
+
+    def set_upstream_state(self, profile_id: str, enabled: bool):
+        with self.connect() as conn:
+            conn.execute("UPDATE upstream_profiles SET enabled=? WHERE id=?", (int(enabled), profile_id))
 
     def is_ip_blocked(self, ip: str | None) -> bool:
         if not ip:
