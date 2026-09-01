@@ -79,6 +79,17 @@ def test_admin_can_load_models_from_private_upstream_key(client):
     assert route.called
 
 
+def test_admin_can_block_client_ip_before_key_validation(client):
+    test_client, _, db = client
+    raw_key, _ = db.create_key("blocked-client")
+    response = test_client.post("/api/admin/blocked-ips", headers={"X-Admin-Token": "admin"}, json={"ip": "203.0.113.10", "reason": "abuse"})
+    assert response.status_code == 200
+    db.block_ip("testclient", "test abuse")
+    blocked = test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"})
+    assert blocked.status_code == 403
+    assert blocked.json()["error"]["code"] == "ip_blocked"
+
+
 @respx.mock
 def test_rate_limit_blocks_before_upstream(client):
     test_client, settings, db = client

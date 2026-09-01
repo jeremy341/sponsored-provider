@@ -1,4 +1,5 @@
 import json
+import ipaddress
 import time
 from pathlib import Path
 
@@ -158,16 +159,48 @@ async def admin_upstream_models(x_admin_token: str | None = Header(default=None)
     return {"models": model_ids}
 
 
+@app.get("/api/admin/blocked-ips")
+async def admin_blocked_ips(x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    return {"blocked_ips": db.list_blocked_ips()}
+
+
+@app.post("/api/admin/blocked-ips")
+async def admin_block_ip(request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    payload = await request.json()
+    ip = str(payload.get("ip", "")).strip()
+    reason = str(payload.get("reason", "manual operator block")).strip() or "manual operator block"
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError as exc:
+        raise ProviderError("Enter a valid IPv4 or IPv6 address.", "invalid_ip", 400)
+    db.block_ip(ip, reason)
+    return {"ok": True, "blocked_ips": db.list_blocked_ips()}
+
+
+@app.post("/api/admin/blocked-ips/{ip}/remove")
+async def admin_unblock_ip(ip: str, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    db.unblock_ip(ip)
+    return {"ok": True, "ip": ip}
+
+
 @app.get("/v1/models")
-async def models(settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
+async def models(request: Request, settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
+    client_ip = request.client.host if request.client else None
+    if db.is_ip_blocked(client_ip):
+        raise ProviderError("Requests from this IP address are blocked.", "ip_blocked", 403)
     provider_key(authorization, db)
     return {"object": "list", "data": [{"id": model, "object": "model", "owned_by": "sponsored-provider"} for model in sorted(settings.model_allowlist)]}
 
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request, settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
-    key = provider_key(authorization, db)
     client_ip = request.client.host if request.client else None
+    if db.is_ip_blocked(client_ip):
+        raise ProviderError("Requests from this IP address are blocked.", "ip_blocked", 403)
+    key = provider_key(authorization, db)
     if settings.emergency_stop:
         raise ProviderError("The provider is temporarily stopped.", "provider_stopped", 503)
     key_rate_limit = key["requests_per_minute"] or settings.rate_limit_requests_per_minute
