@@ -35,4 +35,3 @@ The server does not call Alibaba at startup. Tests use mocked HTTP responses. Co
 - `GET /v1/models`
 - `POST /v1/chat/completions`
 - `GET/POST /api/admin/keys` with `X-Admin-Token`
-
