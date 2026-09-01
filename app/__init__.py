@@ -1,0 +1,2 @@
+"""Sponsored provider application."""
+

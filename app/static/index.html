@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sponsored Provider / Usage</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar"><div><p class="eyebrow">SPONSORED PROVIDER / CONTROL ROOM</p><h1>Usage, before it becomes a surprise.</h1></div><div><div id="status" class="status"><span></span> loading</div><form id="auth" class="auth"><input id="admin-token" type="password" placeholder="operator token" aria-label="Operator token"><button>Unlock telemetry</button></form></div></header>
+    <section class="hero-grid">
+      <article class="budget-card"><div class="card-kicker">LIVE BUDGET</div><div class="budget-value" id="used">$0.00</div><div class="budget-sub">of <strong id="limit">$35.00</strong> hard stop</div><div class="rail"><i id="rail"></i><b id="marker"></b></div><div class="budget-foot"><span id="remaining">$35.00 remaining</span><span id="refresh">refreshing</span></div></article>
+      <article class="signal-card"><div class="card-kicker">OPERATING SIGNAL</div><div class="signal-title" id="signal-title">Waiting for telemetry</div><p id="signal-copy">The dashboard reads local provider records. Alibaba credentials never appear here.</p><div class="signal-meta"><span>warning at <strong>$25</strong></span><span>auto-refresh <strong>10s</strong></span></div></article>
+    </section>
+    <section class="metrics" aria-label="Usage metrics"><article><span>REQUESTS</span><strong id="requests">0</strong></article><article><span>TOTAL TOKENS</span><strong id="tokens">0</strong></article><article><span>INPUT TOKENS</span><strong id="input">0</strong></article><article><span>OUTPUT TOKENS</span><strong id="output">0</strong></article></section>
+    <section class="lower-grid"><article class="panel"><div class="panel-head"><div><p class="eyebrow">BREAKDOWN</p><h2>By model</h2></div><span class="tiny-label">ESTIMATED COST</span></div><div id="models" class="model-list"><p class="empty">No usage recorded yet.</p></div></article><article class="panel"><div class="panel-head"><div><p class="eyebrow">ACCESS</p><h2>Provider keys</h2></div><span class="tiny-label">HASHED / REVOCABLE</span></div><div id="keys" class="key-list"><p class="empty">No keys created yet.</p></div></article></section>
+    <section class="panel activity"><div class="panel-head"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>Request ledger</h2></div><span id="updated" class="tiny-label">—</span></div><div class="table-wrap"><table><thead><tr><th>TIME</th><th>MODEL</th><th>STATUS</th><th>TOKENS</th><th>COST</th></tr></thead><tbody id="activity"><tr><td colspan="5" class="empty">No requests recorded yet.</td></tr></tbody></table></div></section>
+  </main><script src="/static/app.js"></script>
+</body></html>
