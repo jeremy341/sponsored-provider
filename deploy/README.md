@@ -17,5 +17,4 @@ systemctl --user enable --now sponsored-provider
 systemctl --user status sponsored-provider
 ```
 
-Keep the service bound to localhost until TLS and access restrictions are configured. Never paste Alibaba credentials into GitHub, chat, or shell history.
-
+Keep the service bound to localhost on port 8090 until TLS and access restrictions are configured. Never paste Alibaba credentials into GitHub, chat, or shell history. This deployment is intentionally separate from any existing app on port 8080.
