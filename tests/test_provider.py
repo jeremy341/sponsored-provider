@@ -1,5 +1,9 @@
 import httpx
 import respx
+from app.config import Settings
+from pathlib import Path
+from shutil import rmtree
+from uuid import uuid4
 
 
 def test_health_never_needs_upstream(client):
@@ -166,6 +170,19 @@ def test_key_spend_cap_blocks_before_upstream_request(client):
     assert response.status_code == 429
     assert response.json()["error"]["code"] == "key_budget_exhausted"
     assert route.called is False
+
+
+def test_settings_bootstrap_generates_persistent_secrets():
+    test_dir = Path.cwd() / f".bootstrap-test-{uuid4().hex}"
+    test_dir.mkdir()
+    settings = Settings(database_path=str(test_dir / "provider.db"))
+    assert settings.admin_token
+    assert settings.provider_secret_key
+    assert settings.provider_key_pepper
+    assert (test_dir / "runtime-secrets.json").exists()
+    second = Settings(database_path=str(test_dir / "provider.db"))
+    assert second.admin_token == settings.admin_token
+    rmtree(test_dir, ignore_errors=True)
 
 
 def test_chat_rejects_non_allowlisted_model_without_upstream(client):

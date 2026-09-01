@@ -13,6 +13,8 @@ pytest
 uvicorn app.main:app --reload
 ```
 
+For a zero-configuration start, `.env` is optional. On first launch the app generates `runtime-secrets.json` beside the database (ignored by Git) and uses the saved values for dashboard authentication, upstream-secret encryption, and provider-key hashing. Keep that file private and persistent on Nest. You can then add providers from the `Upstreams` dashboard tab.
+
 Open http://127.0.0.1:8000/dashboard for the usage dashboard.
 
 The dashboard accepts the `ADMIN_TOKEN` in its unlock field. It can create one-time provider keys, disable/enable/revoke keys, update the in-process model/budget/rate settings, and trigger or clear the emergency stop. For Nest, keep the service on localhost and use an SSH tunnel so the dashboard is available in your local browser without public admin exposure.
