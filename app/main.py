@@ -27,6 +27,8 @@ def provider_key(authorization: str | None, db: Database):
     key = db.find_key(authorization[7:].strip())
     if not key or not key["enabled"] or key["revoked_at"]:
         raise ProviderError("The provider API key is invalid or disabled.", "invalid_api_key", 401)
+    if not key["risk_approved"]:
+        raise ProviderError("This provider API key is awaiting operator approval.", "key_not_approved", 403)
     return key
 
 
@@ -97,6 +99,31 @@ async def admin_revoke_key(key_id: int, x_admin_token: str | None = Header(defau
     return {"ok": True, "id": key_id, "revoked": True}
 
 
+@app.post("/api/admin/keys/{key_id}/policy")
+async def admin_key_policy(key_id: int, request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    payload = await request.json()
+    values = {}
+    for field in ("spend_limit_usd", "requests_per_minute", "token_limit"):
+        if field in payload:
+            value = payload[field]
+            if value is not None and (not isinstance(value, (int, float)) or value < 0):
+                raise ProviderError(f"{field} must be a non-negative number or null.", "invalid_key_policy", 400)
+            values[field] = value
+    if "allowed_models" in payload:
+        if not isinstance(payload["allowed_models"], str):
+            raise ProviderError("allowed_models must be a comma-separated string.", "invalid_key_policy", 400)
+        values["allowed_models"] = payload["allowed_models"]
+    if "risk_profile" in payload:
+        if payload["risk_profile"] not in ("strict", "standard", "trusted"):
+            raise ProviderError("risk_profile must be strict, standard, or trusted.", "invalid_key_policy", 400)
+        values["risk_profile"] = payload["risk_profile"]
+    if "risk_approved" in payload:
+        values["risk_approved"] = bool(payload["risk_approved"])
+    db.update_key_policy(key_id, **values)
+    return {"ok": True, "id": key_id, "key": next((item for item in db.list_keys() if item["id"] == key_id), None)}
+
+
 @app.post("/api/admin/config")
 async def admin_config(request: Request, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings)):
     require_admin(x_admin_token, settings)
@@ -129,11 +156,20 @@ async def models(settings: Settings = Depends(get_settings), authorization: str 
 @app.post("/v1/chat/completions")
 async def chat(request: Request, settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
     key = provider_key(authorization, db)
+    client_ip = request.client.host if request.client else None
     if settings.emergency_stop:
         raise ProviderError("The provider is temporarily stopped.", "provider_stopped", 503)
-    if not rate_limiter.allow(key["id"], settings.rate_limit_requests_per_minute):
+    key_rate_limit = key["requests_per_minute"] or settings.rate_limit_requests_per_minute
+    if not rate_limiter.allow(f"{db.path}:{key['id']}", key_rate_limit):
         raise ProviderError("Too many requests for this provider key.", "rate_limited", 429)
     used = db.usage_summary()["totals"]["estimated_cost_usd"]
+    key_usage = db.key_usage(key["id"])
+    if key["spend_limit_usd"] is not None and key_usage["estimated_cost_usd"] >= key["spend_limit_usd"]:
+        db.set_key_state(key["id"], False)
+        raise ProviderError("This provider key has reached its spend limit.", "key_budget_exhausted", 429)
+    if key["token_limit"] is not None and key_usage["total_tokens"] >= key["token_limit"]:
+        db.set_key_state(key["id"], False)
+        raise ProviderError("This provider key has reached its token limit.", "key_token_limit_exhausted", 429)
     if used >= settings.provider_hard_stop_usd:
         db.set_key_state(key["id"], False)
         raise ProviderError("The provider budget has been exhausted.", "budget_exhausted", 429)
@@ -145,7 +181,8 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     except json.JSONDecodeError as exc:
         raise ProviderError("Request body must be valid JSON.", "invalid_request", 400) from exc
     model = payload.get("model")
-    if model not in settings.model_allowlist:
+    key_models = {item.strip() for item in (key["allowed_models"] or "").split(",") if item.strip()}
+    if model not in (key_models or settings.model_allowlist):
         raise ProviderError("The requested model is not allowlisted.", "model_not_found", 404)
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
@@ -167,23 +204,23 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
             try:
                 async for chunk in client.stream_chat_completion(payload):
                     yield chunk
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True, client_ip=client_ip)
             except ProviderError as exc:
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, error_category=exc.code)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, client_ip=client_ip, error_category=exc.code)
                 yield f'data: {json.dumps({"error": {"message": exc.message, "code": exc.code}})}\n\n'
         return StreamingResponse(stream_body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     started = time.perf_counter()
     try:
         body, latency = await client.chat_completion(payload)
     except ProviderError as exc:
-        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), error_category=exc.code)
+        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, error_category=exc.code)
         raise
     usage = body.get("usage") or {}
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
     estimated_cost = estimate_cost(input_tokens, output_tokens, settings)
-    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")))
+    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip)
     if db.usage_summary()["totals"]["estimated_cost_usd"] >= settings.provider_hard_stop_usd:
         db.set_key_state(key["id"], False)
     return body
