@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     provider_key_pepper: str = ""
     provider_secret_key: str = ""
     admin_token: str = ""
-    rate_limit_requests_per_minute: int = 100
+    rate_limit_requests_per_minute: int = 0
     provider_hard_stop_usd: float = 35.0
     provider_warning_usd: float = 25.0
     provider_estimate_reserve_usd: float = 5.0
