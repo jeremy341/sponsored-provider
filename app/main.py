@@ -418,13 +418,39 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     if not reservation_id:
         raise ProviderError("The provider budget cannot safely accept this request.", "budget_exhausted", 429)
     if payload.get("stream"):
+        payload.setdefault("stream_options", {"include_usage": True})
         async def stream_body():
+            started_stream = time.perf_counter()
+            stream_input_tokens = None
+            stream_output_tokens = None
+            stream_total_tokens = None
             try:
                 async for chunk in client.stream_chat_completion(payload):
+                    if '"usage"' in chunk:
+                        try:
+                            data_part = chunk.strip()
+                            if data_part.startswith("data:"):
+                                data_part = data_part[5:].strip()
+                                if data_part and data_part != "[DONE]":
+                                    parsed = json.loads(data_part)
+                                    usage = parsed.get("usage") or parsed.get("choices", [{}])[0].get("usage") if isinstance(parsed, dict) else None
+                                    if isinstance(usage, dict):
+                                        stream_input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
+                                        stream_output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
+                                        stream_total_tokens = usage.get("total_tokens")
+                                        if stream_input_tokens is not None or stream_output_tokens is not None:
+                                            continue
+                        except Exception:
+                            pass
                     yield chunk
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
+                latency_stream = int((time.perf_counter() - started_stream) * 1000)
+                if stream_input_tokens is not None or stream_output_tokens is not None:
+                    actual_cost = estimate_cost(stream_input_tokens, stream_output_tokens, settings, input_price, output_price)
+                    db.record_usage(key["id"], model=model, input_tokens=stream_input_tokens, output_tokens=stream_output_tokens, total_tokens=stream_total_tokens or ((stream_input_tokens or 0) + (stream_output_tokens or 0) if stream_input_tokens is not None or stream_output_tokens is not None else None), estimated_cost_usd=actual_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
+                else:
+                    db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
             except ProviderError as exc:
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=None, status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code)
+                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=int((time.perf_counter() - started_stream) * 1000), status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code)
                 yield f'data: {json.dumps({"error": {"message": exc.message, "code": exc.code}})}\n\n'
         return StreamingResponse(stream_body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     started = time.perf_counter()
