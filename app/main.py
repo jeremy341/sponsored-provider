@@ -424,6 +424,7 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
             stream_input_tokens = None
             stream_output_tokens = None
             stream_total_tokens = None
+            stream_cached_tokens = None
             try:
                 async for chunk in client.stream_chat_completion(payload):
                     if '"usage"' in chunk:
@@ -438,6 +439,7 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
                                         stream_input_tokens = usage.get("prompt_tokens") or usage.get("input_tokens")
                                         stream_output_tokens = usage.get("completion_tokens") or usage.get("output_tokens")
                                         stream_total_tokens = usage.get("total_tokens")
+                                        stream_cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens")
                                         if stream_input_tokens is not None or stream_output_tokens is not None:
                                             continue
                         except Exception:
@@ -445,7 +447,11 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
                     yield chunk
                 latency_stream = int((time.perf_counter() - started_stream) * 1000)
                 if stream_input_tokens is not None or stream_output_tokens is not None:
-                    actual_cost = estimate_cost(stream_input_tokens, stream_output_tokens, settings, input_price, output_price)
+                    if stream_cached_tokens and stream_input_tokens:
+                        cache_price = 0.014
+                        actual_cost = round((stream_input_tokens - stream_cached_tokens) / 1_000_000 * input_price + stream_cached_tokens / 1_000_000 * cache_price + (stream_output_tokens or 0) / 1_000_000 * output_price, 6)
+                    else:
+                        actual_cost = estimate_cost(stream_input_tokens, stream_output_tokens, settings, input_price, output_price)
                     db.record_usage(key["id"], model=model, input_tokens=stream_input_tokens, output_tokens=stream_output_tokens, total_tokens=stream_total_tokens or ((stream_input_tokens or 0) + (stream_output_tokens or 0) if stream_input_tokens is not None or stream_output_tokens is not None else None), estimated_cost_usd=actual_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
                 else:
                     db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
@@ -463,7 +469,12 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
-    estimated_cost = estimate_cost(input_tokens, output_tokens, settings, input_price, output_price)
+    cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
+    if cached_tokens and input_tokens:
+        cache_price = 0.014
+        estimated_cost = round((input_tokens - cached_tokens) / 1_000_000 * input_price + cached_tokens / 1_000_000 * cache_price + (output_tokens or 0) / 1_000_000 * output_price, 6)
+    else:
+        estimated_cost = estimate_cost(input_tokens, output_tokens, settings, input_price, output_price)
     db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
     if db.usage_summary()["totals"]["estimated_cost_usd"] >= settings.provider_hard_stop_usd:
         db.set_key_state(key["id"], False)
