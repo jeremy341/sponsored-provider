@@ -6,7 +6,7 @@ from urllib.parse import urlparse
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .alibaba import AlibabaClient
@@ -27,6 +27,18 @@ async def lifespan(_app):
 app = FastAPI(title="Sponsored Provider", version="0.1.0", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 rate_limiter = RateLimiter()
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if request.url.path.startswith(("/api/", "/v1/")):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 def get_db(settings: Settings = Depends(get_settings)):
@@ -64,6 +76,21 @@ def require_admin(token: str | None, settings: Settings):
         raise ProviderError("Admin authentication is required.", "admin_unauthorized", 401)
 
 
+def client_ip_for(request: Request):
+    peer = request.client.host if request.client else None
+    forwarded = request.headers.get("x-forwarded-for", "")
+    # Nest is the trusted private reverse-proxy peer; ignore spoofed forwarding headers from direct public clients.
+    if forwarded and peer:
+        try:
+            if ipaddress.ip_address(peer).is_private:
+                candidate = forwarded.split(",")[0].strip()
+                ipaddress.ip_address(candidate)
+                return candidate
+        except ValueError:
+            pass
+    return peer
+
+
 @app.exception_handler(ProviderError)
 async def provider_error_handler(_, exc: ProviderError):
     return error_response(exc)
@@ -79,10 +106,21 @@ async def dashboard():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+@app.get("/", include_in_schema=False)
+async def root():
+    return RedirectResponse(url="/dashboard", status_code=307)
+
+
 @app.get("/api/dashboard")
 async def dashboard_data(x_admin_token: str | None = Header(default=None), db: Database = Depends(get_db), settings: Settings = Depends(get_settings)):
     require_admin(x_admin_token, settings)
     summary = db.usage_summary()
+    pricing_by_model = {}
+    for profile in db.list_upstreams():
+        for model, price in (profile.get("pricing") or {}).items():
+            pricing_by_model.setdefault(model, {"input": price.get("input", 0), "output": price.get("output", 0), "source": profile["name"]})
+    for item in summary.get("by_model", []):
+        item["pricing"] = pricing_by_model.get(item["model"], {"input": settings.input_price_per_million, "output": settings.output_price_per_million, "source": "global fallback"})
     used = float(summary["totals"]["estimated_cost_usd"])
     return {"budget": {"hard_stop_usd": settings.provider_hard_stop_usd, "warning_usd": settings.provider_warning_usd, "used_usd": used, "remaining_usd": max(0, settings.provider_hard_stop_usd - used), "percent": min(100, used / settings.provider_hard_stop_usd * 100 if settings.provider_hard_stop_usd else 0)}, "stopped": settings.emergency_stop or used >= settings.provider_hard_stop_usd, "billing": {"source": "local_estimate", "reconciled": False, "note": "Reconcile against upstream billing before treating spend as final."}, "config": {"allowed_models": sorted(settings.model_allowlist), "input_price_per_million": settings.input_price_per_million, "output_price_per_million": settings.output_price_per_million, "rate_limit_requests_per_minute": settings.rate_limit_requests_per_minute}, **summary}
 
@@ -126,6 +164,13 @@ async def admin_revoke_key(key_id: int, x_admin_token: str | None = Header(defau
     require_admin(x_admin_token, settings)
     db.set_key_state(key_id, False, revoke=True)
     return {"ok": True, "id": key_id, "revoked": True}
+
+
+@app.post("/api/admin/keys/{key_id}/archive")
+async def admin_archive_key(key_id: int, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    db.archive_key(key_id)
+    return {"ok": True, "id": key_id, "archived": True, "usage_history_preserved": True}
 
 
 @app.post("/api/admin/keys/{key_id}/policy")
@@ -290,9 +335,20 @@ async def admin_unblock_ip(ip: str, x_admin_token: str | None = Header(default=N
     return {"ok": True, "ip": ip}
 
 
+@app.post("/api/admin/models/{model}/block")
+async def admin_block_model(model: str, x_admin_token: str | None = Header(default=None), settings: Settings = Depends(get_settings), db: Database = Depends(get_db)):
+    require_admin(x_admin_token, settings)
+    model = model.strip()
+    if not model or len(model) > 200:
+        raise ProviderError("Enter a valid model ID.", "invalid_model", 400)
+    changed = db.remove_model_from_keys(model)
+    settings.allowed_models = ", ".join(item for item in settings.model_allowlist if item != model)
+    return {"ok": True, "model": model, "keys_updated": changed}
+
+
 @app.get("/v1/models")
 async def models(request: Request, settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
-    client_ip = request.client.host if request.client else None
+    client_ip = client_ip_for(request)
     if db.is_ip_blocked(client_ip):
         raise ProviderError("Requests from this IP address are blocked.", "ip_blocked", 403)
     key = provider_key(authorization, db)
@@ -303,14 +359,14 @@ async def models(request: Request, settings: Settings = Depends(get_settings), a
 
 @app.post("/v1/chat/completions")
 async def chat(request: Request, settings: Settings = Depends(get_settings), authorization: str | None = Header(default=None), db: Database = Depends(get_db)):
-    client_ip = request.client.host if request.client else None
+    client_ip = client_ip_for(request)
     if db.is_ip_blocked(client_ip):
         raise ProviderError("Requests from this IP address are blocked.", "ip_blocked", 403)
     key = provider_key(authorization, db)
     if settings.emergency_stop:
         raise ProviderError("The provider is temporarily stopped.", "provider_stopped", 503)
     key_rate_limit = settings.rate_limit_requests_per_minute if key["requests_per_minute"] is None else key["requests_per_minute"]
-    if not rate_limiter.allow(f"{db.path}:{key['id']}", key_rate_limit):
+    if not rate_limiter.allow(f"{db.path}:{key['id']}:{client_ip or 'unknown'}", key_rate_limit):
         raise ProviderError("Too many requests for this provider key.", "rate_limited", 429)
     used = db.usage_summary()["totals"]["estimated_cost_usd"]
     key_usage = db.key_usage(key["id"])
@@ -324,8 +380,6 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
         db.set_key_state(key["id"], False)
         raise ProviderError("The provider budget has been exhausted.", "budget_exhausted", 429)
     raw = await request.body()
-    if len(raw) > settings.max_request_bytes:
-        raise ProviderError("Request body is too large.", "request_too_large", 413)
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -337,17 +391,20 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise ProviderError("messages must be a non-empty list.", "invalid_request", 400)
-    if sum(len(str(item.get("content", ""))) for item in messages if isinstance(item, dict)) > settings.max_input_chars:
-        raise ProviderError("Input content is too large.", "input_too_large", 413)
     upstream_ids = [item.strip() for item in (key["allowed_upstreams"] or "").split(",") if item.strip()]
     client, upstream_id = upstream_client(upstream_ids[0] if upstream_ids else "configured", db, settings)
     input_price, output_price = db.model_pricing(upstream_id, model, settings.input_price_per_million, settings.output_price_per_million)
     if input_price <= 0 or output_price <= 0:
         raise ProviderError("Official model input/output prices must be configured before live requests.", "pricing_not_configured", 503)
-    payload["max_tokens"] = min(int(payload.get("max_tokens", settings.max_output_tokens)), settings.max_output_tokens)
+    if "max_tokens" in payload and payload["max_tokens"] is not None:
+        try:
+            payload["max_tokens"] = int(payload["max_tokens"])
+        except (TypeError, ValueError):
+            pass
     current_input_estimate = sum(len(str(item.get("content", ""))) for item in messages if isinstance(item, dict)) / 4
-    projected_cost = estimate_cost(current_input_estimate, payload["max_tokens"], settings, input_price, output_price)
-    projected_tokens = current_input_estimate + payload["max_tokens"]
+    _max_tokens_estimate = payload.get("max_tokens")
+    projected_cost = estimate_cost(current_input_estimate, _max_tokens_estimate, settings, input_price, output_price)
+    projected_tokens = current_input_estimate + (_max_tokens_estimate or 0)
     if key["spend_limit_usd"] is not None and key["spend_limit_usd"] > 0 and key_usage["estimated_cost_usd"] + projected_cost >= key["spend_limit_usd"]:
         db.set_key_state(key["id"], False)
         raise ProviderError("This provider key cannot safely accept the request within its spend limit.", "key_budget_exhausted", 429)
