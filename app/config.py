@@ -18,10 +18,7 @@ class Settings(BaseSettings):
     provider_key_pepper: str = ""
     provider_secret_key: str = ""
     admin_token: str = ""
-    max_request_bytes: int = 1_048_576
-    max_input_chars: int = 50_000
-    max_output_tokens: int = 1_024
-    rate_limit_requests_per_minute: int = 10
+    rate_limit_requests_per_minute: int = 100
     provider_hard_stop_usd: float = 35.0
     provider_warning_usd: float = 25.0
     provider_estimate_reserve_usd: float = 5.0
