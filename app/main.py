@@ -394,6 +394,8 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     upstream_ids = [item.strip() for item in (key["allowed_upstreams"] or "").split(",") if item.strip()]
     client, upstream_id = upstream_client(upstream_ids[0] if upstream_ids else "configured", db, settings)
     input_price, output_price = db.model_pricing(upstream_id, model, settings.input_price_per_million, settings.output_price_per_million)
+    _pricing = (db.get_upstream(upstream_id) or {}).get("pricing", {}).get(model, {}) if upstream_id != "configured" else {}
+    cache_price = float(_pricing.get("cache", 0.014)) if isinstance(_pricing.get("cache"), (int, float)) else 0.014
     if input_price <= 0 or output_price <= 0:
         raise ProviderError("Official model input/output prices must be configured before live requests.", "pricing_not_configured", 503)
     if "max_tokens" in payload and payload["max_tokens"] is not None:
@@ -448,7 +450,6 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
                 latency_stream = int((time.perf_counter() - started_stream) * 1000)
                 if stream_input_tokens is not None or stream_output_tokens is not None:
                     if stream_cached_tokens and stream_input_tokens:
-                        cache_price = 0.014
                         actual_cost = round((stream_input_tokens - stream_cached_tokens) / 1_000_000 * input_price + stream_cached_tokens / 1_000_000 * cache_price + (stream_output_tokens or 0) / 1_000_000 * output_price, 6)
                     else:
                         actual_cost = estimate_cost(stream_input_tokens, stream_output_tokens, settings, input_price, output_price)
@@ -471,7 +472,6 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
     total_tokens = usage.get("total_tokens")
     cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
     if cached_tokens and input_tokens:
-        cache_price = 0.014
         estimated_cost = round((input_tokens - cached_tokens) / 1_000_000 * input_price + cached_tokens / 1_000_000 * cache_price + (output_tokens or 0) / 1_000_000 * output_price, 6)
     else:
         estimated_cost = estimate_cost(input_tokens, output_tokens, settings, input_price, output_price)
