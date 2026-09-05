@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     input_price_per_million: float = 0.0
     output_price_per_million: float = 0.0
     emergency_stop: bool = False
-    upstream_timeout_seconds: float = 60.0
+    upstream_timeout_seconds: float = 300.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
