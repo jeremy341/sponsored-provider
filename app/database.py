@@ -24,7 +24,13 @@ class Database:
         self.init_schema()
 
     def connect(self):
-        conn = sqlite3.connect(self.path, check_same_thread=False)
+        conn = sqlite3.connect(self.path, check_same_thread=False, timeout=10.0)
+        # Keep usage history referentially protected: key removal must use archive/revoke,
+        # otherwise SQLite refuses to delete a key that still has usage records.
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=10000")
+        conn.execute("PRAGMA foreign_keys=ON")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -106,6 +112,7 @@ class Database:
                 "ALTER TABLE provider_api_keys ADD COLUMN allowed_upstreams TEXT NOT NULL DEFAULT ''",
                 "ALTER TABLE provider_api_keys ADD COLUMN risk_profile TEXT NOT NULL DEFAULT 'standard'",
                 "ALTER TABLE provider_api_keys ADD COLUMN risk_approved INTEGER NOT NULL DEFAULT 1",
+                "ALTER TABLE provider_api_keys ADD COLUMN deleted_at TEXT",
                 "ALTER TABLE upstream_profiles ADD COLUMN pricing_json TEXT NOT NULL DEFAULT '{}'",
             ):
                 try:
@@ -134,7 +141,7 @@ class Database:
 
     def list_keys(self):
         with self.connect() as conn:
-            return [dict(row) for row in conn.execute("SELECT * FROM provider_api_keys ORDER BY created_at DESC")]
+            return [dict(row) for row in conn.execute("SELECT id,key_prefix,label,created_at,enabled,revoked_at,deleted_at,spend_limit_usd,requests_per_minute,token_limit,allowed_models,allowed_upstreams,risk_profile,risk_approved,request_count,estimated_cost_usd,last_used_at FROM provider_api_keys ORDER BY created_at DESC")]
 
     def set_key_state(self, key_id: int, enabled: bool, revoke: bool = False):
         with self.connect() as conn:
@@ -142,6 +149,10 @@ class Database:
                 "UPDATE provider_api_keys SET enabled=?, revoked_at=CASE WHEN ? THEN COALESCE(revoked_at, ?) ELSE revoked_at END WHERE id=?",
                 (int(enabled and not revoke), int(revoke), now_iso(), key_id),
             )
+
+    def archive_key(self, key_id: int):
+        with self.connect() as conn:
+            conn.execute("UPDATE provider_api_keys SET enabled=0, revoked_at=COALESCE(revoked_at, ?), deleted_at=COALESCE(deleted_at, ?) WHERE id=?", (now_iso(), now_iso(), key_id))
 
     def update_key_policy(self, key_id: int, *, spend_limit_usd=None, requests_per_minute=None, token_limit=None, allowed_models=None, allowed_upstreams=None, risk_profile=None, risk_approved=None, clear_fields=None):
         fields, values = [], []
@@ -156,6 +167,18 @@ class Database:
             values.append(key_id)
             with self.connect() as conn:
                 conn.execute(f"UPDATE provider_api_keys SET {', '.join(fields)} WHERE id=?", values)
+
+    def remove_model_from_keys(self, model: str):
+        with self.connect() as conn:
+            rows = conn.execute("SELECT id, allowed_models FROM provider_api_keys WHERE allowed_models IS NOT NULL AND allowed_models != ''").fetchall()
+            changed = 0
+            for row in rows:
+                current = [item.strip() for item in row["allowed_models"].split(",") if item.strip()]
+                filtered = [item for item in current if item != model]
+                if filtered != current:
+                    conn.execute("UPDATE provider_api_keys SET allowed_models=? WHERE id=?", (", ".join(filtered), row["id"]))
+                    changed += 1
+            return changed
 
     def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, upstream_profile_id=None, reservation_id=None, error_category=None):
         with self.connect() as conn:
