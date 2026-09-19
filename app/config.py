@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     provider_secret_key: str = ""
     admin_token: str = ""
     rate_limit_requests_per_minute: int = 0
-    provider_hard_stop_usd: float = 39.5
+    provider_hard_stop_usd: float = 34.40
     provider_warning_usd: float = 25.0
     provider_estimate_reserve_usd: float = 5.0
     input_price_per_million: float = 0.0
