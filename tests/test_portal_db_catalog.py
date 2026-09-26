@@ -182,6 +182,81 @@ def test_legacy_model_uses_its_exact_connection_within_multi_connection_brand(tm
     assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
 
 
+def test_approved_orphan_legacy_catalog_stays_unknown_and_unroutable(tmp_path):
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    with legacy.connect() as connection:
+        connection.execute("DELETE FROM upstream_profiles")
+
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    with repository.connect() as connection:
+        connection.execute(
+            "INSERT INTO portal_catalog_models(provider_id,model_id,provider_name,capabilities_json,input_price_per_million,output_price_per_million,price_source,approved,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("orphan-provider", "orphan-model", "Unverified label", '["text"]', 1, 2, "legacy", 0, 1, "2026-01-03T00:00:00+00:00"),
+        )
+        connection.execute("DELETE FROM portal_schema_migrations")
+    repository.init_schema()
+
+    user = repository.upsert_user(subject="orphan", email="orphan@example.test", name="Orphan")
+    key = repository.create_user_key(user["id"], "Orphan key", allowed_models_mode="all_approved")
+    repository.add_catalog_model(
+        provider_id="orphan-provider", model_id="orphan-model", provider_name="Unverified label",
+        capabilities=["text"], input_price_per_million=1, output_price_per_million=2,
+        price_source="legacy", approved=True, active=True,
+    )
+
+    with repository.connect() as connection:
+        identity = connection.execute("""SELECT b.name,b.identity_status,c.mapping_status,c.legacy_profile_id,c.enabled
+            FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id
+            WHERE b.migration_ref='orphan-provider'""").fetchone()
+        legacy_catalog = connection.execute("""SELECT provider_name,capabilities_json,input_price_per_million,
+            output_price_per_million,price_source,approved,active FROM portal_catalog_models
+            WHERE provider_id='orphan-provider' AND model_id='orphan-model'""").fetchone()
+        historical_price = connection.execute("""SELECT input_rate,output_rate,cached_input_rate,source
+            FROM price_versions WHERE id='legacy-price:orphan-provider:orphan-model'""").fetchone()
+        route = connection.execute("SELECT active FROM offer_routes WHERE id='legacy-route:orphan-provider:orphan-model'").fetchone()
+
+    assert tuple(identity) == ("Unknown legacy provider", "unknown", "unmapped", None, 0)
+    assert tuple(legacy_catalog) == ("Unverified label", '["text"]', 1, 2, "legacy", 1, 1)
+    assert tuple(historical_price) == ("1", "2", None, "legacy")
+    assert route["active"] == 0
+    assert repository.list_models() == []
+    assert repository.get_model("orphan-provider::orphan-model") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
+
+
+def test_approved_catalog_without_legacy_profile_or_connection_stays_unmapped(tmp_path):
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    user = repository.upsert_user(subject="unconfigured", email="unconfigured@example.test", name="Unconfigured")
+    key = repository.create_user_key(user["id"], "Unconfigured key", allowed_models_mode="all_approved")
+
+    repository.add_catalog_model(
+        provider_id="not-configured", model_id="orphan-model", provider_name="Unverified label",
+        capabilities=["text"], input_price_per_million=1, output_price_per_million=2,
+        price_source="catalog-import", approved=True, active=True,
+    )
+
+    with repository.connect() as connection:
+        identity = connection.execute("""SELECT b.name,b.identity_status,c.legacy_profile_id,c.mapping_status,c.enabled
+            FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id
+            WHERE b.migration_ref='not-configured'""").fetchone()
+        route = connection.execute("""SELECT active FROM offer_routes
+            WHERE id='legacy-route:not-configured:orphan-model'""").fetchone()
+        legacy_catalog = connection.execute("""SELECT provider_name,capabilities_json,input_price_per_million,
+            output_price_per_million,price_source,approved,active FROM portal_catalog_models
+            WHERE provider_id='not-configured' AND model_id='orphan-model'""").fetchone()
+        price = connection.execute("""SELECT input_rate,output_rate,source FROM price_versions
+            WHERE offer_id='legacy-offer:not-configured:orphan-model' AND is_active=1""").fetchone()
+
+    assert tuple(identity) == ("Unknown legacy provider", "unknown", None, "unmapped", 0)
+    assert route["active"] == 0
+    assert tuple(legacy_catalog) == ("Unverified label", '["text"]', 1, 2, "catalog-import", 1, 1)
+    assert tuple(price) == ("1", "2", "catalog-import")
+    assert repository.list_models() == []
+    assert repository.get_model("not-configured::orphan-model") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
+
+
 def test_migrations_are_idempotent(tmp_path):
     path = tmp_path / "portal.db"
     legacy, _ = _legacy_database(path)

@@ -752,12 +752,18 @@ class PortalDatabase:
                              (brand_id, "Unknown legacy provider", provider_id, _iso()))
             connection = conn.execute("SELECT id FROM provider_connections WHERE legacy_profile_id=?", (provider_id,)).fetchone()
             connection_id = connection["id"] if connection else f"legacy-connection:{provider_id}"
+            fallback = None if connection else conn.execute(
+                "SELECT legacy_profile_id FROM provider_connections WHERE id=?", (connection_id,)
+            ).fetchone()
+            orphaned_provider = connection is None
             if not connection:
-                conn.execute("INSERT OR IGNORE INTO provider_connections(id,brand_id,legacy_profile_id,secret_ref,created_at) VALUES(?,?,?,?,?)",
-                             (connection_id, brand_id, provider_id, None, _iso()))
-            elif conn.execute("SELECT legacy_profile_id FROM provider_connections WHERE id=?", (connection_id,)).fetchone()["legacy_profile_id"] is None:
-                conn.execute("UPDATE provider_connections SET legacy_profile_id=? WHERE id=?", (provider_id, connection_id))
-            if approved:
+                if fallback is None:
+                    conn.execute("INSERT OR IGNORE INTO provider_connections(id,brand_id,legacy_profile_id,secret_ref,enabled,mapping_status,created_at) VALUES(?,?,?,?,0,'unmapped',?)",
+                                 (connection_id, brand_id, None, None, _iso()))
+            if orphaned_provider:
+                conn.execute("UPDATE provider_brands SET name='Unknown legacy provider',identity_status='unknown' WHERE id=?", (brand_id,))
+                conn.execute("UPDATE provider_connections SET mapping_status='unmapped',enabled=0 WHERE id=?", (connection_id,))
+            elif approved:
                 conn.execute("UPDATE provider_brands SET name=?,identity_status='mapped' WHERE id=?", (provider_name, brand_id))
                 conn.execute("UPDATE provider_connections SET mapping_status='mapped' WHERE id=?", (connection_id,))
             offer_id = f"legacy-offer:{provider_id}:{model_id}"
@@ -766,9 +772,10 @@ class PortalDatabase:
                 display_name=excluded.display_name,capabilities_json=excluded.capabilities_json,
                 approved=excluded.approved,active=excluded.active,price_source=excluded.price_source,updated_at=excluded.updated_at""",
                 (offer_id, brand_id, model_id, model_id, json.dumps(sorted(set(capabilities))), int(approved), int(active), price_source, _iso()))
+            route_active = int(approved and active and not orphaned_provider)
             conn.execute("INSERT OR IGNORE INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active) VALUES(?,?,?,?,?)",
-                         (f"legacy-route:{provider_id}:{model_id}", offer_id, connection_id, model_id, int(approved and active)))
-            conn.execute("UPDATE offer_routes SET active=? WHERE offer_id=? AND connection_id=?", (int(approved and active), offer_id, connection_id))
+                         (f"legacy-route:{provider_id}:{model_id}", offer_id, connection_id, model_id, route_active))
+            conn.execute("UPDATE offer_routes SET active=? WHERE offer_id=? AND connection_id=?", (route_active, offer_id, connection_id))
             if input_price_per_million is not None or output_price_per_million is not None or cached_input_price_per_million is not None:
                 conn.execute("UPDATE price_versions SET is_active=0,retired_at=? WHERE offer_id=? AND is_active=1", (_iso(), offer_id))
                 conn.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,cached_input_rate,source,is_active,effective_at) VALUES(?,?,?,?,?,?,?,?)",
