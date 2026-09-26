@@ -54,10 +54,25 @@ def verify_password_or_dummy(password: str, encoded_hash: str | None) -> bool:
     if not encoded_hash:
         return _verify_dummy(password)
     try:
-        extract_parameters(encoded_hash)
+        parameters = extract_parameters(encoded_hash)
     except (InvalidHashError, VerificationError, TypeError, ValueError):
         return _verify_dummy(password)
-    return verify_password(password, encoded_hash)
+    if (
+        parameters.type != Type.ID
+        or parameters.time_cost < 1
+        or parameters.time_cost > 4
+        or parameters.parallelism < 1
+        or parameters.parallelism > 4
+        or parameters.memory_cost < 8 * parameters.parallelism
+        or parameters.memory_cost > 65_536
+    ):
+        return _verify_dummy(password)
+    try:
+        return _hasher.verify(encoded_hash, password)
+    except VerifyMismatchError:
+        return False
+    except (VerificationError, InvalidHashError, TypeError, ValueError):
+        return _verify_dummy(password)
 
 
 def _verify_dummy(password: str) -> bool:

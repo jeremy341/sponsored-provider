@@ -55,6 +55,21 @@ def test_malformed_stored_hash_performs_dummy_argon2_work(monkeypatch):
     assert work == ["candidate password"]
 
 
+def test_argon2_rejected_hash_performs_dummy_work_after_parameter_parse(monkeypatch):
+    work = []
+    parameters = password_auth.extract_parameters(password_auth._dummy_hash)
+    monkeypatch.setattr(password_auth, "extract_parameters", lambda _encoded: parameters)
+
+    def reject_hash(_hasher, _encoded, _password):
+        raise password_auth.InvalidHashError("invalid encoded hash")
+
+    monkeypatch.setattr(type(password_auth._hasher), "verify", reject_hash)
+    monkeypatch.setattr(password_auth, "_verify_dummy", lambda password: work.append(password) or False)
+
+    assert not password_auth.verify_password_or_dummy("candidate password", "parseable but malformed")
+    assert work == ["candidate password"]
+
+
 def test_password_policy_rejects_short_and_oversized_passwords():
     for password in ("short", "x" * 1025):
         try:
