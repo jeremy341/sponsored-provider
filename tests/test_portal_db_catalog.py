@@ -8,6 +8,63 @@ from app.database import Database
 from app.portal_db import PortalDatabase
 
 
+def test_local_auth_migration_preserves_hca_identity_invite_history_and_is_idempotent(tmp_path):
+    path = tmp_path / "portal.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript("""
+            CREATE TABLE portal_users (
+                id TEXT PRIMARY KEY, oidc_subject TEXT NOT NULL UNIQUE, email TEXT,
+                email_verified INTEGER NOT NULL DEFAULT 0, display_name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('operator','developer')),
+                status TEXT NOT NULL DEFAULT 'active', allowance_usd REAL,
+                allowance_period TEXT, rpm_limit INTEGER,
+                allowance_timezone TEXT NOT NULL DEFAULT 'UTC', created_at TEXT NOT NULL,
+                last_login_at TEXT NOT NULL
+            );
+            CREATE TABLE portal_invites (
+                id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, issuer_user_id TEXT NOT NULL,
+                bound_email TEXT, expires_at TEXT NOT NULL, consumed_at TEXT,
+                consumed_by_user_id TEXT, created_at TEXT NOT NULL
+            );
+            CREATE TABLE portal_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+            INSERT INTO portal_schema_migrations VALUES(1,'2026-01-01T00:00:00+00:00');
+            INSERT INTO portal_schema_migrations VALUES(2,'2026-01-02T00:00:00+00:00');
+            INSERT INTO portal_schema_migrations VALUES(3,'2026-01-03T00:00:00+00:00');
+            INSERT INTO portal_users(id,oidc_subject,email,email_verified,display_name,role,created_at,last_login_at)
+            VALUES('legacy-user','ident!hca-subject','legacy@example.test',1,'Legacy HCA','developer','2026-01-04','2026-02-05');
+            INSERT INTO portal_invites(id,token_hash,issuer_user_id,bound_email,expires_at,consumed_at,consumed_by_user_id,created_at)
+            VALUES('legacy-invite','hashed-token','legacy-operator','legacy@example.test','2027-01-01','2026-01-05','legacy-user','2026-01-04');
+        """)
+
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    with repository.connect() as connection:
+        user_before = tuple(connection.execute(
+            "SELECT id,oidc_subject,email,email_verified,display_name,role,created_at,last_login_at FROM portal_users WHERE id='legacy-user'"
+        ).fetchone())
+        invite_before = tuple(connection.execute(
+            "SELECT id,token_hash,issuer_user_id,bound_email,expires_at,consumed_at,consumed_by_user_id,created_at FROM portal_invites WHERE id='legacy-invite'"
+        ).fetchone())
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_users)")}
+        invite_columns = {row[1] for row in connection.execute("PRAGMA table_info(portal_invites)")}
+        migrations = [tuple(row) for row in connection.execute("SELECT version,applied_at FROM portal_schema_migrations ORDER BY version")]
+        first_applied_at = migrations[-1][1]
+
+    assert "username_normalized" in columns
+    assert "password_hash" in columns
+    assert "max_uses" in invite_columns
+    assert "uses_count" in invite_columns
+    assert "revoked_at" in invite_columns
+    assert migrations[-1][0] == 4
+    assert user_before == ("legacy-user", "ident!hca-subject", "legacy@example.test", 1, "Legacy HCA", "developer", "2026-01-04", "2026-02-05")
+    assert invite_before == ("legacy-invite", "hashed-token", "legacy-operator", "legacy@example.test", "2027-01-01", "2026-01-05", "legacy-user", "2026-01-04")
+
+    repository.init_schema()
+    with repository.connect() as connection:
+        rerun = [tuple(row) for row in connection.execute("SELECT version,applied_at FROM portal_schema_migrations ORDER BY version")]
+    assert rerun == migrations
+    assert rerun[-1][1] == first_applied_at
+
+
 def _legacy_database(path):
     legacy = Database(str(path), pepper="legacy-pepper", secret_key=Fernet.generate_key().decode())
     with legacy.connect() as connection:

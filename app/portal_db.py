@@ -275,11 +275,72 @@ class PortalDatabase:
                 (1, self._migrate_catalog_and_credits),
                 (2, self._migrate_legacy_catalog),
                 (3, self._migrate_identity_and_numeric_safety),
+                (4, self._migrate_local_auth_and_invite_quotas),
             )
             for version, migration in migrations:
                 if version not in applied:
                     migration(conn)
                     conn.execute("INSERT INTO portal_schema_migrations(version,applied_at) VALUES(?,?)", (version, _iso()))
+
+    def _migrate_local_auth_and_invite_quotas(self, conn: sqlite3.Connection) -> None:
+        """Add local credentials while retaining every existing OIDC identity."""
+        if "username_normalized" in {row[1] for row in conn.execute("PRAGMA table_info(portal_users)")}:
+            return
+        has_allowances = self._table_exists(conn, "user_allowances")
+        if has_allowances:
+            conn.execute("CREATE TABLE user_allowances_local_auth AS SELECT * FROM user_allowances")
+            conn.execute("DROP TABLE user_allowances")
+        conn.execute("""
+            CREATE TABLE portal_users_local_auth (
+                id TEXT PRIMARY KEY,
+                oidc_subject TEXT UNIQUE,
+                email TEXT,
+                email_verified INTEGER NOT NULL DEFAULT 0,
+                display_name TEXT NOT NULL,
+                role TEXT NOT NULL CHECK(role IN ('operator','developer')),
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','suspended')),
+                allowance_usd REAL,
+                allowance_period TEXT CHECK(allowance_period IS NULL OR allowance_period IN ('daily','weekly')),
+                rpm_limit INTEGER,
+                allowance_timezone TEXT NOT NULL DEFAULT 'UTC',
+                created_at TEXT NOT NULL,
+                last_login_at TEXT NOT NULL,
+                username TEXT,
+                username_normalized TEXT,
+                password_hash TEXT,
+                password_hash_algorithm TEXT,
+                password_hash_updated_at TEXT,
+                developer_invite_issued_at TEXT
+            )
+        """)
+        columns = (
+            "id,oidc_subject,email,email_verified,display_name,role,status,allowance_usd,allowance_period,"
+            "rpm_limit,allowance_timezone,created_at,last_login_at"
+        )
+        conn.execute(f"INSERT INTO portal_users_local_auth({columns}) SELECT {columns} FROM portal_users")
+        conn.execute("DROP TABLE portal_users")
+        conn.execute("ALTER TABLE portal_users_local_auth RENAME TO portal_users")
+        if has_allowances:
+            conn.execute("""
+                CREATE TABLE user_allowances (
+                    id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES portal_users(id),
+                    amount_nano_usd INTEGER NOT NULL, period TEXT NOT NULL,
+                    timezone TEXT NOT NULL DEFAULT 'Europe/Berlin', active INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("INSERT INTO user_allowances SELECT * FROM user_allowances_local_auth")
+            conn.execute("DROP TABLE user_allowances_local_auth")
+            conn.execute("CREATE UNIQUE INDEX user_allowances_one_active ON user_allowances(user_id) WHERE active=1")
+        conn.execute("CREATE UNIQUE INDEX portal_users_username_normalized_unique ON portal_users(username_normalized) WHERE username_normalized IS NOT NULL")
+        conn.execute("CREATE UNIQUE INDEX portal_users_username_nocase_unique ON portal_users(username COLLATE NOCASE) WHERE username IS NOT NULL")
+        self._add_columns(conn, "portal_invites", {
+            "max_uses": "INTEGER NOT NULL DEFAULT 1 CHECK(max_uses >= 1)",
+            "uses_count": "INTEGER NOT NULL DEFAULT 0 CHECK(uses_count >= 0)",
+            "revoked_at": "TEXT",
+            "revoked_by_user_id": "TEXT",
+        })
+        conn.execute("UPDATE portal_invites SET uses_count=1 WHERE consumed_at IS NOT NULL AND uses_count=0")
 
     @staticmethod
     def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -531,11 +592,11 @@ class PortalDatabase:
     def find_invite(self, raw_token: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute(
-                "SELECT id, bound_email, expires_at, consumed_at FROM portal_invites WHERE token_hash=?",
+                "SELECT id,bound_email,expires_at,consumed_at,max_uses,uses_count,revoked_at FROM portal_invites WHERE token_hash=?",
                 (_digest(raw_token, self.key_pepper),),
             ).fetchone()
         invite = self._dict(row)
-        if invite and (invite["consumed_at"] or invite["expires_at"] <= _iso()):
+        if invite and (invite["revoked_at"] or invite["uses_count"] >= invite["max_uses"] or invite["expires_at"] <= _iso()):
             return None
         return invite
 
@@ -545,9 +606,12 @@ class PortalDatabase:
         issuer_user_id: str,
         expires_in_seconds: int = 7 * 24 * 60 * 60,
         bound_email: str | None = None,
+        max_uses: int = 1,
     ) -> tuple[dict[str, Any], str]:
         if not 60 <= expires_in_seconds <= 30 * 24 * 60 * 60:
             raise ValueError("Invite expiry must be between 60 seconds and 30 days")
+        if not isinstance(max_uses, int) or isinstance(max_uses, bool) or max_uses < 1:
+            raise ValueError("Invite max_uses must be a positive integer")
         raw_token = "sp_inv_" + secrets.token_urlsafe(32)
         invite_id = uuid.uuid4().hex
         created_at = _iso()
@@ -557,15 +621,90 @@ class PortalDatabase:
             if not issuer or issuer["role"] != "operator" or issuer["status"] != "active":
                 raise PermissionError("Only an active operator can issue invites")
             conn.execute(
-                "INSERT INTO portal_invites(id,token_hash,issuer_user_id,bound_email,expires_at,created_at) VALUES(?,?,?,?,?,?)",
-                (invite_id, _digest(raw_token, self.key_pepper), issuer_user_id, bound_email.strip().lower() if bound_email else None, expires_at, created_at),
+                "INSERT INTO portal_invites(id,token_hash,issuer_user_id,bound_email,expires_at,max_uses,created_at) VALUES(?,?,?,?,?,?,?)",
+                (invite_id, _digest(raw_token, self.key_pepper), issuer_user_id, bound_email.strip().lower() if bound_email else None, expires_at, max_uses, created_at),
             )
-        return {"id": invite_id, "bound_email": bound_email, "expires_at": expires_at, "created_at": created_at}, raw_token
+        return {"id": invite_id, "bound_email": bound_email, "expires_at": expires_at, "max_uses": max_uses, "uses_count": 0, "revoked_at": None, "created_at": created_at}, raw_token
+
+    def create_developer_invite(
+        self, *, issuer_user_id: str, expires_in_seconds: int = 7 * 24 * 60 * 60
+    ) -> tuple[dict[str, Any], str]:
+        if not 60 <= expires_in_seconds <= 30 * 24 * 60 * 60:
+            raise ValueError("Invite expiry must be between 60 seconds and 30 days")
+        raw_token = "sp_inv_" + secrets.token_urlsafe(32)
+        invite_id = uuid.uuid4().hex
+        created_at = _iso()
+        expires_at = _iso(_now() + timedelta(seconds=expires_in_seconds))
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            issuer = conn.execute("SELECT role,status,developer_invite_issued_at FROM portal_users WHERE id=?", (issuer_user_id,)).fetchone()
+            if not issuer or issuer["role"] != "developer" or issuer["status"] != "active":
+                raise PermissionError("Only an active developer can issue a developer invite")
+            if issuer["developer_invite_issued_at"] is not None:
+                raise PermissionError("Developer invite entitlement was already issued")
+            conn.execute(
+                "INSERT INTO portal_invites(id,token_hash,issuer_user_id,expires_at,max_uses,created_at) VALUES(?,?,?,?,1,?)",
+                (invite_id, _digest(raw_token, self.key_pepper), issuer_user_id, expires_at, created_at),
+            )
+            conn.execute("UPDATE portal_users SET developer_invite_issued_at=? WHERE id=?", (created_at, issuer_user_id))
+        return {"id": invite_id, "expires_at": expires_at, "max_uses": 1, "uses_count": 0, "revoked_at": None, "created_at": created_at}, raw_token
+
+    def revoke_invite(self, invite_id: str, *, revoked_by_user_id: str) -> bool:
+        now = _iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            operator = conn.execute("SELECT role,status FROM portal_users WHERE id=?", (revoked_by_user_id,)).fetchone()
+            if not operator or operator["role"] != "operator" or operator["status"] != "active":
+                raise PermissionError("Only an active operator can revoke invites")
+            result = conn.execute(
+                "UPDATE portal_invites SET revoked_at=?,revoked_by_user_id=? WHERE id=? AND revoked_at IS NULL",
+                (now, revoked_by_user_id, invite_id),
+            )
+            return result.rowcount == 1
 
     def list_invites(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT id,bound_email,expires_at,consumed_at,consumed_by_user_id,created_at FROM portal_invites ORDER BY created_at DESC").fetchall()
+            rows = conn.execute("SELECT id,bound_email,expires_at,consumed_at,consumed_by_user_id,max_uses,uses_count,revoked_at,revoked_by_user_id,created_at FROM portal_invites ORDER BY created_at DESC").fetchall()
         return [dict(row) for row in rows]
+
+    def create_local_account_with_invite(
+        self, *, raw_token: str, username: str, password_hash: str, display_name: str
+    ) -> dict[str, Any]:
+        clean_username = username.strip() if isinstance(username, str) else ""
+        if not clean_username or len(clean_username) > 64 or any(ord(char) < 32 for char in clean_username):
+            raise ValueError("Invalid username: must contain 1 to 64 printable characters")
+        normalized = clean_username.casefold()
+        if not password_hash:
+            raise ValueError("Password hash is required")
+        now = _iso()
+        user_id = uuid.uuid4().hex
+        token_hash = _digest(raw_token, self.key_pepper)
+        try:
+            with self.connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                invite = conn.execute("SELECT * FROM portal_invites WHERE token_hash=?", (token_hash,)).fetchone()
+                if (not invite or invite["revoked_at"] or invite["uses_count"] >= invite["max_uses"]
+                        or invite["expires_at"] <= now):
+                    raise PermissionError("This invitation is invalid, expired, revoked, or exhausted")
+                conn.execute(
+                    "INSERT INTO portal_users(id,email,email_verified,display_name,role,status,created_at,last_login_at,username,username_normalized,password_hash,password_hash_algorithm,password_hash_updated_at) "
+                    "VALUES(?,NULL,0,?,'developer','active',?,?,?,?,?,'argon2id',?)",
+                    (user_id, display_name.strip() or clean_username, now, now, clean_username, normalized, password_hash, now),
+                )
+                consumed_count = invite["uses_count"] + 1
+                exhausted_at = now if consumed_count >= invite["max_uses"] else None
+                update = conn.execute(
+                    "UPDATE portal_invites SET uses_count=?,consumed_at=COALESCE(consumed_at,?),consumed_by_user_id=COALESCE(consumed_by_user_id,?) "
+                    "WHERE id=? AND uses_count=? AND uses_count<max_uses AND revoked_at IS NULL AND expires_at>?",
+                    (consumed_count, exhausted_at, user_id, invite["id"], invite["uses_count"], now),
+                )
+                if update.rowcount != 1:
+                    raise PermissionError("This invitation was already exhausted")
+                return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
+        except sqlite3.IntegrityError as error:
+            if "username" in str(error).casefold() or "unique" in str(error).casefold():
+                raise ValueError("Username is already in use") from error
+            raise
 
     def create_oauth_transaction(self, state: str, nonce: str, invite_id: str | None, ttl_seconds: int = 600) -> None:
         if not 60 <= ttl_seconds <= 900:
@@ -588,6 +727,17 @@ class PortalDatabase:
             conn.execute("DELETE FROM portal_oauth_transactions WHERE state_hash=?", (_digest(state, self.key_pepper),))
             return dict(row)
 
+    @staticmethod
+    def _consume_invite(conn: sqlite3.Connection, invite_id: str, user_id: str, now: str) -> bool:
+        result = conn.execute(
+            "UPDATE portal_invites SET uses_count=uses_count+1, "
+            "consumed_at=CASE WHEN uses_count+1>=max_uses THEN ? ELSE consumed_at END, "
+            "consumed_by_user_id=COALESCE(consumed_by_user_id,?) "
+            "WHERE id=? AND uses_count<max_uses AND revoked_at IS NULL AND expires_at>?",
+            (now, user_id, invite_id, now),
+        )
+        return result.rowcount == 1
+
     def provision_identity(self, *, subject: str, email: str | None, email_verified: bool, name: str, invite_id: str | None) -> dict[str, Any]:
         now = _iso()
         with self.connect() as conn:
@@ -598,20 +748,19 @@ class PortalDatabase:
                     raise PermissionError("This account is suspended")
                 if invite_id:
                     invite = conn.execute("SELECT * FROM portal_invites WHERE id=?", (invite_id,)).fetchone()
-                    if not invite or invite["consumed_at"] or invite["expires_at"] <= now:
-                        raise PermissionError("This invitation is invalid, expired, or already used")
+                    if not invite or invite["revoked_at"] or invite["uses_count"] >= invite["max_uses"] or invite["expires_at"] <= now:
+                        raise PermissionError("This invitation is invalid, expired, revoked, or exhausted")
                     if invite["bound_email"] and (not email_verified or not email or invite["bound_email"] != email.strip().lower()):
                         raise PermissionError("This invitation is bound to a different verified email address")
-                    consumed = conn.execute("UPDATE portal_invites SET consumed_at=?,consumed_by_user_id=? WHERE id=? AND consumed_at IS NULL", (now, user["id"], invite_id))
-                    if consumed.rowcount != 1:
-                        raise PermissionError("This invitation was already used")
+                    if not self._consume_invite(conn, invite_id, user["id"], now):
+                        raise PermissionError("This invitation was already exhausted")
                 conn.execute("UPDATE portal_users SET email=?, email_verified=?, display_name=?, last_login_at=? WHERE id=?", (email, int(email_verified), name, now, user["id"]))
                 return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user["id"],)).fetchone())
             if not invite_id:
                 raise PermissionError("An operator invitation is required to create an account")
             invite = conn.execute("SELECT * FROM portal_invites WHERE id=?", (invite_id,)).fetchone()
-            if not invite or invite["consumed_at"] or invite["expires_at"] <= now:
-                raise PermissionError("This invitation is invalid, expired, or already used")
+            if not invite or invite["revoked_at"] or invite["uses_count"] >= invite["max_uses"] or invite["expires_at"] <= now:
+                raise PermissionError("This invitation is invalid, expired, revoked, or exhausted")
             if invite["bound_email"] and (not email_verified or not email or invite["bound_email"] != email.strip().lower()):
                 raise PermissionError("This invitation is bound to a different verified email address")
             user_id = uuid.uuid4().hex
@@ -619,7 +768,8 @@ class PortalDatabase:
                 "INSERT INTO portal_users(id,oidc_subject,email,email_verified,display_name,role,status,created_at,last_login_at) VALUES(?,?,?,?,?,'developer','active',?,?)",
                 (user_id, subject, email, int(email_verified), name or "Hack Club member", now, now),
             )
-            conn.execute("UPDATE portal_invites SET consumed_at=?,consumed_by_user_id=? WHERE id=? AND consumed_at IS NULL", (now, user_id, invite_id))
+            if not self._consume_invite(conn, invite_id, user_id, now):
+                raise PermissionError("This invitation was already exhausted")
             return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
 
     def upsert_user(self, *, subject: str, email: str | None, name: str, role: str = "developer") -> dict[str, Any]:
