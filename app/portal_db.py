@@ -771,6 +771,29 @@ class PortalDatabase:
                 raise ValueError("Username is already in use") from error
             return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
 
+    def adopt_existing_operator(
+        self, *, user_id: str, username: str, normalized_username: str, password_hash: str
+    ) -> dict[str, Any]:
+        if not password_hash:
+            raise ValueError("Password hash is required")
+        now = _iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute("SELECT role,username,password_hash FROM portal_users WHERE id=?", (user_id,)).fetchone()
+            if not user or user["role"] != "operator" or user["username"] is not None or user["password_hash"] is not None:
+                raise PermissionError("Only an operator without local credentials can be adopted")
+            try:
+                updated = conn.execute(
+                    "UPDATE portal_users SET username=?,username_normalized=?,password_hash=?,password_hash_algorithm='argon2id',password_hash_updated_at=? "
+                    "WHERE id=? AND role='operator' AND username IS NULL AND password_hash IS NULL",
+                    (username, normalized_username, password_hash, now, user_id),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("Username is already in use") from error
+            if updated.rowcount != 1:
+                raise PermissionError("Only an operator without local credentials can be adopted")
+            return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
+
     def reset_local_password(self, *, user_id: str, password_hash: str) -> bool:
         if not password_hash:
             raise ValueError("Password hash is required")

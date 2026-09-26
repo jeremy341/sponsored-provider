@@ -1,8 +1,12 @@
+import hashlib
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from cryptography.fernet import Fernet
 
 from app.password_auth import PasswordPolicyError, hash_password, verify_password
+import app.password_auth as password_auth
+import pytest
 from app.portal_api import PortalService, create_portal_router
 from app.portal_db import PortalDatabase
 from app.cli import bootstrap_local_operator, operator_reset_password
@@ -41,6 +45,14 @@ def test_password_hash_uses_argon2id_and_verifies_password():
 def test_password_verification_rejects_empty_or_malformed_hashes():
     assert not verify_password("local-auth timing equalizer", "")
     assert not verify_password("correct horse battery staple", "not-an-argon2-hash")
+
+
+def test_malformed_stored_hash_performs_dummy_argon2_work(monkeypatch):
+    work = []
+    monkeypatch.setattr(password_auth, "_verify_dummy", lambda password: work.append(password) or False)
+
+    assert not password_auth.verify_password_or_dummy("candidate password", "malformed stored hash")
+    assert work == ["candidate password"]
 
 
 def test_password_policy_rejects_short_and_oversized_passwords():
@@ -153,6 +165,8 @@ def test_active_router_does_not_register_hca_routes(tmp_path):
     client, _repository, _invite, _ = _local_app(tmp_path)
     assert client.get("/auth/callback").status_code == 404
     assert client.post("/auth/callback").status_code == 404
+    assert client.post("/auth/adopt-operator").status_code == 404
+    assert client.post("/api/operator/adopt-operator").status_code == 404
 
 
 def test_cli_bootstrap_creates_only_the_first_operator(tmp_path):
@@ -205,7 +219,7 @@ def test_operator_reset_requires_valid_operator_credentials(tmp_path):
 def test_main_startup_serves_local_auth_without_oauth_and_does_not_mount_hca(tmp_path):
     from fastapi import FastAPI
     from app.config import Settings, get_settings
-    from app.main import lifespan
+    from app.main import get_portal_db, lifespan
 
     settings = Settings(
         database_path=str(tmp_path / "provider.db"),
@@ -214,11 +228,84 @@ def test_main_startup_serves_local_auth_without_oauth_and_does_not_mount_hca(tmp
     )
     local_app = FastAPI(lifespan=lifespan)
     local_app.dependency_overrides[get_settings] = lambda: settings
+    repository = get_portal_db(settings)
+    operator = repository.upsert_user(subject="operator-before-startup", email="op@example.test", name="Operator", role="operator")
+    _record, invite = repository.create_invite(issuer_user_id=operator["id"])
 
     with TestClient(local_app, base_url="https://portal.example") as client:
-        assert client.post("/auth/login", json={}, headers=ORIGIN).status_code == 401
+        response = client.post("/auth/signup", json={"username": "secure-default", "password": "correct horse battery staple", "invite": invite}, headers=ORIGIN)
+        assert response.status_code == 201
+        session_cookie = next(value for value in response.headers.get_list("set-cookie") if value.startswith("portal_session="))
+        assert "secure" in session_cookie.lower()
         assert client.get("/auth/callback").status_code == 404
         assert local_app.state.portal_enabled is True
+
+
+def test_cookie_security_defaults_on_and_can_be_disabled_for_local_http(tmp_path, monkeypatch):
+    from app.config import Settings
+
+    defaults = Settings(database_path=str(tmp_path / "default.db"), provider_key_pepper="p" * 40, _env_file=None)
+    monkeypatch.setenv("PORTAL_COOKIE_SECURE", "false")
+    local_http = Settings(database_path=str(tmp_path / "http.db"), provider_key_pepper="p" * 40, _env_file=None)
+
+    assert defaults.portal_cookie_secure is True
+    assert local_http.portal_cookie_secure is False
+
+
+def test_existing_hca_operator_can_be_adopted_without_changing_identity_or_history(tmp_path):
+    from app import cli
+
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    legacy = repository.upsert_user(subject="hca-operator-subject", email="legacy@example.test", name="Legacy operator", role="operator")
+    before = {key: legacy[key] for key in ("id", "oidc_subject", "role", "created_at", "last_login_at")}
+    adopt = getattr(cli, "adopt_local_operator", None)
+    assert callable(adopt)
+    with pytest.raises(PermissionError):
+        bootstrap_local_operator(repository, "second-operator", "second operator password long enough")
+
+    adopted = adopt(repository, legacy["id"], "adopted-operator", "operator password long enough")
+
+    assert {key: adopted[key] for key in before} == before
+    assert adopted["username_normalized"] == "adopted-operator"
+    assert verify_password("operator password long enough", adopted["password_hash"])
+
+
+def test_operator_adoption_refuses_existing_local_credentials_and_non_operators(tmp_path):
+    from app import cli
+
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    adopt = getattr(cli, "adopt_local_operator", None)
+    assert callable(adopt)
+    operator = bootstrap_local_operator(repository, "Existing-Operator", "operator password long enough")
+    _developer_invite, raw = repository.create_invite(issuer_user_id=operator["id"])
+    developer = repository.create_local_account_with_invite(
+        raw_token=raw, username="existing-developer", password_hash=hash_password("developer password long enough"), display_name="Developer"
+    )
+
+    with pytest.raises(PermissionError):
+        adopt(repository, operator["id"], "replacement", "replacement password long enough")
+    with pytest.raises(PermissionError):
+        adopt(repository, developer["id"], "not-operator", "replacement password long enough")
+
+
+def test_cli_exposes_operator_adoption_without_http_route(tmp_path, monkeypatch, capsys):
+    from app import cli
+    from app.config import Settings
+
+    settings = Settings(database_path=str(tmp_path / "provider.db"), provider_key_pepper="p" * 40)
+    portal_pepper = hashlib.sha256(("sponsored-provider:portal:v1:" + settings.provider_key_pepper).encode()).hexdigest()
+    repository = PortalDatabase(settings.database_path, key_pepper=portal_pepper)
+    legacy = repository.upsert_user(subject="hca-operator", email="legacy@example.test", name="Legacy", role="operator")
+    prompts = iter(["operator password long enough", "operator password long enough"])
+    monkeypatch.setattr(cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(cli.getpass, "getpass", lambda _prompt: next(prompts))
+    monkeypatch.setattr("builtins.input", lambda _prompt: "legacy-user")
+    monkeypatch.setattr("sys.argv", ["provider", "auth", "adopt-operator", "--user-id", legacy["id"]])
+
+    cli.main()
+
+    assert "Operator account adopted." in capsys.readouterr().out
+    assert repository.get_user(legacy["id"])["oidc_subject"] == "hca-operator"
 
 
 def test_cli_bootstrap_prompts_for_password_without_echoing_it(tmp_path, monkeypatch, capsys):
