@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     database_path: str = "./provider.db"
     provider_key_pepper: str = ""
     provider_secret_key: str = ""
+    portal_public_origin: str = ""
+    portal_auth_rate_limit_attempts: int = 5
+    portal_auth_rate_limit_window_seconds: int = 900
     admin_token: str = ""
     rate_limit_requests_per_minute: int = 0
     provider_hard_stop_usd: float = 34.70

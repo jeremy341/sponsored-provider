@@ -170,6 +170,11 @@ class PortalDatabase:
                     expires_at TEXT NOT NULL,
                     revoked_at TEXT
                 );
+                CREATE TABLE IF NOT EXISTS portal_auth_rate_limits (
+                    bucket_hash TEXT PRIMARY KEY,
+                    window_started REAL NOT NULL,
+                    attempts INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS portal_catalog_models (
                     provider_id TEXT NOT NULL,
                     model_id TEXT NOT NULL,
@@ -707,6 +712,84 @@ class PortalDatabase:
             if "username" in str(error).casefold() or "unique" in str(error).casefold():
                 raise ValueError("Username is already in use") from error
             raise
+
+    def get_local_user_by_username(self, normalized_username: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM portal_users WHERE username_normalized=?", (normalized_username,)).fetchone()
+        return self._dict(row)
+
+    def allow_local_auth_attempt(
+        self, *, normalized_username: str, client_ip: str, limit: int, window_seconds: int
+    ) -> bool:
+        now = _now().timestamp()
+        buckets = [
+            _digest("username:" + normalized_username, self.key_pepper),
+            _digest("ip:" + client_ip, self.key_pepper),
+        ]
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = {
+                row["bucket_hash"]: row
+                for row in conn.execute(
+                    "SELECT bucket_hash,window_started,attempts FROM portal_auth_rate_limits WHERE bucket_hash IN (?,?)",
+                    buckets,
+                )
+            }
+            if any(
+                row["window_started"] + window_seconds > now and row["attempts"] >= limit
+                for row in rows.values()
+            ):
+                return False
+            for bucket in buckets:
+                row = rows.get(bucket)
+                if not row or row["window_started"] + window_seconds <= now:
+                    conn.execute(
+                        "INSERT INTO portal_auth_rate_limits(bucket_hash,window_started,attempts) VALUES(?,?,1) "
+                        "ON CONFLICT(bucket_hash) DO UPDATE SET window_started=excluded.window_started,attempts=1",
+                        (bucket, now),
+                    )
+                else:
+                    conn.execute("UPDATE portal_auth_rate_limits SET attempts=attempts+1 WHERE bucket_hash=?", (bucket,))
+            return True
+
+    def create_first_local_operator(self, *, username: str, normalized_username: str, password_hash: str) -> dict[str, Any]:
+        if not password_hash:
+            raise ValueError("Password hash is required")
+        now = _iso()
+        user_id = uuid.uuid4().hex
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if conn.execute("SELECT 1 FROM portal_users WHERE role='operator' LIMIT 1").fetchone():
+                raise PermissionError("An operator already exists")
+            try:
+                conn.execute(
+                    "INSERT INTO portal_users(id,oidc_subject,email,email_verified,display_name,role,status,created_at,last_login_at,username,username_normalized,password_hash,password_hash_algorithm,password_hash_updated_at) "
+                    "VALUES(?,NULL,NULL,0,?,'operator','active',?,?,?,?,?,'argon2id',?)",
+                    (user_id, username, now, now, username, normalized_username, password_hash, now),
+                )
+            except sqlite3.IntegrityError as error:
+                raise ValueError("Username is already in use") from error
+            return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
+
+    def reset_local_password(self, *, user_id: str, password_hash: str) -> bool:
+        if not password_hash:
+            raise ValueError("Password hash is required")
+        now = _iso()
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                "UPDATE portal_users SET password_hash=?,password_hash_algorithm='argon2id',password_hash_updated_at=? "
+                "WHERE id=? AND username IS NOT NULL AND status='active'",
+                (password_hash, now, user_id),
+            )
+            if updated.rowcount != 1:
+                return False
+            conn.execute("UPDATE portal_sessions SET revoked_at=COALESCE(revoked_at,?) WHERE user_id=?", (now, user_id))
+            return True
+
+    def record_local_login(self, user_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("UPDATE portal_users SET last_login_at=? WHERE id=? AND status='active'", (_iso(), user_id))
 
     def create_oauth_transaction(self, state: str, nonce: str, invite_id: str | None, ttl_seconds: int = 600) -> None:
         if not 60 <= ttl_seconds <= 900:
