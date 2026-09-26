@@ -54,7 +54,7 @@ def test_local_auth_migration_preserves_hca_identity_invite_history_and_is_idemp
     assert "max_uses" in invite_columns
     assert "uses_count" in invite_columns
     assert "revoked_at" in invite_columns
-    assert migrations[-1][0] == 4
+    assert migrations[-1][0] == 5
     assert user_before == ("legacy-user", "ident!hca-subject", "legacy@example.test", 1, "Legacy HCA", "developer", "2026-01-04", "2026-02-05")
     assert invite_before == ("legacy-invite", "hashed-token", "legacy-operator", "legacy@example.test", "2027-01-01", "2026-01-05", "legacy-user", "2026-01-04")
 
@@ -204,6 +204,27 @@ def test_model_approval_does_not_reenable_legacy_disabled_connection(tmp_path):
             WHERE c.legacy_profile_id='provider-old'""").fetchone()
 
     assert tuple(state) == ("mapped", "mapped", 0, 0)
+    assert repository.list_models() == []
+    assert repository.get_model("provider-old::alpha") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
+
+
+def test_legacy_offer_requires_exact_active_discovery_before_routing(tmp_path):
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    with legacy.connect() as connection:
+        connection.execute("UPDATE upstream_profiles SET models_json='[\"different-model\"]' WHERE id='provider-old'")
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    user = repository.upsert_user(subject="undiscovered", email="undiscovered@example.test", name="Undiscovered")
+    key = repository.create_user_key(user["id"], "Undiscovered model", allowed_models_mode="all_approved")
+    repository.add_catalog_model(
+        provider_id="provider-old", model_id="alpha", provider_name="Old provider", capabilities=["text"],
+        input_price_per_million=1.25, output_price_per_million=2.5,
+        price_source="reviewed", approved=True, active=True,
+    )
+    with repository.connect() as connection:
+        connection.execute("UPDATE provider_connections SET enabled=1 WHERE legacy_profile_id='provider-old'")
+
     assert repository.list_models() == []
     assert repository.get_model("provider-old::alpha") is None
     assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []

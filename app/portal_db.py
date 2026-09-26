@@ -21,6 +21,8 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 
+from app.catalog import DiscoveredModel, PriceSuggestion
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
@@ -86,6 +88,14 @@ class PriceVersion:
     cached_input_rate: str | None
     rate_unit: str
     is_active: bool
+
+
+@dataclass(frozen=True)
+class SyncSummary:
+    connection_id: str
+    discovered_count: int
+    stale_count: int
+    model_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -281,6 +291,7 @@ class PortalDatabase:
                 (2, self._migrate_legacy_catalog),
                 (3, self._migrate_identity_and_numeric_safety),
                 (4, self._migrate_local_auth_and_invite_quotas),
+                (5, self._migrate_provider_discovery_and_prices),
             )
             for version, migration in migrations:
                 if version not in applied:
@@ -346,6 +357,63 @@ class PortalDatabase:
             "revoked_by_user_id": "TEXT",
         })
         conn.execute("UPDATE portal_invites SET uses_count=1 WHERE consumed_at IS NOT NULL AND uses_count=0")
+
+    def _migrate_provider_discovery_and_prices(self, conn: sqlite3.Connection) -> None:
+        if not self._table_exists(conn, "provider_brands"):
+            self._migrate_catalog_and_credits(conn)
+            self._migrate_legacy_catalog(conn)
+            self._migrate_identity_and_numeric_safety(conn)
+        self._add_columns(conn, "provider_brands", {"slug": "TEXT"})
+        self._add_columns(conn, "provider_connections", {"label": "TEXT NOT NULL DEFAULT ''"})
+        self._add_columns(conn, "connection_models", {
+            "is_stale": "INTEGER NOT NULL DEFAULT 0",
+            "last_seen_at": "TEXT",
+        })
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS provider_brands_slug_unique ON provider_brands(slug) WHERE slug IS NOT NULL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS price_suggestions (
+                id TEXT PRIMARY KEY,
+                offer_id TEXT NOT NULL REFERENCES catalog_offers(id),
+                input_rate TEXT,
+                output_rate TEXT,
+                cached_input_rate TEXT,
+                source TEXT NOT NULL,
+                source_url TEXT,
+                evidence TEXT,
+                confidence TEXT,
+                fetched_at TEXT,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected')),
+                decided_by TEXT,
+                decided_at TEXT,
+                effective_version_id TEXT,
+                CHECK(input_rate IS NULL OR (input_rate<>'' AND input_rate NOT GLOB '*[^0-9.]*' AND input_rate GLOB '[0-9]*' AND input_rate NOT GLOB '*.*.*' AND input_rate NOT LIKE '%.' AND input_rate NOT LIKE '.%')),
+                CHECK(output_rate IS NULL OR (output_rate<>'' AND output_rate NOT GLOB '*[^0-9.]*' AND output_rate GLOB '[0-9]*' AND output_rate NOT GLOB '*.*.*' AND output_rate NOT LIKE '%.' AND output_rate NOT LIKE '.%')),
+                CHECK(cached_input_rate IS NULL OR (cached_input_rate<>'' AND cached_input_rate NOT GLOB '*[^0-9.]*' AND cached_input_rate GLOB '[0-9]*' AND cached_input_rate NOT GLOB '*.*.*' AND cached_input_rate NOT LIKE '%.' AND cached_input_rate NOT LIKE '.%'))
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS price_suggestions_pending ON price_suggestions(offer_id,status,created_at DESC)")
+        conn.executescript("""
+            DROP VIEW IF EXISTS portal_eligible_legacy_models;
+            CREATE VIEW portal_eligible_legacy_models AS
+            SELECT DISTINCT model.provider_id,model.model_id
+            FROM portal_catalog_models model
+            JOIN provider_brands brand ON brand.migration_ref=model.provider_id
+            JOIN provider_connections connection ON connection.brand_id=brand.id
+                AND connection.legacy_profile_id=model.provider_id
+            JOIN catalog_offers offer ON offer.brand_id=brand.id
+                AND offer.canonical_model_id=model.model_id
+            JOIN offer_routes route ON route.offer_id=offer.id
+                AND route.connection_id=connection.id
+                AND route.upstream_model_id=model.model_id
+            JOIN connection_models discovered ON discovered.connection_id=connection.id
+                AND discovered.upstream_model_id=route.upstream_model_id
+            WHERE brand.identity_status='mapped'
+                AND connection.mapping_status='mapped' AND connection.enabled=1
+                AND discovered.active=1 AND discovered.is_stale=0
+                AND route.active=1 AND offer.approved=1 AND offer.active=1
+                AND EXISTS (SELECT 1 FROM price_versions price WHERE price.offer_id=offer.id AND price.is_active=1);
+        """)
 
     @staticmethod
     def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -1000,6 +1068,269 @@ class PortalDatabase:
         with self.connect() as conn:
             conn.execute("UPDATE portal_sessions SET revoked_at=COALESCE(revoked_at,?) WHERE token_hash=?", (_iso(), _digest(raw_token, self.key_pepper)))
 
+    def register_connection(
+        self,
+        secret_profile_id: str,
+        brand_slug: str,
+        brand_name: str,
+        connection_label: str,
+    ) -> ProviderConnection:
+        if not isinstance(secret_profile_id, str) or not secret_profile_id.strip():
+            raise ValueError("A legacy secret profile ID is required")
+        brand_slug = brand_slug.strip().lower() if isinstance(brand_slug, str) else ""
+        brand_name = brand_name.strip() if isinstance(brand_name, str) else ""
+        connection_label = connection_label.strip() if isinstance(connection_label, str) else ""
+        if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", brand_slug):
+            raise ValueError("Brand slug must contain lowercase letters, digits, and single hyphens")
+        if not brand_name or len(brand_name) > 120 or not connection_label or len(connection_label) > 120:
+            raise ValueError("Brand name and connection label are required")
+        with self.connect() as conn:
+            if not self._table_exists(conn, "upstream_profiles"):
+                raise LookupError("The encrypted upstream profile does not exist")
+            profile = conn.execute(
+                "SELECT id,name,provider_kind,base_url,enabled,created_at FROM upstream_profiles WHERE id=?",
+                (secret_profile_id,),
+            ).fetchone()
+            if not profile:
+                raise LookupError("The encrypted upstream profile does not exist")
+
+            brand = conn.execute("SELECT id FROM provider_brands WHERE slug=?", (brand_slug,)).fetchone()
+            if not brand:
+                brand = conn.execute("SELECT id FROM provider_brands WHERE migration_ref=?", (secret_profile_id,)).fetchone()
+            brand_id = brand["id"] if brand else f"brand:{brand_slug}"
+            if brand:
+                conn.execute("UPDATE provider_brands SET name=?,slug=?,identity_status='mapped' WHERE id=?", (brand_name, brand_slug, brand_id))
+            else:
+                conn.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at,identity_status,slug) VALUES(?,?,?,?, 'mapped',?)",
+                             (brand_id, brand_name, secret_profile_id, profile["created_at"], brand_slug))
+
+            existing = conn.execute("SELECT id FROM provider_connections WHERE legacy_profile_id=?", (secret_profile_id,)).fetchone()
+            connection_id = existing["id"] if existing else secret_profile_id
+            conn.execute("""INSERT INTO provider_connections(
+                id,brand_id,legacy_profile_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,legacy_enabled,label
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(legacy_profile_id) DO UPDATE SET brand_id=excluded.brand_id,
+                    base_url=excluded.base_url,provider_kind=excluded.provider_kind,
+                    secret_ref=excluded.secret_ref,mapping_status='mapped',enabled=excluded.enabled,label=excluded.label""",
+                (connection_id, brand_id, secret_profile_id, profile["base_url"], profile["provider_kind"],
+                 secret_profile_id, profile["enabled"], profile["created_at"], "mapped", profile["enabled"], connection_label))
+            row = conn.execute("""SELECT id,brand_id,legacy_profile_id,base_url,secret_ref,mapping_status,enabled
+                FROM provider_connections WHERE legacy_profile_id=?""", (secret_profile_id,)).fetchone()
+        return ProviderConnection(row["id"], row["brand_id"], row["legacy_profile_id"], row["base_url"], row["secret_ref"], row["mapping_status"], bool(row["enabled"]))
+
+    def get_connection(self, connection_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("""SELECT connection.*,brand.name brand_name,brand.slug brand_slug,
+                brand.identity_status FROM provider_connections connection
+                JOIN provider_brands brand ON brand.id=connection.brand_id WHERE connection.id=?""", (connection_id,)).fetchone()
+        return dict(row) if row else None
+
+    def apply_discovery(self, connection_id: str, discovered: list[DiscoveredModel], synced_at: datetime) -> SyncSummary:
+        if not isinstance(synced_at, datetime):
+            raise ValueError("Discovery timestamp must be a datetime")
+        if not isinstance(discovered, list) or any(not isinstance(model, DiscoveredModel) for model in discovered):
+            raise ValueError("Discovered models must be normalized DiscoveredModel records")
+        ids = [model.id for model in discovered]
+        if any(not model_id for model_id in ids) or len(ids) != len(set(ids)):
+            raise ValueError("Discovered model IDs must be non-empty and unique")
+        synced_text = _iso(synced_at)
+        with self.connect() as conn:
+            connection = conn.execute("""SELECT c.*,b.name brand_name,b.slug brand_slug,b.identity_status
+                FROM provider_connections c JOIN provider_brands b ON b.id=c.brand_id WHERE c.id=?""", (connection_id,)).fetchone()
+            if not connection:
+                raise LookupError("Provider connection does not exist")
+            if connection["mapping_status"] != "mapped" or connection["identity_status"] != "mapped":
+                raise ValueError("Provider connection must be mapped before model discovery")
+            if not self._table_exists(conn, "upstream_profiles") or not conn.execute(
+                "SELECT 1 FROM upstream_profiles WHERE id=?", (connection["legacy_profile_id"],)
+            ).fetchone():
+                raise ValueError("Provider connection has no exact encrypted profile")
+
+            before = conn.execute("SELECT COUNT(*) FROM connection_models WHERE connection_id=? AND active=1 AND is_stale=0", (connection_id,)).fetchone()[0]
+            conn.execute("UPDATE connection_models SET active=0,is_stale=1 WHERE connection_id=?", (connection_id,))
+            for model in discovered:
+                conn.execute("""INSERT INTO connection_models(connection_id,upstream_model_id,metadata_json,active,is_stale,last_seen_at)
+                    VALUES(?,?,?,1,0,?) ON CONFLICT(connection_id,upstream_model_id) DO UPDATE SET
+                    metadata_json=excluded.metadata_json,active=1,is_stale=0,last_seen_at=excluded.last_seen_at""",
+                    (connection_id, model.id, json.dumps({"name": model.name, "context_length": model.context_length,
+                     "capabilities": list(model.capabilities), "metadata": dict(model.metadata)}, sort_keys=True), synced_text))
+
+                offer_id = f"offer:{uuid.uuid5(uuid.NAMESPACE_URL, connection['brand_id'] + ':' + model.id).hex}"
+                conn.execute("""INSERT OR IGNORE INTO catalog_offers(
+                    id,brand_id,canonical_model_id,display_name,capabilities_json,approved,active,updated_at
+                    ) VALUES(?,?,?,?,?,0,0,?)""",
+                    (offer_id, connection["brand_id"], model.id, model.name or model.id,
+                     json.dumps(sorted(set(model.capabilities))), synced_text))
+                offer = conn.execute("SELECT id,approved,active FROM catalog_offers WHERE brand_id=? AND canonical_model_id=?",
+                                     (connection["brand_id"], model.id)).fetchone()
+                route_id = f"route:{uuid.uuid5(uuid.NAMESPACE_URL, connection_id + ':' + offer['id'] + ':' + model.id).hex}"
+                conn.execute("""INSERT OR IGNORE INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active)
+                    VALUES(?,?,?,?,0)""", (route_id, offer["id"], connection_id, model.id))
+                active_price = conn.execute("SELECT 1 FROM price_versions WHERE offer_id=? AND is_active=1", (offer["id"],)).fetchone()
+                eligible = bool(offer["approved"] and offer["active"] and connection["enabled"] and active_price)
+                conn.execute("UPDATE offer_routes SET active=? WHERE offer_id=? AND connection_id=? AND upstream_model_id=?",
+                             (int(eligible), offer["id"], connection_id, model.id))
+
+            stale_count = conn.execute("SELECT COUNT(*) FROM connection_models WHERE connection_id=? AND is_stale=1", (connection_id,)).fetchone()[0]
+            if before:
+                stale_count = max(stale_count, before - len(ids))
+        return SyncSummary(connection_id, len(ids), stale_count, tuple(ids))
+
+    def mark_discovery_stale(self, connection_id: str, stale_at: datetime | None = None) -> int:
+        with self.connect() as conn:
+            conn.execute("UPDATE connection_models SET is_stale=1,active=0 WHERE connection_id=?", (connection_id,))
+            conn.execute("UPDATE offer_routes SET active=0 WHERE connection_id=?", (connection_id,))
+            return conn.execute("SELECT COUNT(*) FROM connection_models WHERE connection_id=? AND is_stale=1", (connection_id,)).fetchone()[0]
+
+    def list_discovered_models(self, connection_id: str) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT upstream_model_id,metadata_json,active,is_stale,last_seen_at
+                FROM connection_models WHERE connection_id=? ORDER BY upstream_model_id""", (connection_id,)).fetchall()
+        return [{"id": row["upstream_model_id"], "metadata": json.loads(row["metadata_json"] or "{}"),
+                 "active": bool(row["active"]), "stale": bool(row["is_stale"]), "last_seen_at": row["last_seen_at"]} for row in rows]
+
+    def get_offer_id(self, brand_slug: str, canonical_model_id: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute("""SELECT offer.id FROM catalog_offers offer
+                JOIN provider_brands brand ON brand.id=offer.brand_id
+                WHERE brand.slug=? AND offer.canonical_model_id=?""", (brand_slug, canonical_model_id)).fetchone()
+        return row["id"] if row else None
+
+    def save_price_suggestion(self, offer_id: str, price: PriceSuggestion) -> PriceVersion:
+        if not isinstance(price, PriceSuggestion):
+            raise ValueError("A PriceSuggestion record is required")
+        rates = tuple(self._canonical_rate(value) for value in (
+            price.input_usd_per_million, price.output_usd_per_million, price.cached_input_usd_per_million,
+        ))
+        if rates[0] is None or rates[1] is None or not price.source:
+            raise ValueError("Input and output rates and a provenance source are required")
+        with self.connect() as conn:
+            if not conn.execute("SELECT 1 FROM catalog_offers WHERE id=?", (offer_id,)).fetchone():
+                raise LookupError("Catalog offer does not exist")
+            existing = conn.execute("""SELECT id FROM price_suggestions WHERE offer_id=? AND input_rate IS ?
+                AND output_rate IS ? AND cached_input_rate IS ? AND source=? AND source_url IS ? AND evidence IS ?
+                AND status='pending' ORDER BY created_at DESC,id DESC LIMIT 1""",
+                (offer_id, *rates, price.source, price.source_url, price.evidence)).fetchone()
+            suggestion_id = existing["id"] if existing else uuid.uuid4().hex
+            if existing:
+                return PriceVersion(suggestion_id, offer_id, rates[0], rates[1], rates[2], "per_million_tokens", False)
+            conn.execute("""INSERT INTO price_suggestions(
+                id,offer_id,input_rate,output_rate,cached_input_rate,source,source_url,evidence,confidence,fetched_at,created_at
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (suggestion_id, offer_id, *rates, price.source, price.source_url, price.evidence,
+                 price.confidence, price.fetched_at, _iso()))
+        return PriceVersion(suggestion_id, offer_id, rates[0], rates[1], rates[2], "per_million_tokens", False)
+
+    def approve_price_version(self, actor_id: str, offer_id: str, version_id: str) -> None:
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            suggestion = conn.execute("SELECT * FROM price_suggestions WHERE id=? AND offer_id=?", (version_id, offer_id)).fetchone()
+            if not suggestion or suggestion["status"] != "pending":
+                raise LookupError("Pending price suggestion does not exist")
+            effective_at = _iso()
+            conn.execute("UPDATE price_versions SET is_active=0,retired_at=? WHERE offer_id=? AND is_active=1", (effective_at, offer_id))
+            effective_id = uuid.uuid4().hex
+            conn.execute("""INSERT INTO price_versions(
+                id,offer_id,input_rate,output_rate,cached_input_rate,source,is_active,effective_at
+                ) VALUES(?,?,?,?,?,?,1,?)""",
+                (effective_id, offer_id, suggestion["input_rate"], suggestion["output_rate"],
+                 suggestion["cached_input_rate"], suggestion["source"], effective_at))
+            conn.execute("UPDATE catalog_offers SET approved=1,price_source=?,updated_at=? WHERE id=?",
+                         (suggestion["source"], effective_at, offer_id))
+            conn.execute("""UPDATE price_suggestions SET status='approved',decided_by=?,decided_at=?,effective_version_id=?
+                WHERE id=?""", (actor_id, effective_at, effective_id, version_id))
+        self.audit(actor_id, "offer.price_approved", "offer", offer_id,
+                   {"suggestion_id": version_id, "price_version_id": effective_id, "source": suggestion["source"]})
+
+    def set_offer_available(self, offer_id: str, enabled: bool, actor_id: str) -> None:
+        if not isinstance(enabled, bool):
+            raise ValueError("Offer availability must be boolean")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            offer = conn.execute("SELECT * FROM catalog_offers WHERE id=?", (offer_id,)).fetchone()
+            if not offer:
+                raise LookupError("Catalog offer does not exist")
+            eligible_routes = []
+            if self._table_exists(conn, "upstream_profiles"):
+                eligible_routes = conn.execute("""SELECT route.id FROM offer_routes route
+                    JOIN catalog_offers published ON published.id=route.offer_id
+                    JOIN provider_connections connection ON connection.id=route.connection_id
+                        AND connection.brand_id=published.brand_id
+                    JOIN provider_brands brand ON brand.id=connection.brand_id
+                    JOIN connection_models discovered ON discovered.connection_id=connection.id
+                        AND discovered.upstream_model_id=route.upstream_model_id
+                    WHERE route.offer_id=? AND brand.identity_status='mapped'
+                        AND connection.mapping_status='mapped' AND connection.enabled=1
+                        AND discovered.active=1 AND discovered.is_stale=0
+                        AND published.approved=1
+                        AND EXISTS (SELECT 1 FROM upstream_profiles profile WHERE profile.id=connection.legacy_profile_id)
+                        AND EXISTS (SELECT 1 FROM price_versions price WHERE price.offer_id=route.offer_id AND price.is_active=1)""", (offer_id,)).fetchall()
+            if enabled and not eligible_routes:
+                raise ValueError("Offer requires an approved price and an exact mapped, enabled, freshly discovered route")
+            effective_at = _iso()
+            conn.execute("UPDATE catalog_offers SET active=?,updated_at=? WHERE id=?", (int(enabled), effective_at, offer_id))
+            if enabled:
+                eligible_ids = [route["id"] for route in eligible_routes]
+                placeholders = ",".join("?" for _ in eligible_ids)
+                conn.execute(f"UPDATE offer_routes SET active=CASE WHEN id IN ({placeholders}) THEN 1 ELSE 0 END WHERE offer_id=?",
+                             (*eligible_ids, offer_id))
+            else:
+                conn.execute("UPDATE offer_routes SET active=0 WHERE offer_id=?", (offer_id,))
+        self.audit(actor_id, "offer.availability_changed", "offer", offer_id, {"enabled": enabled})
+
+    def list_operator_offers(self) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT offer.*,brand.slug brand_slug,brand.name brand_name
+                FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
+                ORDER BY brand.name,offer.canonical_model_id""").fetchall()
+            results = []
+            for row in rows:
+                active = conn.execute("SELECT * FROM price_versions WHERE offer_id=? AND is_active=1", (row["id"],)).fetchone()
+                pending = conn.execute("SELECT * FROM price_suggestions WHERE offer_id=? AND status='pending' ORDER BY created_at DESC,id DESC LIMIT 1", (row["id"],)).fetchone()
+                suggestions = conn.execute("SELECT * FROM price_suggestions WHERE offer_id=? AND status='pending' ORDER BY created_at DESC,id DESC", (row["id"],)).fetchall()
+                eligible = None
+                if self._table_exists(conn, "upstream_profiles"):
+                    eligible = conn.execute("""SELECT 1 FROM offer_routes route
+                        JOIN provider_connections connection ON connection.id=route.connection_id
+                        JOIN provider_brands brand ON brand.id=connection.brand_id
+                        JOIN connection_models discovered ON discovered.connection_id=connection.id
+                            AND discovered.upstream_model_id=route.upstream_model_id
+                        WHERE route.offer_id=? AND route.active=1 AND brand.identity_status='mapped'
+                            AND connection.mapping_status='mapped' AND connection.enabled=1
+                            AND discovered.active=1 AND discovered.is_stale=0
+                            AND EXISTS (SELECT 1 FROM upstream_profiles profile WHERE profile.id=connection.legacy_profile_id)
+                        LIMIT 1""", (row["id"],)).fetchone()
+                results.append({
+                    "id": row["id"], "brandSlug": row["brand_slug"], "brandName": row["brand_name"],
+                    "canonicalModelId": row["canonical_model_id"], "displayName": row["display_name"],
+                    "capabilities": json.loads(row["capabilities_json"] or "[]"),
+                    "approved": bool(row["approved"]), "available": bool(row["active"] and eligible and active),
+                    "activePrice": self._api_price(active), "pendingPrice": self._api_suggestion(pending),
+                    "priceSuggestions": [self._api_suggestion(item) for item in suggestions],
+                    "modelsDevSuggestion": next((self._api_suggestion(item) for item in suggestions if item["source"] == "models.dev"), None),
+                    "providerReportedPrice": next((self._api_suggestion(item) for item in suggestions if item["source"] == "provider-reported"), None),
+                })
+        return results
+
+    @staticmethod
+    def _api_price(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {"id": row["id"], "inputUsdPerMillion": float(row["input_rate"]) if row["input_rate"] is not None else None,
+                "outputUsdPerMillion": float(row["output_rate"]) if row["output_rate"] is not None else None,
+                "cachedInputUsdPerMillion": float(row["cached_input_rate"]) if row["cached_input_rate"] is not None else None,
+                "source": row["source"]}
+
+    @staticmethod
+    def _api_suggestion(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {"id": row["id"], "inputUsdPerMillion": float(row["input_rate"]) if row["input_rate"] is not None else None,
+                "outputUsdPerMillion": float(row["output_rate"]) if row["output_rate"] is not None else None,
+                "cachedInputUsdPerMillion": float(row["cached_input_rate"]) if row["cached_input_rate"] is not None else None,
+                "source": row["source"], "sourceUrl": row["source_url"],
+                "evidence": row["evidence"], "confidence": row["confidence"]}
+
     def add_catalog_model(
         self,
         *,
@@ -1100,30 +1431,53 @@ class PortalDatabase:
             query += "active=1"
         if approved_only:
             query += " AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL"
+            query += " AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)"
         query += " ORDER BY provider_name,model_id"
         with self.connect() as conn:
             rows = conn.execute(query).fetchall()
-        return [dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in rows]
+            normalized_query = """SELECT offer.id offer_id,COALESCE(brand.slug,brand.migration_ref,brand.id) provider_id,
+                brand.migration_ref,
+                brand.name provider_name,offer.canonical_model_id model_id,offer.capabilities_json,
+                CAST(price.input_rate AS REAL) input_price_per_million,
+                CAST(price.output_rate AS REAL) output_price_per_million,
+                CAST(price.cached_input_rate AS REAL) cached_input_price_per_million,
+                price.source price_source,offer.approved,offer.active,offer.updated_at
+                FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
+                JOIN price_versions price ON price.offer_id=offer.id AND price.is_active=1
+                JOIN offer_routes route ON route.offer_id=offer.id AND route.active=1
+                JOIN provider_connections connection ON connection.id=route.connection_id AND connection.brand_id=offer.brand_id
+                JOIN connection_models discovered ON discovered.connection_id=connection.id
+                    AND discovered.upstream_model_id=route.upstream_model_id AND discovered.active=1 AND discovered.is_stale=0
+                WHERE brand.identity_status='mapped' AND connection.mapping_status='mapped' AND connection.enabled=1
+                    AND EXISTS (SELECT 1 FROM upstream_profiles profile WHERE profile.id=connection.legacy_profile_id)"""
+            if approved_only:
+                normalized_query += " AND offer.approved=1 AND offer.active=1"
+            elif not include_inactive:
+                normalized_query += " AND offer.active=1"
+            normalized_query += " ORDER BY provider_name,model_id"
+            normalized_rows = conn.execute(normalized_query).fetchall() if self._table_exists(conn, "upstream_profiles") else []
+        legacy = [dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in rows]
+        normalized = [dict(row) | {"capabilities": json.loads(row["capabilities_json"] or "[]"),
+                                   "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in normalized_rows]
+        legacy_keys = {(model["provider_id"], model["model_id"]) for model in legacy}
+        normalized = [model for model in normalized if (model["migration_ref"], model["model_id"]) not in legacy_keys]
+        public_ids = {model["public_model_id"] for model in legacy}
+        return sorted(legacy + [model for model in normalized if model["public_model_id"] not in public_ids],
+                      key=lambda model: (model["provider_name"], model["model_id"]))
 
     def get_model(self, model_id: str) -> dict[str, Any] | None:
-        provider_id, separator, upstream_model_id = model_id.partition("::")
-        with self.connect() as conn:
-            if separator:
-                row = conn.execute("""SELECT * FROM portal_catalog_models
-                    WHERE provider_id=? AND model_id=? AND active=1 AND approved=1
-                    AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)""", (provider_id, upstream_model_id)).fetchone()
-            else:
-                rows = conn.execute("""SELECT * FROM portal_catalog_models
-                    WHERE model_id=? AND active=1 AND approved=1
-                    AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)""", (model_id,)).fetchall()
-                row = rows[0] if len(rows) == 1 else None
-        return dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} if row else None
+        eligible = self.list_models(approved_only=True)
+        exact = [item for item in eligible if item["public_model_id"] == model_id]
+        if not exact and "::" not in model_id:
+            exact = [item for item in eligible if item["model_id"] == model_id]
+        return exact[0] if len(exact) == 1 else None
 
     def set_model_active(self, model_id: str, *, active: bool) -> int:
         with self.connect() as conn:
             cursor = conn.execute("UPDATE portal_catalog_models SET active=?,updated_at=? WHERE model_id=?", (int(active), _iso(), model_id))
+            if not active:
+                conn.execute("UPDATE catalog_offers SET active=0,updated_at=? WHERE canonical_model_id=?", (_iso(), model_id))
+                conn.execute("UPDATE offer_routes SET active=0 WHERE offer_id IN (SELECT id FROM catalog_offers WHERE canonical_model_id=?)", (model_id,))
         return cursor.rowcount
 
     def get_runtime_setting(self, key: str, default: Any = None) -> Any:
@@ -1183,11 +1537,11 @@ class PortalDatabase:
                 for selected_id in models:
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
-                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)", (provider_id, upstream_id)).fetchone()
+                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1) AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)", (provider_id, upstream_id)).fetchone()
                         if row:
                             normalized_models.add(selected_id)
                     else:
-                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)", (selected_id,)).fetchall()
+                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1) AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)", (selected_id,)).fetchall()
                         if len(rows) == 1:
                             normalized_models.add(f"{rows[0]['provider_id']}::{selected_id}")
                 if len(normalized_models) != len(models):
@@ -1227,11 +1581,13 @@ class PortalDatabase:
                 effective_models = [f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
                     WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
                     AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)
+                    AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)
                     ORDER BY model_id""")]
             else:
                 approved = {f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
                     WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)""")}
+                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)
+                    AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)""")}
                 effective_models = [model for model in models if model in approved]
         return {
             "key_id": record["id"], "provider_key_id": record["id"], "owner_id": record["owner_user_id"],
@@ -1314,11 +1670,11 @@ class PortalDatabase:
                 for selected_id in models:
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
-                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)", (provider_id, upstream_id)).fetchone()
+                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1) AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)", (provider_id, upstream_id)).fetchone()
                         if row:
                             normalized_models.add(selected_id)
                     else:
-                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)", (selected_id,)).fetchall()
+                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1) AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)", (selected_id,)).fetchall()
                         if len(rows) == 1:
                             normalized_models.add(f"{rows[0]['provider_id']}::{selected_id}")
                 if len(normalized_models) != len(models):

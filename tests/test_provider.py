@@ -96,17 +96,34 @@ def test_admin_can_load_models_from_private_upstream_key(client):
 @respx.mock
 def test_admin_can_add_encrypted_upstream_profile_and_sync_models(client):
     test_client, settings, _ = client
-    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "OpenAI test", "provider_kind": "openai", "base_url": "https://provider.example/v1", "api_key": "upstream-secret"})
+    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "OpenAI test", "provider_kind": "openai", "base_url": "https://93.184.216.34/v1", "api_key": "upstream-secret"})
     assert created.status_code == 200
     profile_id = created.json()["id"]
     listed = test_client.get("/api/admin/upstreams", headers={"X-Admin-Token": "admin"})
     assert listed.status_code == 200
     assert listed.json()["upstreams"][0]["secret_configured"] is True
     assert "upstream-secret" not in listed.text
-    respx.get("https://provider.example/v1/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "gpt-test"}]}))
+    respx.get("https://93.184.216.34/v1/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "gpt-test"}]}))
     synced = test_client.get(f"/api/admin/upstream-models?profile_id={profile_id}", headers={"X-Admin-Token": "admin"})
     assert synced.status_code == 200
     assert synced.json()["models"] == ["gpt-test"]
+
+
+def test_failed_provider_sync_preserves_last_successful_model_ids(client):
+    _test_client, _settings, db = client
+    profile_id = "cached-model-profile"
+    with db.connect() as connection:
+        connection.execute(
+            "INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,models_json,created_at) VALUES(?,?,?,?,?,?,?)",
+            (profile_id, "Cached models", "openai_compatible", "https://93.184.216.34/v1", "encrypted-secret", "[]", "2026-01-01T00:00:00+00:00"),
+        )
+    db.update_upstream_models(profile_id, ["model-a", "model-b"], "healthy")
+
+    db.update_upstream_models(profile_id, [], "error")
+    refreshed = next(item for item in db.list_upstreams() if item["id"] == profile_id)
+
+    assert refreshed["models"] == ["model-a", "model-b"]
+    assert refreshed["health_status"] == "error"
 
 
 def test_admin_can_store_model_specific_pricing(client):

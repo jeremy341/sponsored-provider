@@ -233,9 +233,12 @@ class Database:
             data["api_key"] = self.secret_box.decrypt(data.pop("encrypted_api_key").encode()).decode()
         return data
 
-    def update_upstream_models(self, profile_id: str, models: list[str], health_status: str):
+    def update_upstream_models(self, profile_id: str, models: list[str] | None, health_status: str):
         with self.connect() as conn:
-            conn.execute("UPDATE upstream_profiles SET models_json=?, last_checked_at=?, health_status=? WHERE id=?", (json.dumps(sorted(set(models))), now_iso(), health_status, profile_id))
+            if models is None or (health_status == "error" and not models):
+                conn.execute("UPDATE upstream_profiles SET last_checked_at=?,health_status=? WHERE id=?", (now_iso(), health_status, profile_id))
+            else:
+                conn.execute("UPDATE upstream_profiles SET models_json=?, last_checked_at=?, health_status=? WHERE id=?", (json.dumps(sorted(set(models))), now_iso(), health_status, profile_id))
 
     def update_upstream_pricing(self, profile_id: str, pricing: dict):
         with self.connect() as conn:
