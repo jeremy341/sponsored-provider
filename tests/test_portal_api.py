@@ -18,8 +18,26 @@ class FixedIdentity:
         raise AssertionError("not used")
 
 
-def _app(tmp_path):
-    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+def _repository(tmp_path, provider_ids=()):
+    path = str(tmp_path / "portal.db")
+    if provider_ids:
+        legacy = Database(path, "legacy-portal-test-pepper", Fernet.generate_key().decode())
+        with legacy.connect() as connection:
+            for provider_id in provider_ids:
+                connection.execute(
+                    "INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,models_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (provider_id, provider_id, "openai_compatible", f"https://{provider_id}.example/v1", "encrypted-test-secret", "[]", "2026-01-01T00:00:00+00:00"),
+                )
+    return PortalDatabase(path, key_pepper="p" * 40)
+
+
+def _enable_connection(repository, provider_id):
+    with repository.connect() as connection:
+        connection.execute("UPDATE provider_connections SET enabled=1 WHERE legacy_profile_id=?", (provider_id,))
+
+
+def _app(tmp_path, provider_ids=()):
+    repository = _repository(tmp_path, provider_ids)
     app = FastAPI()
     app.include_router(create_portal_router(PortalService(repository, identity=FixedIdentity(), cookie_secure=False)))
     return TestClient(app), repository
@@ -114,10 +132,11 @@ def test_archived_key_keeps_usage_history(tmp_path):
 
 
 def test_key_policy_can_be_edited_only_by_its_owner(tmp_path):
-    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    repository = _repository(tmp_path, ("p",))
     owner = repository.upsert_user(subject="owner", email="owner@example.test", name="Owner")
     other = repository.upsert_user(subject="other", email="other@example.test", name="Other")
     repository.add_catalog_model(provider_id="p", model_id="model-a", provider_name="P", capabilities=["text"], input_price_per_million=1, output_price_per_million=1, price_source="verified", approved=True)
+    _enable_connection(repository, "p")
     key = repository.create_user_key(owner["id"], "Editable", allowed_models_mode="all_approved")
     assert repository.update_user_key_policy(owner["id"], key["id"], allowed_models_mode="selected", allowed_models=["model-a"], spend_limit_usd=5, spend_period="weekly", rpm_limit=30) is True
     updated = repository.get_user_key(owner["id"], key["id"])
@@ -162,11 +181,12 @@ def test_session_and_dashboard_endpoints_match_portal_contract(tmp_path):
 
 
 def test_catalog_exposes_only_approved_priced_models(tmp_path):
-    client, repository = _app(tmp_path)
+    client, repository = _app(tmp_path, ("p1",))
     _login(client, repository, "member-a")
     repository.add_catalog_model(provider_id="p1", model_id="priced-approved", provider_name="Provider", capabilities=["text"], input_price_per_million=1, output_price_per_million=2, price_source="verified", approved=True)
     repository.add_catalog_model(provider_id="p1", model_id="unapproved", provider_name="Provider", capabilities=["text"], input_price_per_million=1, output_price_per_million=2, price_source="verified", approved=False)
     repository.add_catalog_model(provider_id="p1", model_id="missing-price", provider_name="Provider", capabilities=["text"], input_price_per_million=None, output_price_per_million=None, approved=True)
+    _enable_connection(repository, "p1")
     assert [model["id"] for model in client.get("/api/models").json()] == ["p1::priced-approved"]
     repository.set_model_active("priced-approved", active=False)
     assert client.get("/api/models").json() == []
@@ -175,6 +195,29 @@ def test_catalog_exposes_only_approved_priced_models(tmp_path):
     operator_models = client.get("/api/operator/models").json()
     assert len(operator_models) == 3
     assert next(model for model in operator_models if model["id"] == "priced-approved")["available"] is False
+
+
+def test_approved_orphan_legacy_catalog_is_not_publicly_accessible(tmp_path):
+    client, repository = _app(tmp_path)
+    with repository.connect() as connection:
+        connection.execute(
+            "INSERT INTO portal_catalog_models(provider_id,model_id,provider_name,capabilities_json,input_price_per_million,output_price_per_million,price_source,approved,active,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            ("missing-provider", "orphan-model", "Unknown provider", '["text"]', 1, 2, "legacy", 0, 1, "2026-01-03T00:00:00+00:00"),
+        )
+        connection.execute("DELETE FROM portal_schema_migrations")
+    repository.init_schema()
+
+    user, _ = _login(client, repository, "orphan-owner")
+    key = repository.create_user_key(user["id"], "Orphan key", allowed_models_mode="all_approved")
+    repository.add_catalog_model(
+        provider_id="missing-provider", model_id="orphan-model", provider_name="Unknown provider",
+        capabilities=["text"], input_price_per_million=1, output_price_per_million=2,
+        price_source="legacy", approved=True, active=True,
+    )
+
+    assert client.get("/api/models").json() == []
+    assert repository.get_model("missing-provider::orphan-model") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
 
 
 def test_historic_usage_api_keeps_float_compatible_cost_after_schema_migration(tmp_path):
@@ -218,10 +261,11 @@ def test_unmapped_legacy_catalog_is_not_listed_or_routable(tmp_path):
 
 
 def test_portal_key_resolves_for_gateway_and_usage_is_immutable_with_owner_snapshot(tmp_path):
-    client, repository = _app(tmp_path)
+    client, repository = _app(tmp_path, ("provider-1",))
     user, _ = _login(client, repository, "member-a")
     repository.set_user_policy(user["id"], allowance_usd=12, allowance_period="weekly", rpm_limit=80)
     repository.add_catalog_model(provider_id="provider-1", model_id="model-1", provider_name="Provider One", capabilities=["text"], input_price_per_million=1, output_price_per_million=2, price_source="verified", approved=True)
+    _enable_connection(repository, "provider-1")
     created = repository.create_user_key(user["id"], "Gateway key", allowed_models_mode="all_approved")
 
     resolved = repository.find_gateway_key(created["api_key"])
