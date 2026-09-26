@@ -686,6 +686,8 @@ class PortalDatabase:
                 if (not invite or invite["revoked_at"] or invite["uses_count"] >= invite["max_uses"]
                         or invite["expires_at"] <= now):
                     raise PermissionError("This invitation is invalid, expired, revoked, or exhausted")
+                if invite["bound_email"]:
+                    raise PermissionError("This invitation requires a verified email address")
                 conn.execute(
                     "INSERT INTO portal_users(id,email,email_verified,display_name,role,status,created_at,last_login_at,username,username_normalized,password_hash,password_hash_algorithm,password_hash_updated_at) "
                     "VALUES(?,NULL,0,?,'developer','active',?,?,?,?,?,'argon2id',?)",
