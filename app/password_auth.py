@@ -1,6 +1,6 @@
 """Local password hashing and username policy."""
 
-from argon2 import PasswordHasher, Type
+from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 
@@ -51,12 +51,18 @@ def verify_password(password: str, encoded_hash: str) -> bool:
 
 
 def verify_password_or_dummy(password: str, encoded_hash: str | None) -> bool:
-    return verify_password(password, encoded_hash or _dummy_hash) if encoded_hash else _verify_dummy(password)
+    if not encoded_hash:
+        return _verify_dummy(password)
+    try:
+        extract_parameters(encoded_hash)
+    except (InvalidHashError, VerificationError, TypeError, ValueError):
+        return _verify_dummy(password)
+    return verify_password(password, encoded_hash)
 
 
 def _verify_dummy(password: str) -> bool:
     try:
         _hasher.verify(_dummy_hash, password)
-    except (VerifyMismatchError, VerificationError, InvalidHashError, ValueError):
+    except (VerifyMismatchError, VerificationError, InvalidHashError, TypeError, ValueError):
         return False
     return False

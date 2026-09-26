@@ -19,6 +19,16 @@ def bootstrap_local_operator(repository: PortalDatabase, username: str, password
     )
 
 
+def adopt_local_operator(repository: PortalDatabase, user_id: str, username: str, password: str):
+    normalized = normalize_username(username)
+    return repository.adopt_existing_operator(
+        user_id=user_id,
+        username=username.strip(),
+        normalized_username=normalized,
+        password_hash=hash_password(password),
+    )
+
+
 def operator_reset_password(
     repository: PortalDatabase, operator_username: str, operator_password: str, username: str, new_password: str
 ):
@@ -60,6 +70,8 @@ def main():
     auth = sub.add_parser("auth")
     auth_sub = auth.add_subparsers(dest="auth_action", required=True)
     auth_sub.add_parser("bootstrap")
+    adopt = auth_sub.add_parser("adopt-operator")
+    adopt.add_argument("--user-id", required=True)
     reset = auth_sub.add_parser("reset")
     reset.add_argument("--username", required=True)
     args = parser.parse_args()
@@ -75,7 +87,15 @@ def main():
                 raise SystemExit("Passwords did not match")
             bootstrap_local_operator(repository, username, password)
             print("First operator created.")
-        else:
+        elif args.auth_action == "adopt-operator":
+            username = input("Operator username: ")
+            password = getpass.getpass("Operator password: ")
+            confirmation = getpass.getpass("Repeat password: ")
+            if password != confirmation:
+                raise SystemExit("Passwords did not match")
+            adopt_local_operator(repository, args.user_id, username, password)
+            print("Operator account adopted.")
+        elif args.auth_action == "reset":
             operator_username = input("Current operator username: ")
             operator_password = getpass.getpass("Current operator password: ")
             new_password = getpass.getpass("New account password: ")

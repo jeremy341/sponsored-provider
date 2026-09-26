@@ -29,7 +29,7 @@ async def lifespan(_app):
     portal_service = PortalService(
         portal_db,
         identity=None,
-        cookie_secure=bool(public_origin and urlparse(public_origin).scheme.lower() == "https"),
+        cookie_secure=settings.portal_cookie_secure,
         public_origin=public_origin,
         auth_rate_limit_attempts=settings.portal_auth_rate_limit_attempts,
         auth_rate_limit_window_seconds=settings.portal_auth_rate_limit_window_seconds,
