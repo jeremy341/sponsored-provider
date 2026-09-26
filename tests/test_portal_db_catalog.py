@@ -119,6 +119,39 @@ def test_migration_maps_each_legacy_profile_to_brand_connection(tmp_path):
         assert route["active"] == 0
 
 
+def test_model_approval_does_not_reenable_legacy_disabled_connection(tmp_path):
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    with legacy.connect() as connection:
+        connection.execute("UPDATE upstream_profiles SET enabled=0 WHERE id='provider-old'")
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    user = repository.upsert_user(subject="disabled-provider", email="disabled@example.test", name="Disabled")
+    key = repository.create_user_key(user["id"], "Disabled provider", allowed_models_mode="all_approved")
+
+    repository.add_catalog_model(
+        provider_id="provider-old", model_id="alpha", provider_name="Old provider", capabilities=["text"],
+        input_price_per_million=1.25, output_price_per_million=2.5, price_source="review", approved=False,
+    )
+    repository.add_catalog_model(
+        provider_id="provider-old", model_id="alpha", provider_name="Old provider", capabilities=["text"],
+        input_price_per_million=1.25, output_price_per_million=2.5, price_source="review", approved=True,
+    )
+    repository.add_catalog_model(
+        provider_id="provider-old", model_id="alpha", provider_name="Old provider", capabilities=["text"],
+        input_price_per_million=1.5, output_price_per_million=3, price_source="review-update", approved=True,
+    )
+
+    with repository.connect() as connection:
+        state = connection.execute("""SELECT b.identity_status,c.mapping_status,c.enabled,c.legacy_enabled
+            FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id
+            WHERE c.legacy_profile_id='provider-old'""").fetchone()
+
+    assert tuple(state) == ("mapped", "mapped", 0, 0)
+    assert repository.list_models() == []
+    assert repository.get_model("provider-old::alpha") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
+
+
 def test_migrations_are_idempotent(tmp_path):
     path = tmp_path / "portal.db"
     legacy, _ = _legacy_database(path)

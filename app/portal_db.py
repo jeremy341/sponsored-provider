@@ -757,7 +757,7 @@ class PortalDatabase:
                              (connection_id, brand_id, _iso()))
             if approved:
                 conn.execute("UPDATE provider_brands SET name=?,identity_status='mapped' WHERE id=?", (provider_name, brand_id))
-                conn.execute("UPDATE provider_connections SET mapping_status='mapped',enabled=1 WHERE id=?", (connection_id,))
+                conn.execute("UPDATE provider_connections SET mapping_status='mapped' WHERE id=?", (connection_id,))
             offer_id = f"legacy-offer:{provider_id}:{model_id}"
             conn.execute("""INSERT INTO catalog_offers(id,brand_id,canonical_model_id,display_name,capabilities_json,approved,active,price_source,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(brand_id,canonical_model_id) DO UPDATE SET
@@ -802,7 +802,7 @@ class PortalDatabase:
     def list_models(self, *, approved_only: bool = True, include_inactive: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM portal_catalog_models"
         if approved_only or not include_inactive:
-            query += " WHERE EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')"
+            query += " WHERE EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)"
         if not include_inactive:
             query += " AND " if " WHERE " in query else " WHERE "
             query += "active=1"
@@ -820,12 +820,12 @@ class PortalDatabase:
                 row = conn.execute("""SELECT * FROM portal_catalog_models
                     WHERE provider_id=? AND model_id=? AND active=1 AND approved=1
                     AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')""", (provider_id, upstream_model_id)).fetchone()
+                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)""", (provider_id, upstream_model_id)).fetchone()
             else:
                 rows = conn.execute("""SELECT * FROM portal_catalog_models
                     WHERE model_id=? AND active=1 AND approved=1
                     AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')""", (model_id,)).fetchall()
+                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)""", (model_id,)).fetchall()
                 row = rows[0] if len(rows) == 1 else None
         return dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} if row else None
 
@@ -891,11 +891,11 @@ class PortalDatabase:
                 for selected_id in models:
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
-                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (provider_id, upstream_id)).fetchone()
+                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)", (provider_id, upstream_id)).fetchone()
                         if row:
                             normalized_models.add(selected_id)
                     else:
-                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (selected_id,)).fetchall()
+                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)", (selected_id,)).fetchall()
                         if len(rows) == 1:
                             normalized_models.add(f"{rows[0]['provider_id']}::{selected_id}")
                 if len(normalized_models) != len(models):
@@ -934,12 +934,12 @@ class PortalDatabase:
             if record["allowed_models_mode"] == "all_approved":
                 effective_models = [f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
                     WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')
+                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)
                     ORDER BY model_id""")]
             else:
                 approved = {f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
                     WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')""")}
+                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)""")}
                 effective_models = [model for model in models if model in approved]
         return {
             "key_id": record["id"], "provider_key_id": record["id"], "owner_id": record["owner_user_id"],
@@ -1022,11 +1022,11 @@ class PortalDatabase:
                 for selected_id in models:
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
-                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (provider_id, upstream_id)).fetchone()
+                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)", (provider_id, upstream_id)).fetchone()
                         if row:
                             normalized_models.add(selected_id)
                     else:
-                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (selected_id,)).fetchall()
+                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.mapping_status='mapped' AND c.enabled=1)", (selected_id,)).fetchall()
                         if len(rows) == 1:
                             normalized_models.add(f"{rows[0]['provider_id']}::{selected_id}")
                 if len(normalized_models) != len(models):
