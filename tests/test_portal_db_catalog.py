@@ -152,6 +152,36 @@ def test_model_approval_does_not_reenable_legacy_disabled_connection(tmp_path):
     assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
 
 
+def test_legacy_model_uses_its_exact_connection_within_multi_connection_brand(tmp_path):
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    with legacy.connect() as connection:
+        connection.execute(
+            "INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,created_at,enabled) VALUES(?,?,?,?,?,?,?)",
+            ("provider-other", "Other connection", "openai_compatible", "https://other.example/v1", "other-encrypted", "2026-01-02T00:00:00+00:00", 1),
+        )
+        connection.execute("UPDATE upstream_profiles SET enabled=0 WHERE id='provider-old'")
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    user = repository.upsert_user(subject="multi-connection", email="multi@example.test", name="Multi")
+    key = repository.create_user_key(user["id"], "Exact route", allowed_models_mode="all_approved")
+    repository.add_catalog_model(
+        provider_id="provider-old", model_id="legacy-model", provider_name="Shared display name",
+        capabilities=["text"], input_price_per_million=1, output_price_per_million=2,
+        price_source="legacy", approved=True, active=True,
+    )
+
+    with repository.connect() as connection:
+        brand_id = connection.execute("SELECT id FROM provider_brands WHERE migration_ref='provider-old'").fetchone()[0]
+        connection.execute("UPDATE provider_connections SET brand_id=?,mapping_status='mapped',enabled=1 WHERE legacy_profile_id='provider-other'", (brand_id,))
+        exact_connection = connection.execute("SELECT enabled FROM provider_connections WHERE legacy_profile_id='provider-old'").fetchone()[0]
+        other_connection = connection.execute("SELECT enabled FROM provider_connections WHERE legacy_profile_id='provider-other'").fetchone()[0]
+
+    assert (exact_connection, other_connection) == (0, 1)
+    assert repository.list_models() == []
+    assert repository.get_model("provider-old::legacy-model") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
+
+
 def test_migrations_are_idempotent(tmp_path):
     path = tmp_path / "portal.db"
     legacy, _ = _legacy_database(path)
