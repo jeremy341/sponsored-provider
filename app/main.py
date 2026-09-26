@@ -136,6 +136,11 @@ async def root():
     return RedirectResponse(url="/dashboard", status_code=307)
 
 
+@app.get("/auth/login", include_in_schema=False)
+async def auth_login_shell():
+    return portal_index()
+
+
 @app.get("/api/dashboard")
 async def dashboard_data(x_admin_token: str | None = Header(default=None), db: Database = Depends(get_db), settings: Settings = Depends(get_settings)):
     require_admin(x_admin_token, settings)

@@ -672,6 +672,28 @@ class PortalDatabase:
             rows = conn.execute("SELECT id,bound_email,expires_at,consumed_at,consumed_by_user_id,max_uses,uses_count,revoked_at,revoked_by_user_id,created_at FROM portal_invites ORDER BY created_at DESC").fetchall()
         return [dict(row) for row in rows]
 
+    def developer_invite_status(self, user_id: str) -> dict[str, Any]:
+        with self.connect() as conn:
+            user = conn.execute(
+                "SELECT developer_invite_issued_at FROM portal_users WHERE id=? AND role='developer' AND status='active'",
+                (user_id,),
+            ).fetchone()
+            if not user:
+                raise PermissionError("Only an active developer can view invite status")
+            row = conn.execute(
+                "SELECT id,expires_at,max_uses,uses_count,revoked_at,created_at FROM portal_invites WHERE issuer_user_id=? ORDER BY created_at DESC LIMIT 1",
+                (user_id,),
+            ).fetchone()
+        invite = dict(row) if row else None
+        if invite:
+            invite["status"] = (
+                "revoked" if invite["revoked_at"] else
+                "exhausted" if invite["uses_count"] >= invite["max_uses"] else
+                "expired" if invite["expires_at"] <= _iso() else "active"
+            )
+        issued_at = user["developer_invite_issued_at"]
+        return {"entitled": True, "can_issue": issued_at is None, "issued_at": issued_at, "invite": invite}
+
     def create_local_account_with_invite(
         self, *, raw_token: str, username: str, password_hash: str, display_name: str
     ) -> dict[str, Any]:

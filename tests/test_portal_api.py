@@ -95,6 +95,56 @@ def test_mutations_require_csrf_and_admin_routes_require_operator_role(tmp_path)
     assert "invite_token" not in client.get("/api/operator/invites").text
 
 
+def test_operator_invites_support_configurable_uses_and_revoke_without_exposing_tokens(tmp_path):
+    client, repository = _app(tmp_path)
+    operator, _ = _login(client, repository, "invite-operator", role="operator")
+    headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    created = client.post("/api/operator/invites", json={"max_uses": 4, "expires_in_seconds": 86400}, headers=headers)
+    assert created.status_code == 201
+    invite_id = created.json()["invite"]["id"]
+    assert created.json()["invite_token"]
+    assert created.json()["invite"]["max_uses"] == 4
+    assert "invite_token" not in client.get("/api/operator/invites").text
+    default_invite = client.post("/api/operator/invites", json={}, headers=headers)
+    assert default_invite.status_code == 201
+    assert default_invite.json()["invite"]["max_uses"] == 5
+    revoked = client.post(f"/api/operator/invites/{invite_id}/revoke", headers=headers)
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked_at"]
+    assert revoked.json()["max_uses"] == 4
+    assert client.get("/api/operator/invites").json()[0]["uses_count"] == 0
+
+
+def test_developer_invite_status_is_safe_and_entitlement_persists_after_use(tmp_path):
+    client, repository = _app(tmp_path)
+    _user, session = _login(client, repository, "invite-developer")
+    headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    created = client.post("/api/developer/invites", json={}, headers=headers)
+    assert created.status_code == 201
+    raw_token = created.json()["invite_token"]
+    status = client.get("/api/developer/invites")
+    assert status.status_code == 200
+    assert "invite_token" not in status.text
+    assert status.json()["entitled"] is True
+    assert status.json()["can_issue"] is False
+    assert status.json()["issued_at"]
+    assert status.json()["invite"]["max_uses"] == 1
+    assert status.json()["invite"]["uses_count"] == 0
+    assert raw_token not in status.text
+    assert client.get("/api/developer/invites").status_code == 200
+    assert "invite_token" not in client.get("/api/developer/invites").text
+    signup_app = FastAPI()
+    signup_app.include_router(create_portal_router(PortalService(repository, identity=FixedIdentity(), cookie_secure=False)))
+    signup_client = TestClient(signup_app)
+    signup = signup_client.post("/auth/signup", json={"username": "invite-recipient", "password": "correct horse battery staple", "invite": raw_token}, headers={"Origin": "http://testserver"})
+    assert signup.status_code == 201
+    used = client.get("/api/developer/invites").json()
+    assert used["entitled"] is True
+    assert used["can_issue"] is False
+    assert used["invite"]["status"] == "exhausted"
+    assert used["invite"]["uses_count"] == 1
+
+
 def test_operator_guardrail_changes_persist_and_provider_secrets_stay_write_only(tmp_path):
     path = str(tmp_path / "operator.db")
     settings = Settings(database_path=path, provider_key_pepper="z" * 40, provider_secret_key=Fernet.generate_key().decode(), admin_token="operator-token", provider_hard_stop_usd=35, provider_estimate_reserve_usd=0.1)
