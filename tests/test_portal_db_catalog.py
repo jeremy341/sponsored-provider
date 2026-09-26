@@ -1,4 +1,5 @@
 import sqlite3
+from decimal import Decimal
 
 import pytest
 from cryptography.fernet import Fernet
@@ -94,21 +95,28 @@ def test_migration_maps_each_legacy_profile_to_brand_connection(tmp_path):
     with legacy.connect() as connection:
         connection.execute(
             "INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,models_json,created_at) VALUES(?,?,?,?,?,?,?)",
-            ("provider-second", "Second", "openai_compatible", "https://second.example/v1", "encrypted-second", '["beta"]', "2026-01-02T00:00:00+00:00"),
+            ("provider-second", "Old provider", "openai_compatible", "https://second.example/v1", "encrypted-second", '["beta"]', "2026-01-02T00:00:00+00:00"),
         )
     repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    _catalog(repository)
+    _rerun_migrations(repository)
 
     with repository.connect() as connection:
-        profiles = connection.execute("""SELECT b.migration_ref,b.name,c.legacy_profile_id,c.base_url,c.secret_ref
+        profiles = connection.execute("""SELECT b.migration_ref,b.name,b.identity_status,b.legacy_name_snapshot,
+            c.legacy_profile_id,c.base_url,c.secret_ref,c.mapping_status,c.enabled,c.legacy_enabled
             FROM provider_connections c JOIN provider_brands b ON b.id=c.brand_id ORDER BY c.legacy_profile_id""").fetchall()
 
     assert [tuple(row) for row in profiles] == [
-        ("provider-old", "Old provider", "provider-old", "https://provider.example/v1", "provider-old"),
-        ("provider-second", "Second", "provider-second", "https://second.example/v1", "provider-second"),
+        ("provider-old", "Unknown legacy provider", "unknown", "Old provider", "provider-old", "https://provider.example/v1", "provider-old", "unmapped", 0, 1),
+        ("provider-second", "Unknown legacy provider", "unknown", "Old provider", "provider-second", "https://second.example/v1", "provider-second", "unmapped", 0, 1),
     ]
     with repository.connect() as connection:
         assert connection.execute("SELECT COUNT(*) FROM connection_models").fetchone()[0] == 2
         assert "encrypted_api_key" not in {row[1] for row in connection.execute("PRAGMA table_info(provider_connections)")}
+        offer = connection.execute("SELECT approved,active FROM catalog_offers WHERE canonical_model_id='alpha'").fetchone()
+        route = connection.execute("SELECT active FROM offer_routes WHERE upstream_model_id='alpha'").fetchone()
+        assert tuple(offer) == (0, 0)
+        assert route["active"] == 0
 
 
 def test_migrations_are_idempotent(tmp_path):
@@ -200,3 +208,92 @@ def test_new_usage_events_store_nano_charge_and_immutable_catalog_snapshots(tmp_
     assert event["price_version_id"] == "price-1"
     assert event["route_snapshot_json"] == '{"connection_id": "connection-1", "upstream_model_id": "upstream-v1"}'
     assert event["price_snapshot_v2_json"] == '{"input_rate": "1.25", "output_rate": "2.5"}'
+
+
+@pytest.mark.parametrize("field,bad_rate", [
+    ("input_rate", "1.2.3"),
+    ("output_rate", "1..2"),
+    ("cached_input_rate", "1.2.3"),
+    ("cached_input_rate", "-0.1"),
+])
+def test_price_write_boundary_rejects_malformed_decimal_rates(tmp_path, field, bad_rate):
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    _catalog(repository)
+    _rerun_migrations(repository)
+    with repository.connect() as connection:
+        offer_id = connection.execute("SELECT id FROM catalog_offers WHERE canonical_model_id='alpha'").fetchone()[0]
+    values = {"input_rate": "1.25", "output_rate": "2.5", "cached_input_rate": "0.125"}
+    values[field] = bad_rate
+
+    with pytest.raises(ValueError, match="decimal"):
+        repository.add_price_version(offer_id, **values)
+
+
+@pytest.mark.parametrize("field", ["input_rate", "output_rate", "cached_input_rate"])
+def test_price_table_rejects_malformed_decimal_rates(tmp_path, field):
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    _catalog(repository)
+    _rerun_migrations(repository)
+    with repository.connect() as connection:
+        offer_id = connection.execute("SELECT id FROM catalog_offers WHERE canonical_model_id='alpha'").fetchone()[0]
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"INSERT INTO price_versions(id,offer_id,{field},is_active,effective_at) VALUES('malformed',?,'1.2.3',0,'2026-09-26')",
+                (offer_id,),
+            )
+
+
+def test_subnano_migration_preserves_display_values_and_rounds_enforcement_up(tmp_path):
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    user = repository.upsert_user(subject="nano", email="nano@example.test", name="Nano")
+    repository.set_user_policy(user["id"], allowance_usd=0.0000000001, allowance_period="weekly", rpm_limit=30)
+    key = repository.create_user_key(user["id"], "Subnano", allowed_models_mode="all_approved", spend_limit_usd=0.0000000001, spend_period="weekly")
+    event_id = repository.record_usage(
+        user["id"], key["id"], model="old", input_tokens=1, output_tokens=0, total_tokens=1,
+        latency_ms=1, status="success", estimated_cost_usd=0.0000000001,
+    )
+    with repository.connect() as connection:
+        connection.execute(
+            "INSERT INTO portal_budget_reservations(id,owner_user_id,key_id,estimated_cost_usd,created_at,status) VALUES('subnano-reservation',?,?,?,?,'active')",
+            (user["id"], key["id"], 0.0000000001, "2026-09-26T00:00:00+00:00"),
+        )
+    _rerun_migrations(repository)
+    with repository.connect() as connection:
+        connection.execute("UPDATE provider_budgets SET cap_nano_usd=0 WHERE key_id=?", (key["id"],))
+        connection.execute("UPDATE user_allowances SET amount_nano_usd=0 WHERE user_id=?", (user["id"],))
+        connection.execute("UPDATE portal_budget_reservations_v2 SET amount_nano_usd=0 WHERE id='subnano-reservation'")
+        connection.execute("DROP TRIGGER portal_usage_no_update")
+        connection.execute("UPDATE portal_usage_events SET amount_nano_usd=NULL WHERE id=?", (event_id,))
+        connection.execute("CREATE TRIGGER portal_usage_no_update BEFORE UPDATE ON portal_usage_events BEGIN SELECT RAISE(ABORT, 'portal usage events are immutable'); END")
+    with repository.connect() as connection:
+        connection.execute("DELETE FROM portal_schema_migrations")
+    repository.init_schema()
+
+    with repository.connect() as connection:
+        allowance = connection.execute("SELECT allowance_usd FROM portal_users WHERE id=?", (user["id"],)).fetchone()[0]
+        original_cap = connection.execute("SELECT spend_limit_usd FROM portal_keys WHERE id=?", (key["id"],)).fetchone()[0]
+        original_charge = connection.execute("SELECT estimated_cost_usd,amount_nano_usd FROM portal_usage_events WHERE id=?", (event_id,)).fetchone()
+        migrated_cap = connection.execute("SELECT cap_nano_usd FROM provider_budgets WHERE key_id=?", (key["id"],)).fetchone()[0]
+        migrated_allowance = connection.execute("SELECT amount_nano_usd FROM user_allowances WHERE user_id=?", (user["id"],)).fetchone()[0]
+        migrated_reservation = connection.execute("SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE id='subnano-reservation'").fetchone()[0]
+
+    assert allowance == original_cap == original_charge["estimated_cost_usd"] == 0.0000000001
+    assert migrated_cap == migrated_allowance == 0
+    assert migrated_reservation == original_charge["amount_nano_usd"] == 1
+    assert Decimal(str(original_charge["estimated_cost_usd"])) <= Decimal(original_charge["amount_nano_usd"]) / Decimal(1_000_000_000)
+
+
+def test_supplied_nano_charge_cannot_understate_legacy_usd_charge(tmp_path):
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    user = repository.upsert_user(subject="nano", email="nano@example.test", name="Nano")
+    key = repository.create_user_key(user["id"], "Subnano", allowed_models_mode="all_approved")
+
+    with pytest.raises(ValueError, match="understate"):
+        repository.record_usage(
+            user["id"], key["id"], model="m", input_tokens=0, output_tokens=0, total_tokens=0,
+            latency_ms=1, status="success", estimated_cost_usd=0.0000000001, amount_nano_usd=0,
+        )

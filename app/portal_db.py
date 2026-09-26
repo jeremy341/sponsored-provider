@@ -11,12 +11,13 @@ import hashlib
 import hmac
 import json
 import math
+import re
 import secrets
 import sqlite3
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,8 @@ class ProviderBrand:
     id: str
     name: str
     migration_ref: str | None = None
+    identity_status: str = "unknown"
+    legacy_name_snapshot: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +57,8 @@ class ProviderConnection:
     legacy_profile_id: str | None
     base_url: str | None = None
     secret_ref: str | None = None
+    mapping_status: str = "unmapped"
+    enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -266,7 +271,11 @@ class PortalDatabase:
                 pass
             conn.execute("CREATE TABLE IF NOT EXISTS portal_schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
             applied = {row[0] for row in conn.execute("SELECT version FROM portal_schema_migrations")}
-            migrations = ((1, self._migrate_catalog_and_credits), (2, self._migrate_legacy_catalog))
+            migrations = (
+                (1, self._migrate_catalog_and_credits),
+                (2, self._migrate_legacy_catalog),
+                (3, self._migrate_identity_and_numeric_safety),
+            )
             for version, migration in migrations:
                 if version not in applied:
                     migration(conn)
@@ -277,7 +286,7 @@ class PortalDatabase:
         return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is not None
 
     @staticmethod
-    def _nano_usd(value: Any) -> int | None:
+    def _nano_usd(value: Any, *, rounding: str) -> int | None:
         if value is None:
             return None
         try:
@@ -286,15 +295,27 @@ class PortalDatabase:
             raise ValueError(f"Invalid USD amount in legacy data: {value!r}") from None
         if not amount.is_finite():
             raise ValueError(f"Invalid USD amount in legacy data: {value!r}")
-        return int((amount * Decimal(1_000_000_000)).to_integral_value(rounding=ROUND_HALF_EVEN))
+        return int((amount * Decimal(1_000_000_000)).to_integral_value(rounding=rounding))
+
+    @staticmethod
+    def _cap_nano_usd(value: Any) -> int | None:
+        return PortalDatabase._nano_usd(value, rounding="ROUND_FLOOR")
+
+    @staticmethod
+    def _charge_nano_usd(value: Any) -> int | None:
+        return PortalDatabase._nano_usd(value, rounding=ROUND_CEILING)
 
     @staticmethod
     def _canonical_rate(value: Any) -> str | None:
         if value is None:
             return None
-        number = Decimal(str(value))
-        if not number.is_finite() or number < 0:
-            raise ValueError(f"Invalid legacy rate: {value!r}")
+        raw = str(value) if isinstance(value, str) else format(Decimal(str(value)), "f")
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", raw):
+            raise ValueError(f"Rate must be a non-negative decimal value: {value!r}")
+        try:
+            number = Decimal(raw)
+        except InvalidOperation:
+            raise ValueError(f"Rate must be a non-negative decimal value: {value!r}") from None
         return format(number.normalize(), "f")
 
     def _migrate_catalog_and_credits(self, conn: sqlite3.Connection) -> None:
@@ -304,7 +325,7 @@ class PortalDatabase:
             );
             CREATE TABLE IF NOT EXISTS provider_connections (
                 id TEXT PRIMARY KEY, brand_id TEXT NOT NULL REFERENCES provider_brands(id),
-                legacy_profile_id TEXT UNIQUE REFERENCES upstream_profiles(id), base_url TEXT,
+                legacy_profile_id TEXT UNIQUE, base_url TEXT,
                 provider_kind TEXT, secret_ref TEXT, enabled INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
             );
@@ -330,8 +351,9 @@ class PortalDatabase:
                 id TEXT PRIMARY KEY, offer_id TEXT NOT NULL REFERENCES catalog_offers(id),
                 input_rate TEXT, output_rate TEXT, cached_input_rate TEXT, rate_unit TEXT NOT NULL DEFAULT 'per_million_tokens',
                 source TEXT, is_active INTEGER NOT NULL DEFAULT 1, effective_at TEXT NOT NULL, retired_at TEXT,
-                CHECK(input_rate IS NULL OR (input_rate NOT GLOB '*[^0-9.]*' AND input_rate NOT LIKE '.%' AND input_rate NOT LIKE '%..%')),
-                CHECK(output_rate IS NULL OR (output_rate NOT GLOB '*[^0-9.]*' AND output_rate NOT LIKE '.%' AND output_rate NOT LIKE '%..%'))
+                CHECK(input_rate IS NULL OR (input_rate<>'' AND input_rate NOT GLOB '*[^0-9.]*' AND input_rate GLOB '[0-9]*' AND input_rate NOT GLOB '*.*.*' AND input_rate NOT LIKE '%.' AND input_rate NOT LIKE '.%')),
+                CHECK(output_rate IS NULL OR (output_rate<>'' AND output_rate NOT GLOB '*[^0-9.]*' AND output_rate GLOB '[0-9]*' AND output_rate NOT GLOB '*.*.*' AND output_rate NOT LIKE '%.' AND output_rate NOT LIKE '.%')),
+                CHECK(cached_input_rate IS NULL OR (cached_input_rate<>'' AND cached_input_rate NOT GLOB '*[^0-9.]*' AND cached_input_rate GLOB '[0-9]*' AND cached_input_rate NOT GLOB '*.*.*' AND cached_input_rate NOT LIKE '%.' AND cached_input_rate NOT LIKE '.%'))
             );
             CREATE UNIQUE INDEX IF NOT EXISTS price_versions_one_active ON price_versions(offer_id) WHERE is_active=1;
             CREATE TABLE IF NOT EXISTS provider_budgets (
@@ -356,28 +378,97 @@ class PortalDatabase:
         })
         for row in conn.execute("SELECT id,owner_user_id,spend_limit_usd,spend_period,created_at FROM portal_keys WHERE spend_limit_usd IS NOT NULL"):
             conn.execute("INSERT OR IGNORE INTO provider_budgets(id,key_id,cap_nano_usd,period,created_at) VALUES(?,?,?,?,?)",
-                         (f"portal-key:{row['id']}", row["id"], self._nano_usd(row["spend_limit_usd"]), row["spend_period"], row["created_at"]))
+                         (f"portal-key:{row['id']}", row["id"], self._cap_nano_usd(row["spend_limit_usd"]), row["spend_period"], row["created_at"]))
         for row in conn.execute("SELECT id,allowance_usd,allowance_period,allowance_timezone,created_at FROM portal_users WHERE allowance_usd IS NOT NULL"):
             conn.execute("INSERT OR IGNORE INTO user_allowances(id,user_id,amount_nano_usd,period,timezone,created_at) VALUES(?,?,?,?,?,?)",
-                         (f"portal-user:{row['id']}", row["id"], self._nano_usd(row["allowance_usd"]), row["allowance_period"], "Europe/Berlin", row["created_at"]))
+                         (f"portal-user:{row['id']}", row["id"], self._cap_nano_usd(row["allowance_usd"]), row["allowance_period"], "Europe/Berlin", row["created_at"]))
         if self._table_exists(conn, "portal_budget_reservations"):
             for row in conn.execute("SELECT id,owner_user_id,key_id,estimated_cost_usd,created_at,status FROM portal_budget_reservations"):
                 conn.execute("INSERT OR IGNORE INTO portal_budget_reservations_v2(id,owner_user_id,key_id,amount_nano_usd,created_at,status) VALUES(?,?,?,?,?,?)",
-                             (row["id"], row["owner_user_id"], row["key_id"], self._nano_usd(row["estimated_cost_usd"]), row["created_at"], row["status"]))
+                             (row["id"], row["owner_user_id"], row["key_id"], self._charge_nano_usd(row["estimated_cost_usd"]), row["created_at"], row["status"]))
         if self._table_exists(conn, "provider_api_keys"):
             for row in conn.execute("SELECT id,spend_limit_usd FROM provider_api_keys WHERE spend_limit_usd IS NOT NULL"):
                 conn.execute("INSERT OR IGNORE INTO provider_budgets(id,provider_key_id,cap_nano_usd,created_at) VALUES(?,?,?,?)",
-                             (f"legacy-key:{row['id']}", row["id"], self._nano_usd(row["spend_limit_usd"]), _iso()))
+                             (f"legacy-key:{row['id']}", row["id"], self._cap_nano_usd(row["spend_limit_usd"]), _iso()))
         if self._table_exists(conn, "budget_reservations"):
             for row in conn.execute("SELECT id,provider_key_id,estimated_cost_usd,created_at,status FROM budget_reservations"):
                 conn.execute("INSERT OR IGNORE INTO portal_budget_reservations_v2(id,provider_key_id,amount_nano_usd,created_at,status) VALUES(?,?,?,?,?)",
-                             (f"legacy:{row['id']}", row["provider_key_id"], self._nano_usd(row["estimated_cost_usd"]), row["created_at"], row["status"]))
+                             (f"legacy:{row['id']}", row["provider_key_id"], self._charge_nano_usd(row["estimated_cost_usd"]), row["created_at"], row["status"]))
 
         for key, budget_id in (("global_spend_cap_usd", "global-spend-cap"), ("safety_reserve_usd", "safety-reserve")):
             setting = conn.execute("SELECT value_json FROM portal_runtime_settings WHERE key=?", (key,)).fetchone()
             if setting:
+                converter = self._charge_nano_usd if key == "safety_reserve_usd" else self._cap_nano_usd
                 conn.execute("INSERT OR IGNORE INTO provider_budgets(id,cap_nano_usd,created_at) VALUES(?,?,?)",
-                             (budget_id, self._nano_usd(json.loads(setting["value_json"])), _iso()))
+                             (budget_id, converter(json.loads(setting["value_json"])), _iso()))
+
+    def _migrate_identity_and_numeric_safety(self, conn: sqlite3.Connection) -> None:
+        self._add_columns(conn, "provider_brands", {
+            "identity_status": "TEXT NOT NULL DEFAULT 'unknown'",
+            "legacy_name_snapshot": "TEXT",
+        })
+        self._add_columns(conn, "provider_connections", {
+            "mapping_status": "TEXT NOT NULL DEFAULT 'unmapped'",
+            "legacy_enabled": "INTEGER NOT NULL DEFAULT 0",
+        })
+        conn.execute("UPDATE provider_brands SET legacy_name_snapshot=COALESCE(legacy_name_snapshot,name),name='Unknown legacy provider',identity_status='unknown' WHERE migration_ref IS NOT NULL")
+        if self._table_exists(conn, "upstream_profiles"):
+            conn.execute("""UPDATE provider_connections SET
+                legacy_enabled=CASE WHEN legacy_enabled=0 THEN COALESCE(
+                    (SELECT enabled FROM upstream_profiles WHERE upstream_profiles.id=provider_connections.legacy_profile_id),enabled
+                ) ELSE legacy_enabled END,
+                enabled=0,mapping_status='unmapped'""")
+        else:
+            conn.execute("UPDATE provider_connections SET legacy_enabled=CASE WHEN legacy_enabled=0 THEN enabled ELSE legacy_enabled END,enabled=0,mapping_status='unmapped'")
+        conn.execute("UPDATE connection_models SET active=0")
+        conn.execute("UPDATE catalog_offers SET approved=0,active=0")
+        conn.execute("UPDATE offer_routes SET active=0")
+
+        for operation in ("INSERT", "UPDATE"):
+            trigger = f"price_versions_validate_{operation.lower()}"
+            invalid = " OR ".join(
+                f"NEW.{column} IS NOT NULL AND NOT ({self._sqlite_decimal_check(f'NEW.{column}')})"
+                for column in ("input_rate", "output_rate", "cached_input_rate")
+            )
+            conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+            conn.execute(f"CREATE TRIGGER {trigger} BEFORE {operation} ON price_versions WHEN {invalid} BEGIN SELECT RAISE(ABORT,'rate must be a non-negative decimal value'); END")
+
+        for row in conn.execute("SELECT id,spend_limit_usd,spend_period FROM portal_keys WHERE spend_limit_usd IS NOT NULL"):
+            conn.execute("UPDATE provider_budgets SET cap_nano_usd=?,period=? WHERE key_id=?",
+                         (self._cap_nano_usd(row["spend_limit_usd"]), row["spend_period"], row["id"]))
+        for row in conn.execute("SELECT id,allowance_usd FROM portal_users WHERE allowance_usd IS NOT NULL"):
+            conn.execute("UPDATE user_allowances SET amount_nano_usd=?,timezone='Europe/Berlin' WHERE user_id=? AND active=1",
+                         (self._cap_nano_usd(row["allowance_usd"]), row["id"]))
+        if self._table_exists(conn, "portal_budget_reservations"):
+            for row in conn.execute("SELECT id,estimated_cost_usd FROM portal_budget_reservations"):
+                conn.execute("UPDATE portal_budget_reservations_v2 SET amount_nano_usd=? WHERE id=?",
+                             (self._charge_nano_usd(row["estimated_cost_usd"]), row["id"]))
+        if self._table_exists(conn, "provider_api_keys"):
+            for row in conn.execute("SELECT id,spend_limit_usd FROM provider_api_keys WHERE spend_limit_usd IS NOT NULL"):
+                conn.execute("UPDATE provider_budgets SET cap_nano_usd=? WHERE provider_key_id=?",
+                             (self._cap_nano_usd(row["spend_limit_usd"]), row["id"]))
+        if self._table_exists(conn, "budget_reservations"):
+            for row in conn.execute("SELECT id,estimated_cost_usd FROM budget_reservations"):
+                conn.execute("UPDATE portal_budget_reservations_v2 SET amount_nano_usd=? WHERE id=?",
+                             (self._charge_nano_usd(row["estimated_cost_usd"]), f"legacy:{row['id']}"))
+        for setting_key, budget_id in (("global_spend_cap_usd", "global-spend-cap"), ("safety_reserve_usd", "safety-reserve")):
+            setting = conn.execute("SELECT value_json FROM portal_runtime_settings WHERE key=?", (setting_key,)).fetchone()
+            if setting:
+                converter = self._charge_nano_usd if setting_key == "safety_reserve_usd" else self._cap_nano_usd
+                conn.execute("UPDATE provider_budgets SET cap_nano_usd=? WHERE id=?",
+                             (converter(json.loads(setting["value_json"])), budget_id))
+
+        conn.execute("DROP TRIGGER IF EXISTS portal_usage_no_update")
+        try:
+            for row in conn.execute("SELECT id,estimated_cost_usd FROM portal_usage_events WHERE amount_nano_usd IS NULL AND estimated_cost_usd IS NOT NULL"):
+                conn.execute("UPDATE portal_usage_events SET amount_nano_usd=? WHERE id=?",
+                             (self._charge_nano_usd(row["estimated_cost_usd"]), row["id"]))
+        finally:
+            conn.execute("CREATE TRIGGER portal_usage_no_update BEFORE UPDATE ON portal_usage_events BEGIN SELECT RAISE(ABORT, 'portal usage events are immutable'); END")
+
+    @staticmethod
+    def _sqlite_decimal_check(expression: str) -> str:
+        return f"({expression}<>'' AND {expression} NOT GLOB '*[^0-9.]*' AND {expression} GLOB '[0-9]*' AND {expression} NOT GLOB '*.*.*' AND {expression} NOT LIKE '%.' AND {expression} NOT LIKE '.%')"
 
     @staticmethod
     def _add_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
@@ -654,14 +745,69 @@ class PortalDatabase:
             conn.execute("""INSERT INTO portal_catalog_models(provider_id,model_id,provider_name,capabilities_json,input_price_per_million,output_price_per_million,cached_input_price_per_million,price_source,approved,active,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider_id,model_id) DO UPDATE SET provider_name=excluded.provider_name,capabilities_json=excluded.capabilities_json,input_price_per_million=excluded.input_price_per_million,output_price_per_million=excluded.output_price_per_million,cached_input_price_per_million=excluded.cached_input_price_per_million,price_source=excluded.price_source,approved=excluded.approved,active=excluded.active,updated_at=excluded.updated_at""",
                 (provider_id, model_id, provider_name, json.dumps(sorted(set(capabilities))), input_price_per_million, output_price_per_million, cached_input_price_per_million, price_source, int(approved), int(active), _iso()))
+            brand = conn.execute("SELECT id FROM provider_brands WHERE migration_ref=?", (provider_id,)).fetchone()
+            brand_id = brand["id"] if brand else f"legacy-brand:{provider_id}"
+            if not brand:
+                conn.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at) VALUES(?,?,?,?)",
+                             (brand_id, "Unknown legacy provider", provider_id, _iso()))
+            connection = conn.execute("SELECT id FROM provider_connections WHERE legacy_profile_id=?", (provider_id,)).fetchone()
+            connection_id = connection["id"] if connection else f"legacy-connection:{provider_id}"
+            if not connection:
+                conn.execute("INSERT OR IGNORE INTO provider_connections(id,brand_id,legacy_profile_id,secret_ref,created_at) VALUES(?,?,NULL,NULL,?)",
+                             (connection_id, brand_id, _iso()))
+            if approved:
+                conn.execute("UPDATE provider_brands SET name=?,identity_status='mapped' WHERE id=?", (provider_name, brand_id))
+                conn.execute("UPDATE provider_connections SET mapping_status='mapped',enabled=1 WHERE id=?", (connection_id,))
+            offer_id = f"legacy-offer:{provider_id}:{model_id}"
+            conn.execute("""INSERT INTO catalog_offers(id,brand_id,canonical_model_id,display_name,capabilities_json,approved,active,price_source,updated_at)
+                VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(brand_id,canonical_model_id) DO UPDATE SET
+                display_name=excluded.display_name,capabilities_json=excluded.capabilities_json,
+                approved=excluded.approved,active=excluded.active,price_source=excluded.price_source,updated_at=excluded.updated_at""",
+                (offer_id, brand_id, model_id, model_id, json.dumps(sorted(set(capabilities))), int(approved), int(active), price_source, _iso()))
+            conn.execute("INSERT OR IGNORE INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active) VALUES(?,?,?,?,?)",
+                         (f"legacy-route:{provider_id}:{model_id}", offer_id, connection_id, model_id, int(approved and active)))
+            conn.execute("UPDATE offer_routes SET active=? WHERE offer_id=? AND connection_id=?", (int(approved and active), offer_id, connection_id))
+            if input_price_per_million is not None or output_price_per_million is not None or cached_input_price_per_million is not None:
+                conn.execute("UPDATE price_versions SET is_active=0,retired_at=? WHERE offer_id=? AND is_active=1", (_iso(), offer_id))
+                conn.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,cached_input_rate,source,is_active,effective_at) VALUES(?,?,?,?,?,?,?,?)",
+                             (f"catalog-price:{provider_id}:{model_id}:{uuid.uuid4().hex}", offer_id,
+                              self._canonical_rate(input_price_per_million), self._canonical_rate(output_price_per_million),
+                              self._canonical_rate(cached_input_price_per_million), price_source, int(approved and active), _iso()))
+
+    def add_price_version(
+        self,
+        offer_id: str,
+        *,
+        input_rate: str | int | float | Decimal | None,
+        output_rate: str | int | float | Decimal | None,
+        cached_input_rate: str | int | float | Decimal | None = None,
+        source: str | None = None,
+        is_active: bool = True,
+        effective_at: str | None = None,
+    ) -> PriceVersion:
+        if not isinstance(is_active, bool):
+            raise ValueError("Price version active flag must be boolean")
+        canonical = tuple(self._canonical_rate(value) for value in (input_rate, output_rate, cached_input_rate))
+        version_id = uuid.uuid4().hex
+        effective_at = effective_at or _iso()
+        with self.connect() as conn:
+            if not conn.execute("SELECT 1 FROM catalog_offers WHERE id=?", (offer_id,)).fetchone():
+                raise LookupError("Catalog offer does not exist")
+            if is_active:
+                conn.execute("UPDATE price_versions SET is_active=0,retired_at=? WHERE offer_id=? AND is_active=1", (effective_at, offer_id))
+            conn.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,cached_input_rate,source,is_active,effective_at) VALUES(?,?,?,?,?,?,?,?)",
+                         (version_id, offer_id, *canonical, source, int(is_active), effective_at))
+        return PriceVersion(version_id, offer_id, *canonical, "per_million_tokens", is_active)
 
     def list_models(self, *, approved_only: bool = True, include_inactive: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM portal_catalog_models"
+        if approved_only or not include_inactive:
+            query += " WHERE EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')"
         if not include_inactive:
-            query += " WHERE active=1"
-        if approved_only:
             query += " AND " if " WHERE " in query else " WHERE "
-            query += "approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL"
+            query += "active=1"
+        if approved_only:
+            query += " AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL"
         query += " ORDER BY provider_name,model_id"
         with self.connect() as conn:
             rows = conn.execute(query).fetchall()
@@ -673,11 +819,13 @@ class PortalDatabase:
             if separator:
                 row = conn.execute("""SELECT * FROM portal_catalog_models
                     WHERE provider_id=? AND model_id=? AND active=1 AND approved=1
-                    AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL""", (provider_id, upstream_model_id)).fetchone()
+                    AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')""", (provider_id, upstream_model_id)).fetchone()
             else:
                 rows = conn.execute("""SELECT * FROM portal_catalog_models
                     WHERE model_id=? AND active=1 AND approved=1
-                    AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL""", (model_id,)).fetchall()
+                    AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')""", (model_id,)).fetchall()
                 row = rows[0] if len(rows) == 1 else None
         return dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} if row else None
 
@@ -743,11 +891,11 @@ class PortalDatabase:
                 for selected_id in models:
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
-                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL", (provider_id, upstream_id)).fetchone()
+                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (provider_id, upstream_id)).fetchone()
                         if row:
                             normalized_models.add(selected_id)
                     else:
-                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL", (selected_id,)).fetchall()
+                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (selected_id,)).fetchall()
                         if len(rows) == 1:
                             normalized_models.add(f"{rows[0]['provider_id']}::{selected_id}")
                 if len(normalized_models) != len(models):
@@ -786,10 +934,12 @@ class PortalDatabase:
             if record["allowed_models_mode"] == "all_approved":
                 effective_models = [f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
                     WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')
                     ORDER BY model_id""")]
             else:
                 approved = {f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
-                    WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL""")}
+                    WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
+                    AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')""")}
                 effective_models = [model for model in models if model in approved]
         return {
             "key_id": record["id"], "provider_key_id": record["id"], "owner_id": record["owner_user_id"],
@@ -872,11 +1022,11 @@ class PortalDatabase:
                 for selected_id in models:
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
-                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL", (provider_id, upstream_id)).fetchone()
+                        row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (provider_id, upstream_id)).fetchone()
                         if row:
                             normalized_models.add(selected_id)
                     else:
-                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL", (selected_id,)).fetchall()
+                        rows = conn.execute("SELECT provider_id FROM portal_catalog_models WHERE model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped')", (selected_id,)).fetchall()
                         if len(rows) == 1:
                             normalized_models.add(f"{rows[0]['provider_id']}::{selected_id}")
                 if len(normalized_models) != len(models):
@@ -926,6 +1076,11 @@ class PortalDatabase:
     ) -> str:
         if amount_nano_usd is not None and (isinstance(amount_nano_usd, bool) or not isinstance(amount_nano_usd, int) or amount_nano_usd < 0):
             raise ValueError("Usage charge must be a non-negative integer number of nano-USD")
+        minimum_charge = self._charge_nano_usd(estimated_cost_usd)
+        if amount_nano_usd is not None and minimum_charge is not None and amount_nano_usd < minimum_charge:
+            raise ValueError("Nano-USD usage charge cannot understate the estimated USD charge")
+        if amount_nano_usd is None:
+            amount_nano_usd = minimum_charge
         event_id = uuid.uuid4().hex
         with self.connect() as conn:
             key = conn.execute("SELECT k.label,u.display_name,u.email FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id WHERE k.id=? AND k.owner_user_id=?", (key_id, owner_user_id)).fetchone()
@@ -970,14 +1125,14 @@ class PortalDatabase:
                     continue
                 key_id = f"legacy-key-{record.get('provider_key_id') or 'unknown'}"
                 cur = conn.execute("""INSERT OR IGNORE INTO portal_usage_events
-                    (id,owner_user_id,owner_name_snapshot,owner_email_snapshot,key_id,key_label_snapshot,provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,stream,estimated_cost_usd,origin,price_snapshot_json,client_ip,request_id)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (id,owner_user_id,owner_name_snapshot,owner_email_snapshot,key_id,key_label_snapshot,provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,stream,estimated_cost_usd,origin,price_snapshot_json,client_ip,request_id,amount_nano_usd)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (f"legacy-{legacy_id}", owner_user_id, owner["display_name"], owner["email"], key_id,
                      record.get("key_label") or "Legacy key", record.get("upstream_profile_id"), record.get("provider_name") or "Legacy provider",
                      record.get("model") or "unknown", record.get("timestamp") or _iso(), record.get("status") or "unknown",
                      record.get("error_category"), record.get("latency_ms"), record.get("input_tokens"), record.get("output_tokens"),
                      record.get("total_tokens"), None, int(bool(record.get("stream"))), record.get("estimated_cost_usd"), "legacy", None,
-                     record.get("client_ip"), f"legacy-request-{legacy_id}"))
+                     record.get("client_ip"), f"legacy-request-{legacy_id}", self._charge_nano_usd(record.get("estimated_cost_usd"))))
                 imported += cur.rowcount
         return imported
 
