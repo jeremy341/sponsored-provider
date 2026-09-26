@@ -96,6 +96,41 @@ def test_local_signup_requires_invite_and_creates_an_authenticated_session(tmp_p
     assert account["password_hash"].startswith("$argon2id$")
 
 
+def test_auth_request_logs_never_include_credentials_or_session_material(tmp_path, caplog):
+    client, repository, invite_token, _ = _local_app(tmp_path)
+    password = "private password sentinel"
+    caplog.set_level("INFO")
+
+    created = client.post(
+        "/auth/signup",
+        json={"username": "log-check-user", "password": password, "invite": invite_token},
+        headers=ORIGIN,
+    )
+    assert created.status_code == 201
+    password_hash = repository.get_local_user_by_username("log-check-user")["password_hash"]
+    session_token = client.cookies.get("portal_session")
+    csrf_token = client.cookies.get("portal_csrf")
+
+    client.post("/auth/login", json={"username": "log-check-user", "password": password}, headers=ORIGIN)
+    rotated_session_token = client.cookies.get("portal_session")
+    rotated_csrf_token = client.cookies.get("portal_csrf")
+    client.post(
+        "/auth/logout",
+        headers={**ORIGIN, "X-CSRF-Token": rotated_csrf_token},
+    )
+
+    for secret in (
+        password,
+        password_hash,
+        invite_token,
+        session_token,
+        csrf_token,
+        rotated_session_token,
+        rotated_csrf_token,
+    ):
+        assert secret not in caplog.text
+
+
 def test_login_uses_same_error_for_unknown_username_and_wrong_password(tmp_path):
     client, _repository, invite, _ = _local_app(tmp_path)
     client.post("/auth/signup", json={"username": "Known-User", "password": "correct horse battery staple", "invite": invite}, headers=ORIGIN)
@@ -253,6 +288,13 @@ def test_main_startup_serves_local_auth_without_oauth_and_does_not_mount_hca(tmp
         session_cookie = next(value for value in response.headers.get_list("set-cookie") if value.startswith("portal_session="))
         assert "secure" in session_cookie.lower()
         assert client.get("/auth/callback").status_code == 404
+        assert client.post("/auth/bootstrap").status_code == 404
+        assert client.post("/auth/adopt-operator").status_code == 404
+        assert client.post("/auth/reset").status_code == 404
+        assert not any(
+            "bootstrap" in getattr(route, "path", "") or "adopt-operator" in getattr(route, "path", "")
+            for route in local_app.routes
+        )
         assert local_app.state.portal_enabled is True
 
 
