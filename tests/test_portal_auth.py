@@ -262,3 +262,27 @@ def test_failed_local_account_insert_rolls_back_invite_use(tmp_path):
         repo.create_local_account_with_invite(raw_token=raw, username="  ", password_hash="hash", display_name="Invalid")
     current = next(item for item in repo.list_invites() if item["id"] == invite["id"])
     assert current["uses_count"] == 0
+
+
+def test_local_signup_rejects_bound_email_invite_without_account_or_quota_change(tmp_path):
+    repo = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="x" * 40)
+    operator = repo.upsert_user(subject="operator", email="operator@example.test", name="Operator", role="operator")
+    invite, raw = repo.create_invite(
+        issuer_user_id=operator["id"], bound_email="person@example.test", max_uses=3
+    )
+
+    with repo.connect() as connection:
+        user_count_before = connection.execute("SELECT COUNT(*) FROM portal_users").fetchone()[0]
+    with pytest.raises(PermissionError, match="verified email|bound"):
+        repo.create_local_account_with_invite(
+            raw_token=raw, username="bound-person", password_hash="argon2id$hash", display_name="Bound Person"
+        )
+
+    with repo.connect() as connection:
+        user_count_after = connection.execute("SELECT COUNT(*) FROM portal_users").fetchone()[0]
+        invite_after = connection.execute(
+            "SELECT uses_count,max_uses,consumed_at,revoked_at FROM portal_invites WHERE id=?", (invite["id"],)
+        ).fetchone()
+    assert user_count_after == user_count_before
+    assert tuple(invite_after) == (0, 3, None, None)
+    assert repo.find_invite(raw)["id"] == invite["id"]
