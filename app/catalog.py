@@ -36,6 +36,18 @@ class PriceMatch:
     confidence: str = "none"
 
 
+@dataclass(frozen=True)
+class PriceSuggestion:
+    input_usd_per_million: float | None
+    output_usd_per_million: float | None
+    cached_input_usd_per_million: float | None = None
+    source: str = "manual"
+    source_url: str | None = None
+    evidence: str | None = None
+    confidence: str | None = None
+    fetched_at: str | None = None
+
+
 def normalize_openai_models(payload: Mapping[str, Any]) -> list[DiscoveredModel]:
     """Validate an OpenAI-style model list and retain explicitly advertised fields."""
     if not isinstance(payload, Mapping):

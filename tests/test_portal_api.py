@@ -1,9 +1,13 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 from cryptography.fernet import Fernet
+import respx
+from datetime import datetime, timezone
 
 from app.config import Settings
+from app.catalog import DiscoveredModel, ModelsDevCatalog
 from app.database import Database
 from app.portal_api import PortalService, create_portal_router
 from app.portal_db import PortalDatabase
@@ -36,11 +40,49 @@ def _enable_connection(repository, provider_id):
         connection.execute("UPDATE provider_connections SET enabled=1 WHERE legacy_profile_id=?", (provider_id,))
 
 
+def _discover_models(repository, provider_id, model_ids):
+    with repository.connect() as connection:
+        row = connection.execute("SELECT id FROM provider_connections WHERE legacy_profile_id=?", (provider_id,)).fetchone()
+    repository.apply_discovery(row["id"], [DiscoveredModel(model_id) for model_id in model_ids], datetime.now(timezone.utc))
+
+
 def _app(tmp_path, provider_ids=()):
     repository = _repository(tmp_path, provider_ids)
     app = FastAPI()
     app.include_router(create_portal_router(PortalService(repository, identity=FixedIdentity(), cookie_secure=False)))
     return TestClient(app), repository
+
+
+def _operator_app(tmp_path):
+    path = str(tmp_path / "operator-portal.db")
+    settings = Settings(
+        database_path=path,
+        provider_key_pepper="z" * 40,
+        provider_secret_key=Fernet.generate_key().decode(),
+        admin_token="operator-test-token",
+    )
+    legacy = Database(path, settings.provider_key_pepper, settings.provider_secret_key)
+    repository = PortalDatabase(path, key_pepper="o" * 40)
+    app = FastAPI()
+    app.include_router(create_portal_router(PortalService(
+        repository, identity=FixedIdentity(), cookie_secure=False,
+        legacy_database=legacy, settings=settings,
+        models_dev_catalog=ModelsDevCatalog.from_payload({}),
+    )))
+    client = TestClient(app)
+    operator, _ = _login(client, repository, "operator-task4", role="operator")
+    headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    return client, repository, legacy, operator, headers
+
+
+def _create_provider(client, headers, *, name="Provider", brand_slug="provider", connection_label="Primary"):
+    return client.post("/api/operator/providers", headers=headers, json={
+        "name": name,
+        "brandSlug": brand_slug,
+        "connectionLabel": connection_label,
+        "baseUrl": "https://93.184.216.34/v1",
+        "apiKey": "provider-secret-never-return",
+    })
 
 
 def _login(client, repository, subject, role="developer"):
@@ -172,6 +214,230 @@ def test_operator_guardrail_changes_persist_and_provider_secrets_stay_write_only
     assert rejected.status_code == 422
 
 
+def test_create_connection_never_returns_provider_secret(tmp_path):
+    client, repository, legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=True) as router:
+        route = router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        response = _create_provider(client, headers, brand_slug="vendor-x", connection_label="Primary EU")
+
+    assert response.status_code == 201
+    assert route.call_count == 1
+    assert "provider-secret-never-return" not in response.text
+    assert "encrypted_api_key" not in response.text
+    assert response.json().get("brandSlug") == "vendor-x"
+    connection_id = response.json()["id"]
+    profile = legacy.get_upstream(connection_id)
+    assert profile["api_key"] == "provider-secret-never-return"
+    with repository.connect() as connection:
+        stored = connection.execute("""SELECT b.slug,b.name,c.id,c.legacy_profile_id,c.secret_ref,c.label
+            FROM provider_connections c JOIN provider_brands b ON b.id=c.brand_id WHERE c.id=?""", (connection_id,)).fetchone()
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(provider_connections)")}
+    assert tuple(stored) == ("vendor-x", "Provider", connection_id, connection_id, connection_id, "Primary EU")
+    assert "encrypted_api_key" not in columns
+
+
+def test_sync_models_runs_on_connection_setup(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}, {"id": "model-b"}]})
+        )
+        response = _create_provider(client, headers)
+
+    assert response.status_code == 201
+    assert route.call_count == 1
+    assert response.json()["models"] == ["model-a", "model-b"]
+    assert {model["id"] for model in repository.list_discovered_models(response.json()["id"])} == {"model-a", "model-b"}
+
+
+def test_repeated_sync_is_idempotent(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers)
+        assert created.status_code == 201
+        connection_id = created.json()["id"]
+        with repository.connect() as connection:
+            before = tuple(connection.execute("""SELECT
+                (SELECT COUNT(*) FROM connection_models WHERE connection_id=?),
+                (SELECT COUNT(*) FROM catalog_offers),
+                (SELECT COUNT(*) FROM offer_routes)""", (connection_id,)).fetchone())
+        synced = client.post(f"/api/operator/providers/{connection_id}/sync", headers=headers)
+
+    assert synced.status_code == 200
+    assert route.call_count == 2
+    with repository.connect() as connection:
+        after = tuple(connection.execute("""SELECT
+            (SELECT COUNT(*) FROM connection_models WHERE connection_id=?),
+            (SELECT COUNT(*) FROM catalog_offers),
+            (SELECT COUNT(*) FROM offer_routes)""", (connection_id,)).fetchone())
+    assert after == before == (1, 1, 1)
+
+
+def test_failed_sync_keeps_last_discovery_and_marks_stale(tmp_path):
+    client, repository, legacy, _operator, headers = _operator_app(tmp_path)
+    profile = legacy.create_upstream("Cached models", "openai_compatible", "https://93.184.216.34/v1", "provider-secret")
+    connection_id = profile["id"]
+    legacy.update_upstream_models(connection_id, ["model-a", "model-b"], "healthy")
+    with repository.connect() as connection:
+        brand_id = f"task4-brand:{connection_id}"
+        connection.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at) VALUES(?,?,?,?)",
+                           (brand_id, "Task 4", connection_id, "2026-01-01T00:00:00+00:00"))
+        connection.execute("""INSERT INTO provider_connections(
+            id,brand_id,legacy_profile_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,legacy_enabled
+            ) VALUES(?,?,?,?,?,?,1,?,'mapped',1)""",
+            (connection_id, brand_id, connection_id, profile["base_url"], profile["provider_kind"], connection_id, "2026-01-01T00:00:00+00:00"))
+        for model_id in ("model-a", "model-b"):
+            connection.execute("INSERT INTO connection_models(connection_id,upstream_model_id) VALUES(?,?)", (connection_id, model_id))
+    with respx.mock(assert_all_called=False) as router:
+        route = router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(503, json={"error": "offline"})
+        )
+        failed = client.post(f"/api/operator/providers/{connection_id}/sync", headers=headers)
+
+    assert failed.status_code == 502
+    assert route.call_count == 1
+    assert legacy.get_upstream(connection_id)["models"] == ["model-a", "model-b"]
+    discovered = repository.list_discovered_models(connection_id)
+    assert {model["id"] for model in discovered} == {"model-a", "model-b"}
+    assert all(model["stale"] for model in discovered)
+
+
+def test_new_offer_is_unavailable_until_price_approved_and_enabled(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers)
+    assert created.status_code == 201
+
+    offers_response = client.get("/api/operator/offers")
+    assert offers_response.status_code == 200
+    offers = offers_response.json()
+    offer = next(item for item in offers if item["canonicalModelId"] == "model-a")
+    assert offer["available"] is False
+
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": 1,
+        "outputUsdPerMillion": 2,
+        "cachedInputUsdPerMillion": 0.5,
+        "source": "manual-review",
+    })
+    assert pending.status_code == 201
+    approval = client.post(
+        f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers,
+    )
+    assert approval.status_code == 204
+    client.cookies.clear()
+    _login(client, _repository, "developer-task4")
+    assert client.get("/api/models").json() == []
+
+    client.cookies.clear()
+    _login(client, _repository, "operator-task4", role="operator")
+    headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    enabled = client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True})
+    assert enabled.status_code == 200
+    client.cookies.clear()
+    _login(client, _repository, "developer-task4")
+    assert [item["id"] for item in client.get("/api/models").json()] == ["provider::model-a"]
+
+
+def test_price_change_remains_pending_until_approval(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers)
+    assert created.status_code == 201
+    offers_response = client.get("/api/operator/offers")
+    assert offers_response.status_code == 200
+    offer = next(item for item in offers_response.json() if item["canonicalModelId"] == "model-a")
+    initial = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": 1, "outputUsdPerMillion": 2, "source": "manual-v1",
+    })
+    assert initial.status_code == 201
+    assert client.post(f"/api/operator/offers/{offer['id']}/prices/{initial.json()['id']}/approve", headers=headers).status_code == 204
+    assert client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True}).status_code == 200
+
+    changed = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": 3, "outputUsdPerMillion": 4, "source": "manual-v2",
+    })
+    assert changed.status_code == 201
+    current = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+    assert current["activePrice"]["inputUsdPerMillion"] == 1
+    assert current["pendingPrice"]["id"] == changed.json()["id"]
+    assert current["pendingPrice"]["inputUsdPerMillion"] == 3
+    client.cookies.clear()
+    _login(client, repository, "developer-price-change")
+    assert [item["id"] for item in client.get("/api/models").json()] == ["provider::model-a"]
+
+
+def test_disabled_offer_is_not_returned_to_developer_catalog(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers)
+    assert created.status_code == 201
+    offers_response = client.get("/api/operator/offers")
+    assert offers_response.status_code == 200
+    offer = next(item for item in offers_response.json() if item["canonicalModelId"] == "model-a")
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": 1, "outputUsdPerMillion": 2, "source": "manual-v1",
+    })
+    assert pending.status_code == 201
+    assert client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers).status_code == 204
+    assert client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True}).status_code == 200
+    client.cookies.clear()
+    _login(client, _repository, "developer-disabled-offer")
+    assert [item["id"] for item in client.get("/api/models").json()] == ["provider::model-a"]
+
+    client.cookies.clear()
+    _login(client, _repository, "operator-task4", role="operator")
+    headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    disabled = client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": False})
+    assert disabled.status_code == 200
+    client.cookies.clear()
+    _login(client, _repository, "developer-disabled-offer")
+    assert client.get("/api/models").json() == []
+
+
+def test_price_approval_does_not_enable_a_disabled_connection(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers)
+    assert created.status_code == 201
+    connection_id = created.json()["id"]
+    offers_response = client.get("/api/operator/offers")
+    assert offers_response.status_code == 200
+    offer = next(item for item in offers_response.json() if item["canonicalModelId"] == "model-a")
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": 1, "outputUsdPerMillion": 2, "source": "manual-v1",
+    })
+    assert pending.status_code == 201
+    with repository.connect() as connection:
+        connection.execute("UPDATE provider_connections SET enabled=0 WHERE id=?", (connection_id,))
+    approval = client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers)
+
+    assert approval.status_code == 204
+    with repository.connect() as connection:
+        row = connection.execute("SELECT mapping_status,enabled FROM provider_connections WHERE id=?", (connection_id,)).fetchone()
+    assert tuple(row) == ("mapped", 0)
+    client.cookies.clear()
+    _login(client, repository, "developer-disabled-connection")
+    assert client.get("/api/models").json() == []
+
+
 def test_archived_key_keeps_usage_history(tmp_path):
     client, repository = _app(tmp_path)
     user, _ = _login(client, repository, "member-a")
@@ -187,6 +453,7 @@ def test_key_policy_can_be_edited_only_by_its_owner(tmp_path):
     other = repository.upsert_user(subject="other", email="other@example.test", name="Other")
     repository.add_catalog_model(provider_id="p", model_id="model-a", provider_name="P", capabilities=["text"], input_price_per_million=1, output_price_per_million=1, price_source="verified", approved=True)
     _enable_connection(repository, "p")
+    _discover_models(repository, "p", ["model-a"])
     key = repository.create_user_key(owner["id"], "Editable", allowed_models_mode="all_approved")
     assert repository.update_user_key_policy(owner["id"], key["id"], allowed_models_mode="selected", allowed_models=["model-a"], spend_limit_usd=5, spend_period="weekly", rpm_limit=30) is True
     updated = repository.get_user_key(owner["id"], key["id"])
@@ -237,6 +504,7 @@ def test_catalog_exposes_only_approved_priced_models(tmp_path):
     repository.add_catalog_model(provider_id="p1", model_id="unapproved", provider_name="Provider", capabilities=["text"], input_price_per_million=1, output_price_per_million=2, price_source="verified", approved=False)
     repository.add_catalog_model(provider_id="p1", model_id="missing-price", provider_name="Provider", capabilities=["text"], input_price_per_million=None, output_price_per_million=None, approved=True)
     _enable_connection(repository, "p1")
+    _discover_models(repository, "p1", ["priced-approved", "unapproved", "missing-price"])
     assert [model["id"] for model in client.get("/api/models").json()] == ["p1::priced-approved"]
     repository.set_model_active("priced-approved", active=False)
     assert client.get("/api/models").json() == []
@@ -357,6 +625,7 @@ def test_portal_key_resolves_for_gateway_and_usage_is_immutable_with_owner_snaps
     repository.set_user_policy(user["id"], allowance_usd=12, allowance_period="weekly", rpm_limit=80)
     repository.add_catalog_model(provider_id="provider-1", model_id="model-1", provider_name="Provider One", capabilities=["text"], input_price_per_million=1, output_price_per_million=2, price_source="verified", approved=True)
     _enable_connection(repository, "provider-1")
+    _discover_models(repository, "provider-1", ["model-1"])
     created = repository.create_user_key(user["id"], "Gateway key", allowed_models_mode="all_approved")
 
     resolved = repository.find_gateway_key(created["api_key"])

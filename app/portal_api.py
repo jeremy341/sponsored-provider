@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import secrets
 import ipaddress
 import math
+import re
 import socket
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -16,10 +18,11 @@ from fastapi.responses import JSONResponse, RedirectResponse
 import httpx
 
 from app.identity import HackClubOIDC
+from app.catalog import ModelsDevCatalog, PriceSuggestion, normalize_openai_models
 from app.portal_db import PortalDatabase
 from app.database import Database
 from app.config import Settings
-from app.alibaba import AlibabaClient
+from app.openai_compatible import OpenAICompatibleClient
 from app.password_auth import PasswordPolicyError, hash_password, normalize_username, verify_password_or_dummy
 
 
@@ -37,6 +40,7 @@ class PortalService:
         auth_rate_limit_attempts: int = 5,
         auth_rate_limit_window_seconds: int = 900,
         public_origin: str | None = None,
+        models_dev_catalog: ModelsDevCatalog | None = None,
     ):
         if not 300 <= session_ttl_seconds <= 24 * 60 * 60:
             raise ValueError("Portal session lifetime must be between 5 minutes and 24 hours")
@@ -52,6 +56,7 @@ class PortalService:
         self.auth_rate_limit_attempts = auth_rate_limit_attempts
         self.auth_rate_limit_window_seconds = auth_rate_limit_window_seconds
         self.public_origin = public_origin.rstrip("/") if public_origin else None
+        self.models_dev_catalog = models_dev_catalog
 
 
 def _public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -165,6 +170,61 @@ def create_portal_router(service: PortalService) -> APIRouter:
         _user, expected_hash = session
         if not csrf_cookie or not csrf_header or not hmac.compare_digest(csrf_cookie, csrf_header) or not repo.verify_csrf(expected_hash, csrf_cookie):
             raise HTTPException(status_code=403, detail="CSRF validation failed")
+
+    async def sync_connection(connection_id: str, profile_id: str, actor_id: str) -> dict[str, Any]:
+        if not service.legacy_database or not service.settings:
+            raise HTTPException(status_code=503, detail="Provider storage is unavailable")
+        upstream = service.legacy_database.get_upstream(profile_id)
+        if not upstream:
+            raise HTTPException(status_code=404, detail="Provider profile not found")
+        try:
+            payload = await OpenAICompatibleClient(
+                upstream["base_url"], upstream["api_key"], service.settings.upstream_timeout_seconds,
+            ).list_models()
+            discovered = normalize_openai_models(payload)
+        except Exception as exc:
+            service.legacy_database.update_upstream_models(profile_id, [], "error")
+            repo.mark_discovery_stale(connection_id)
+            repo.audit(actor_id, "provider.sync_failed", "provider", connection_id)
+            raise HTTPException(status_code=502, detail="Model discovery failed. Check the URL and upstream credential.") from exc
+
+        model_ids = [model.id for model in discovered]
+        service.legacy_database.update_upstream_models(profile_id, model_ids, "healthy" if model_ids else "empty_catalog")
+        try:
+            summary = repo.apply_discovery(connection_id, discovered, datetime.now(timezone.utc))
+        except (LookupError, ValueError) as exc:
+            repo.audit(actor_id, "provider.sync_failed", "provider", connection_id, {"reason": "connection_state"})
+            raise HTTPException(status_code=409, detail="Provider connection is not eligible for model discovery.") from exc
+        connection = repo.get_connection(connection_id)
+        if service.models_dev_catalog is None:
+            service.models_dev_catalog = await asyncio.to_thread(ModelsDevCatalog.fetch)
+        for model in discovered:
+            offer_id = repo.get_offer_id(connection["brand_slug"], model.id)
+            if not offer_id:
+                continue
+            match = service.models_dev_catalog.lookup(connection["brand_slug"], model.id)
+            if match.status == "exact" and match.input_usd_per_million is not None and match.output_usd_per_million is not None:
+                repo.save_price_suggestion(offer_id, PriceSuggestion(
+                    match.input_usd_per_million, match.output_usd_per_million,
+                    match.cached_input_usd_per_million, "models.dev", match.source_url,
+                    match.evidence, match.confidence, match.fetched_at,
+                ))
+            reported = upstream.get("pricing", {}).get(model.id, {})
+            if isinstance(reported, dict):
+                input_rate, output_rate = reported.get("input"), reported.get("output")
+                if input_rate is not None and output_rate is not None:
+                    try:
+                        repo.save_price_suggestion(offer_id, PriceSuggestion(
+                            input_rate, output_rate, reported.get("cache"), "provider-reported",
+                            evidence="Rates reported by the configured upstream profile.", confidence="provider-reported",
+                        ))
+                    except (TypeError, ValueError):
+                        pass
+        repo.audit(actor_id, "provider.synced", "provider", connection_id,
+                   {"models_discovered": summary.discovered_count, "stale_models": summary.stale_count})
+        return {"providerId": profile_id, "connectionId": connection_id,
+                "modelsDiscovered": summary.discovered_count, "models": model_ids,
+                "staleModels": summary.stale_count}
 
     def require_same_origin(request: Request) -> None:
         supplied = request.headers.get("origin")
@@ -589,6 +649,62 @@ def create_portal_router(service: PortalService) -> APIRouter:
     async def list_operator_models(_session=Depends(operator)):
         return [_api_model(item) for item in repo.list_models(approved_only=False, include_inactive=True)]
 
+    @router.get("/api/operator/offers")
+    async def list_operator_offers(_session=Depends(operator)):
+        return repo.list_operator_offers()
+
+    @router.patch("/api/operator/offers/{offer_id}/price", status_code=201)
+    async def suggest_offer_price(offer_id: str, request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        data = await request.json()
+        try:
+            for field in ("inputUsdPerMillion", "outputUsdPerMillion", "cachedInputUsdPerMillion"):
+                value = data.get(field)
+                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
+                    raise ValueError("Prices must be finite non-negative USD per million")
+            evidence = str(data.get("source", "")).strip()
+            if not evidence or len(evidence) > 240:
+                raise ValueError("A price source or evidence reference is required")
+            suggestion = PriceSuggestion(
+                input_usd_per_million=data.get("inputUsdPerMillion"),
+                output_usd_per_million=data.get("outputUsdPerMillion"),
+                cached_input_usd_per_million=data.get("cachedInputUsdPerMillion"),
+                source="manual", evidence=evidence,
+            )
+            pending = repo.save_price_suggestion(offer_id, suggestion)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Offer not found") from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        repo.audit(actor["id"], "offer.price_suggested", "offer", offer_id, {"suggestion_id": pending.id, "source": "manual"})
+        return {"id": pending.id, "offerId": offer_id, "status": "pending"}
+
+    @router.post("/api/operator/offers/{offer_id}/prices/{version_id}/approve", status_code=204)
+    async def approve_offer_price(offer_id: str, version_id: str, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        try:
+            repo.approve_price_version(actor["id"], offer_id, version_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Pending price version not found") from exc
+        return Response(status_code=204)
+
+    @router.patch("/api/operator/offers/{offer_id}/availability")
+    async def update_offer_availability(offer_id: str, request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        data = await request.json()
+        if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+            raise HTTPException(status_code=422, detail="Offer enabled must be boolean")
+        try:
+            repo.set_offer_available(offer_id, data["enabled"], actor["id"])
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Offer not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "enabled": data["enabled"]}
+
     @router.post("/api/operator/providers", status_code=201)
     async def create_provider(request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
         require_csrf(session, csrf_cookie, csrf_header)
@@ -596,17 +712,32 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raise HTTPException(status_code=503, detail="Provider storage is unavailable")
         actor, _csrf_hash = session
         data = await request.json()
-        name = str(data.get("name", "")).strip()
+        name = str(data.get("name", data.get("providerName", ""))).strip()
         api_key = str(data.get("apiKey", "")).strip()
+        brand_slug = str(data.get("brandSlug", "")).strip().lower()
+        if not brand_slug:
+            brand_slug = re.sub(r"[^a-z0-9]+", "-", name.casefold()).strip("-")
+        connection_label = str(data.get("connectionLabel", "")).strip() or name
         try:
             base_url = _public_https_base_url(str(data.get("baseUrl", "")))
             if not name or len(name) > 80 or not api_key:
                 raise ValueError("Provider name and API key are required")
             profile = service.legacy_database.create_upstream(name, "openai_compatible", base_url, api_key)
+            try:
+                registered = repo.register_connection(profile["id"], brand_slug, name, connection_label)
+            except Exception:
+                service.legacy_database.set_upstream_state(profile["id"], False)
+                raise
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        repo.audit(actor["id"], "provider.created", "provider", profile["id"], {"name": name, "base_url": base_url})
-        return {key: value for key, value in profile.items() if key not in {"api_key", "encrypted_api_key"}}
+        except LookupError as exc:
+            raise HTTPException(status_code=409, detail="Provider metadata could not be registered; the encrypted profile was disabled.") from exc
+        repo.audit(actor["id"], "provider.created", "provider", registered.id,
+                   {"name": name, "base_url": base_url, "brand_slug": brand_slug})
+        synced = await sync_connection(registered.id, profile["id"], actor["id"])
+        return {"id": registered.id, "name": name, "provider_kind": "openai_compatible", "base_url": base_url,
+                "enabled": registered.enabled, "secret_configured": True,
+                "brandSlug": brand_slug, "connectionLabel": connection_label, "models": synced["models"]}
 
     @router.post("/api/operator/providers/{provider_id}/sync")
     async def sync_provider(provider_id: str, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
@@ -614,28 +745,13 @@ def create_portal_router(service: PortalService) -> APIRouter:
         if not service.legacy_database or not service.settings:
             raise HTTPException(status_code=503, detail="Provider storage is unavailable")
         actor, _csrf_hash = session
-        upstream = service.legacy_database.get_upstream(provider_id)
+        connection = repo.get_connection(provider_id)
+        if not connection:
+            raise HTTPException(status_code=404, detail="Provider connection not found")
+        upstream = service.legacy_database.get_upstream(connection["legacy_profile_id"])
         if not upstream or not upstream["enabled"]:
             raise HTTPException(status_code=404, detail="Provider not found or disabled")
-        try:
-            client = AlibabaClient(upstream["base_url"], upstream["api_key"], service.settings.upstream_timeout_seconds)
-            response = await client.list_models()
-        except Exception as exc:
-            service.legacy_database.update_upstream_models(provider_id, [], "error")
-            repo.audit(actor["id"], "provider.sync_failed", "provider", provider_id)
-            raise HTTPException(status_code=502, detail="Model discovery failed. Check the URL and upstream credential.") from exc
-        items = response.get("data", response if isinstance(response, list) else [])
-        model_ids = sorted({item.get("id") for item in items if isinstance(item, dict) and isinstance(item.get("id"), str)})
-        service.legacy_database.update_upstream_models(provider_id, model_ids, "healthy" if model_ids else "empty_catalog")
-        for model_id in model_ids:
-            price = upstream.get("pricing", {}).get(model_id, {})
-            repo.add_catalog_model(
-                provider_id=provider_id, model_id=model_id, provider_name=upstream["name"], capabilities=[],
-                input_price_per_million=price.get("input"), output_price_per_million=price.get("output"),
-                cached_input_price_per_million=price.get("cache"), price_source=price.get("source"), approved=False,
-            )
-        repo.audit(actor["id"], "provider.synced", "provider", provider_id, {"models_discovered": len(model_ids)})
-        return {"providerId": provider_id, "modelsDiscovered": len(model_ids), "models": model_ids}
+        return await sync_connection(connection["id"], connection["legacy_profile_id"], actor["id"])
 
     @router.put("/api/operator/providers/{provider_id}/models/{model_id:path}")
     async def set_model_policy(provider_id: str, model_id: str, request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
