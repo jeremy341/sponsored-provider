@@ -220,6 +220,47 @@ def test_approved_orphan_legacy_catalog_is_not_publicly_accessible(tmp_path):
     assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
 
 
+def test_approved_catalog_with_stale_profile_reference_stays_unknown_and_unroutable(tmp_path):
+    client, repository = _app(tmp_path, ("stale-provider",))
+    user, _ = _login(client, repository, "stale-owner")
+    key = repository.create_user_key(user["id"], "Stale provider key", allowed_models_mode="all_approved")
+    repository.add_catalog_model(
+        provider_id="stale-provider", model_id="model-a", provider_name="Legacy provider",
+        capabilities=["text"], input_price_per_million=1, output_price_per_million=2,
+        price_source="legacy", approved=False, active=True,
+    )
+
+    with repository.connect() as connection:
+        connection.execute("UPDATE provider_connections SET enabled=1 WHERE legacy_profile_id='stale-provider'")
+        connection.execute("DELETE FROM upstream_profiles WHERE id='stale-provider'")
+
+    repository.add_catalog_model(
+        provider_id="stale-provider", model_id="model-a", provider_name="Approved stale provider",
+        capabilities=["vision"], input_price_per_million=3, output_price_per_million=4,
+        price_source="operator-approved", approved=True, active=True,
+    )
+
+    with repository.connect() as connection:
+        identity = connection.execute("""SELECT b.name,b.identity_status,c.legacy_profile_id,c.mapping_status,c.enabled
+            FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id
+            WHERE b.migration_ref='stale-provider'""").fetchone()
+        catalog = connection.execute("""SELECT provider_name,capabilities_json,input_price_per_million,
+            output_price_per_million,price_source,approved,active FROM portal_catalog_models
+            WHERE provider_id='stale-provider' AND model_id='model-a'""").fetchone()
+        prior_price = connection.execute("""SELECT input_rate,output_rate,source,is_active FROM price_versions
+            WHERE offer_id='legacy-offer:stale-provider:model-a' AND source='legacy'""").fetchone()
+        route = connection.execute("""SELECT active FROM offer_routes
+            WHERE id='legacy-route:stale-provider:model-a'""").fetchone()
+
+    assert tuple(identity) == ("Unknown legacy provider", "unknown", "stale-provider", "unmapped", 0)
+    assert tuple(catalog) == ("Approved stale provider", '["vision"]', 3, 4, "operator-approved", 1, 1)
+    assert tuple(prior_price) == ("1", "2", "legacy", 0)
+    assert route["active"] == 0
+    assert client.get("/api/models").json() == []
+    assert repository.get_model("stale-provider::model-a") is None
+    assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
+
+
 def test_historic_usage_api_keeps_float_compatible_cost_after_schema_migration(tmp_path):
     client, repository = _app(tmp_path)
     user, _ = _login(client, repository, "member-a")

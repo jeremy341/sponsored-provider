@@ -750,12 +750,15 @@ class PortalDatabase:
             if not brand:
                 conn.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at) VALUES(?,?,?,?)",
                              (brand_id, "Unknown legacy provider", provider_id, _iso()))
+            has_legacy_profile = self._table_exists(conn, "upstream_profiles") and conn.execute(
+                "SELECT 1 FROM upstream_profiles WHERE id=?", (provider_id,)
+            ).fetchone() is not None
             connection = conn.execute("SELECT id FROM provider_connections WHERE legacy_profile_id=?", (provider_id,)).fetchone()
             connection_id = connection["id"] if connection else f"legacy-connection:{provider_id}"
             fallback = None if connection else conn.execute(
                 "SELECT legacy_profile_id FROM provider_connections WHERE id=?", (connection_id,)
             ).fetchone()
-            orphaned_provider = connection is None
+            orphaned_provider = not has_legacy_profile
             if not connection:
                 if fallback is None:
                     conn.execute("INSERT OR IGNORE INTO provider_connections(id,brand_id,legacy_profile_id,secret_ref,enabled,mapping_status,created_at) VALUES(?,?,?,?,0,'unmapped',?)",
