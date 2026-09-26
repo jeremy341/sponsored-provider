@@ -759,7 +759,21 @@ def create_portal_router(service: PortalService) -> APIRouter:
 
     @router.get("/api/operator/invites")
     async def list_invites(_session=Depends(operator)):
-        return repo.list_invites()
+        now = datetime.now(timezone.utc).isoformat()
+        rows = repo.list_invites()
+        for invite in rows:
+            invite["status"] = (
+                "revoked" if invite["revoked_at"] else
+                "exhausted" if invite["uses_count"] >= invite["max_uses"] else
+                "expired" if invite["expires_at"] <= now else "active"
+            )
+            invite["email_bound"] = invite["bound_email"] is not None
+        return rows
+
+    @router.get("/api/developer/invites")
+    async def developer_invite_status(session=Depends(developer)):
+        user, _csrf_hash = session
+        return repo.developer_invite_status(user["id"])
 
     @router.post("/api/operator/invites", status_code=201)
     async def create_invite(
@@ -774,7 +788,7 @@ def create_portal_router(service: PortalService) -> APIRouter:
             data = await request.json()
             if not isinstance(data, dict):
                 raise ValueError("Invalid invite request")
-            invite, token = repo.create_invite(issuer_user_id=user["id"], expires_in_seconds=data.get("expires_in_seconds", 7 * 24 * 60 * 60), bound_email=data.get("bound_email"), max_uses=data.get("max_uses", 1))
+            invite, token = repo.create_invite(issuer_user_id=user["id"], expires_in_seconds=data.get("expires_in_seconds", 7 * 24 * 60 * 60), bound_email=data.get("bound_email"), max_uses=data.get("max_uses", 5))
         except (ValueError, PermissionError, TypeError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         repo.audit(user["id"], "invite.created", "invite", invite["id"], {"bound_email": invite["bound_email"], "expires_at": invite["expires_at"]})
@@ -803,6 +817,26 @@ def create_portal_router(service: PortalService) -> APIRouter:
         repo.audit(user["id"], "invite.created", "invite", invite["id"], {"expires_at": invite["expires_at"], "max_uses": 1})
         return {"invite": invite, "invite_token": token}
 
+    @router.post("/api/operator/invites/{invite_id}/revoke")
+    async def revoke_invite(
+        invite_id: str,
+        session=Depends(operator),
+        csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"),
+        csrf_header: str | None = Header(default=None, alias="X-CSRF-Token"),
+    ):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        if not repo.revoke_invite(invite_id, revoked_by_user_id=actor["id"]):
+            raise HTTPException(status_code=404, detail="Invite not found or already revoked")
+        repo.audit(actor["id"], "invite.revoked", "invite", invite_id)
+        invite = next((item for item in repo.list_invites() if item["id"] == invite_id), None)
+        if not invite:
+            raise HTTPException(status_code=404, detail="Invite not found")
+        return {
+            "id": invite["id"], "uses_count": invite["uses_count"], "max_uses": invite["max_uses"],
+            "expires_at": invite["expires_at"], "revoked_at": invite["revoked_at"], "status": "revoked",
+        }
+
     @router.get("/api/operator/usage")
     async def operator_usage(
         session=Depends(operator),
@@ -814,6 +848,4 @@ def create_portal_router(service: PortalService) -> APIRouter:
         page = rows[:limit]
         return {"items": [_activity_record(item, operator=True) for item in page], "nextCursor": page[-1]["occurred_at"] if has_more and page else None}
 
-    if service.identity is not None:
-        router.include_router(hca_router)
     return router
