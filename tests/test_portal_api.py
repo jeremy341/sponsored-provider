@@ -198,6 +198,25 @@ def test_historic_usage_api_keeps_float_compatible_cost_after_schema_migration(t
     assert item["occurredAt"] == "2025-01-02T03:04:05+00:00"
 
 
+def test_unmapped_legacy_catalog_is_not_listed_or_routable(tmp_path):
+    client, repository = _app(tmp_path)
+    user, _ = _login(client, repository, "member-a")
+    key = repository.create_user_key(user["id"], "Unmapped", allowed_models_mode="all_approved")
+    repository.add_catalog_model(
+        provider_id="legacy-provider", model_id="legacy-model", provider_name="Ambiguous label",
+        capabilities=["text"], input_price_per_million=1, output_price_per_million=2,
+        price_source="legacy", approved=True, active=True,
+    )
+    with repository.connect() as connection:
+        connection.execute("DELETE FROM portal_schema_migrations")
+    repository.init_schema()
+
+    assert client.get("/api/models").json() == []
+    assert repository.get_model("legacy-provider::legacy-model") is None
+    resolved = repository.find_gateway_key(key["api_key"])
+    assert resolved["effective_model_ids"] == []
+
+
 def test_portal_key_resolves_for_gateway_and_usage_is_immutable_with_owner_snapshot(tmp_path):
     client, repository = _app(tmp_path)
     user, _ = _login(client, repository, "member-a")
