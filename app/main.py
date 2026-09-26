@@ -1,4 +1,5 @@
 import json
+import hashlib
 import ipaddress
 import time
 from contextlib import asynccontextmanager
@@ -14,13 +15,31 @@ from .config import Settings, get_settings
 from .database import Database
 from .errors import ProviderError
 from .rate_limit import RateLimiter
+from .portal_api import PortalService, create_portal_router
+from .portal_db import PortalDatabase
 
 @asynccontextmanager
 async def lifespan(_app):
-    settings = get_settings()
-    print("Dashboard ready at /dashboard")
-    if settings._bootstrap_generated:
-        print(f"First-run dashboard token: {settings.admin_token}")
+    settings_loader = _app.dependency_overrides.get(get_settings, get_settings)
+    settings = settings_loader()
+    print("Provider service ready")
+    legacy_db = Database(settings.database_path, settings.provider_key_pepper, settings.provider_secret_key)
+    portal_db = get_portal_db(settings)
+    public_origin = settings.portal_public_origin.strip().rstrip("/") or None
+    portal_service = PortalService(
+        portal_db,
+        identity=None,
+        cookie_secure=bool(public_origin and urlparse(public_origin).scheme.lower() == "https"),
+        public_origin=public_origin,
+        auth_rate_limit_attempts=settings.portal_auth_rate_limit_attempts,
+        auth_rate_limit_window_seconds=settings.portal_auth_rate_limit_window_seconds,
+        legacy_database=legacy_db,
+        settings=settings,
+    )
+    if not getattr(_app.state, "portal_routes_added", False):
+        _app.include_router(create_portal_router(portal_service))
+        _app.state.portal_routes_added = True
+    _app.state.portal_enabled = True
     yield
 
 
@@ -36,13 +55,19 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    if request.url.path.startswith(("/api/", "/v1/")):
+    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    if request.url.path.startswith(("/auth/", "/api/", "/v1/")):
         response.headers["Cache-Control"] = "no-store"
     return response
 
 
 def get_db(settings: Settings = Depends(get_settings)):
     return Database(settings.database_path, settings.provider_key_pepper, settings.provider_secret_key)
+
+
+def get_portal_db(settings: Settings = Depends(get_settings)):
+    pepper = hashlib.sha256(("sponsored-provider:portal:v1:" + settings.provider_key_pepper).encode()).hexdigest()
+    return PortalDatabase(settings.database_path, key_pepper=pepper)
 
 
 def upstream_client(profile_id: str | None, db: Database, settings: Settings):
