@@ -1,6 +1,7 @@
 import httpx
 import respx
 from app.config import Settings
+from app.main import estimate_cost
 from pathlib import Path
 from shutil import rmtree
 from uuid import uuid4
@@ -231,8 +232,13 @@ def test_key_spend_cap_blocks_before_upstream_request(client):
     assert route.called is False
 
 
-def test_settings_bootstrap_generates_persistent_secrets():
-    test_dir = Path.cwd() / f".bootstrap-test-{uuid4().hex}"
+def test_cost_estimate_retains_sub_microdollar_precision(client):
+    _test_client, settings, _db = client
+    assert estimate_cost(1, 0, settings, input_price=0.1, output_price=0.1) == 0.0000001
+
+
+def test_settings_bootstrap_generates_persistent_secrets(tmp_path):
+    test_dir = tmp_path / f".bootstrap-test-{uuid4().hex}"
     test_dir.mkdir()
     settings = Settings(database_path=str(test_dir / "provider.db"))
     assert settings.admin_token

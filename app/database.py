@@ -4,7 +4,7 @@ import secrets
 import sqlite3
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -182,16 +182,18 @@ class Database:
 
     def record_usage(self, key_id, *, model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, stream, client_ip=None, upstream_profile_id=None, reservation_id=None, error_category=None):
         with self.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 "INSERT INTO usage_records(provider_key_id,timestamp,model,input_tokens,output_tokens,total_tokens,estimated_cost_usd,latency_ms,status,stream,error_category,client_ip,upstream_profile_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (key_id, now_iso(), model, input_tokens, output_tokens, total_tokens, estimated_cost_usd, latency_ms, status, int(stream), error_category, client_ip, upstream_profile_id),
             )
+            usage_id = cursor.lastrowid
             conn.execute(
                 "UPDATE provider_api_keys SET request_count=request_count+1, estimated_cost_usd=estimated_cost_usd+?, last_used_at=? WHERE id=?",
                 (estimated_cost_usd, now_iso(), key_id),
             )
             if reservation_id:
                 conn.execute("UPDATE budget_reservations SET status='released' WHERE id=? AND status='active'", (reservation_id,))
+        return usage_id
 
     def usage_summary(self):
         with self.connect() as conn:
@@ -201,6 +203,17 @@ class Database:
             by_ip = [dict(r) for r in conn.execute("SELECT COALESCE(client_ip,'unknown') client_ip, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY client_ip ORDER BY requests DESC")]
             daily = [dict(r) for r in conn.execute("SELECT substr(timestamp,1,10) day, COUNT(*) requests, COALESCE(SUM(total_tokens),0) total_tokens, COALESCE(SUM(estimated_cost_usd),0) estimated_cost_usd FROM usage_records GROUP BY substr(timestamp,1,10) ORDER BY day DESC LIMIT 14")]
         return {"totals": dict(totals), "recent": recent, "by_model": by_model, "by_ip": by_ip, "daily": list(reversed(daily)), "keys": self.list_keys(), "blocked_ips": self.list_blocked_ips()}
+
+    def export_usage_history(self):
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT u.id,u.provider_key_id,u.timestamp,u.model,u.input_tokens,u.output_tokens,u.total_tokens,
+                u.estimated_cost_usd,u.latency_ms,u.status,u.stream,u.error_category,u.upstream_profile_id,u.client_ip,
+                k.label key_label,p.name provider_name
+                FROM usage_records u
+                LEFT JOIN provider_api_keys k ON k.id=u.provider_key_id
+                LEFT JOIN upstream_profiles p ON p.id=u.upstream_profile_id
+                ORDER BY u.id""").fetchall()
+        return [dict(row) for row in rows]
 
     def key_usage(self, key_id: int):
         with self.connect() as conn:
@@ -254,12 +267,20 @@ class Database:
         price = (profile or {}).get("pricing", {}).get(model, {})
         return float(price.get("input", 0)), float(price.get("output", 0))
 
-    def reserve_budget(self, key_id: int, upstream_profile_id: str | None, model: str, estimated_cost_usd: float, estimated_tokens: float, global_limit: float, key_limit: float | None):
+    def reserve_budget(self, key_id: int, upstream_profile_id: str | None, model: str, estimated_cost_usd: float, estimated_tokens: float, global_limit: float, key_limit: float | None, reservation_ttl_seconds: int = 600):
         reservation_id = uuid.uuid4().hex
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            expired_before = (datetime.now(timezone.utc) - timedelta(seconds=max(1, reservation_ttl_seconds))).isoformat()
+            conn.execute("UPDATE budget_reservations SET status='released' WHERE status='active' AND created_at<=?", (expired_before,))
             totals = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM usage_records").fetchone()[0]
             active = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM budget_reservations WHERE status='active'").fetchone()[0]
+            try:
+                totals += conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM portal_usage_events WHERE origin='gateway'").fetchone()[0]
+                active += conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM portal_budget_reservations WHERE status='active'").fetchone()[0]
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc).lower():
+                    raise
             key_used = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM usage_records WHERE provider_key_id=?", (key_id,)).fetchone()[0]
             key_active = conn.execute("SELECT COALESCE(SUM(estimated_cost_usd),0) FROM budget_reservations WHERE provider_key_id=? AND status='active'", (key_id,)).fetchone()[0]
             if global_limit > 0 and totals + active + estimated_cost_usd >= global_limit:
