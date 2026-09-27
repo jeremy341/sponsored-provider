@@ -817,3 +817,101 @@ def test_legacy_usage_import_is_idempotent_and_keeps_old_model_cost_and_tokens(t
     assert record["key_label_snapshot"] == "Old key"
     assert repository.operator_usage_summary()["estimated_cost_usd"] == 0.0042
     assert repository.gateway_usage_summary()["estimated_cost_usd"] is None
+
+
+def test_route_can_only_reference_exact_discovered_upstream_model(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=True) as router:
+        discovery = router.get("https://93.184.216.34/v1/models").mock(side_effect=[
+            httpx.Response(200, json={"data": [{"id": "model-a"}]}),
+            httpx.Response(200, json={"data": [{"id": "model-b"}]}),
+        ])
+        first = _create_provider(client, headers, name="Acme primary", brand_slug="acme")
+        second = _create_provider(client, headers, name="Acme backup", brand_slug="acme")
+    assert discovery.call_count == 2
+    assert first.status_code == second.status_code == 201
+    offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "model-a")
+
+    response = client.patch(
+        f"/api/operator/offers/{offer['id']}/routes", headers=headers,
+        json={"connectionIds": [second.json()["id"]]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_route_order_rejects_provider_price_mismatch(tmp_path):
+    client, _repository, legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers, brand_slug="acme")
+    assert created.status_code == 201
+    legacy.update_upstream_pricing(created.json()["id"], {
+        "model-a": {"input": "3", "output": "4"},
+    })
+    offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "model-a")
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": "1", "outputUsdPerMillion": "2", "source": "reviewed",
+    })
+    assert pending.status_code == 201
+    assert client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers).status_code == 204
+
+    response = client.patch(f"/api/operator/offers/{offer['id']}/routes", headers=headers, json={
+        "connectionIds": [created.json()["id"]],
+    })
+
+    assert response.status_code == 422
+
+
+def test_route_order_update_is_audited_and_route_availability_is_separate(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        primary = _create_provider(client, headers, name="Acme primary", brand_slug="acme")
+        backup = _create_provider(client, headers, name="Acme backup", brand_slug="acme")
+    assert primary.status_code == backup.status_code == 201
+    offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "model-a")
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": "1", "outputUsdPerMillion": "2", "source": "reviewed",
+    })
+    assert pending.status_code == 201
+    assert client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers).status_code == 204
+
+    ordered = client.patch(f"/api/operator/offers/{offer['id']}/routes", headers=headers, json={
+        "connectionIds": [backup.json()["id"], primary.json()["id"]],
+    })
+    assert ordered.status_code == 200
+    with repository.connect() as connection:
+        ordered_connections = [row["connection_id"] for row in connection.execute(
+            "SELECT connection_id FROM offer_routes WHERE offer_id=? ORDER BY sort_order", (offer["id"],)
+        )]
+        route_id = connection.execute("SELECT id FROM offer_routes WHERE offer_id=? AND connection_id=?", (offer["id"], backup.json()["id"])).fetchone()["id"]
+    assert ordered_connections == [backup.json()["id"], primary.json()["id"]]
+    route_disabled = client.patch(f"/api/operator/routes/{route_id}/availability", headers=headers, json={"enabled": False})
+    assert route_disabled.status_code == 200
+    route_reenabled = client.patch(f"/api/operator/routes/{route_id}/availability", headers=headers, json={"enabled": True})
+    assert route_reenabled.status_code == 200
+    with repository.connect() as connection:
+        assert connection.execute("SELECT active FROM catalog_offers WHERE id=?", (offer["id"],)).fetchone()["active"] == 0
+    offer_switch = client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True})
+    assert offer_switch.status_code == 200
+    route_switch = client.patch(f"/api/operator/routes/{route_id}/availability", headers=headers, json={"enabled": False})
+    assert route_switch.status_code == 200
+    assert any(event["action"] == "offer.routes_updated" for event in repository.list_audit_events(limit=20))
+    assert any(event["action"] == "route.availability_updated" for event in repository.list_audit_events(limit=20))
+    with repository.connect() as connection:
+        assert connection.execute("SELECT active FROM catalog_offers WHERE id=?", (offer["id"],)).fetchone()["active"] == 1
+        assert connection.execute("SELECT active FROM offer_routes WHERE id=?", (route_id,)).fetchone()["active"] == 0
+    assert next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])["available"] is True
+
+
+def test_route_mutations_require_operator_role(tmp_path):
+    client, repository, _legacy, _operator, _headers = _operator_app(tmp_path)
+    _login(client, repository, "route-developer")
+    response = client.patch("/api/operator/offers/offer-id/routes", json={"connectionIds": []})
+
+    assert response.status_code == 403

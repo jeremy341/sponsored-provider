@@ -707,6 +707,36 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "enabled": data["enabled"]}
 
+    @router.patch("/api/operator/offers/{offer_id}/routes")
+    async def update_offer_routes(offer_id: str, request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        data = await request.json()
+        if not isinstance(data, dict) or not isinstance(data.get("connectionIds"), list):
+            raise HTTPException(status_code=422, detail="connectionIds must be an ordered array")
+        try:
+            repo.set_offer_route_order(offer_id, data["connectionIds"], actor["id"])
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Offer not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True, "routes": data["connectionIds"]}
+
+    @router.patch("/api/operator/routes/{route_id}/availability")
+    async def update_route_availability(route_id: str, request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        data = await request.json()
+        if not isinstance(data, dict) or not isinstance(data.get("enabled"), bool):
+            raise HTTPException(status_code=422, detail="Route enabled must be boolean")
+        try:
+            repo.set_route_available(route_id, data["enabled"], actor["id"])
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="Route not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"ok": True, "enabled": data["enabled"]}
+
     @router.post("/api/operator/providers", status_code=201)
     async def create_provider(request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
         require_csrf(session, csrf_cookie, csrf_header)
