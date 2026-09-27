@@ -14,11 +14,12 @@ import { AuthPage } from "./AuthPage";
 import { ProviderListPage } from "./operator/providers/ProviderListPage";
 import { OperatorUsagePage as OperatorUsageSurface } from "./operator/usage/OperatorUsagePage";
 import { AllowanceDialog } from "./operator/people/AllowanceEditor";
-import { formatUsd } from "../lib/money";
+import { formatUsd, remainingUsd } from "../lib/money";
 import { AllowanceSummary } from "./developer/AllowanceSummary";
 import { ModelCatalogPage as ModelCatalogSurface } from "./developer/ModelCatalogPage";
 import { DeveloperActivityPage as DeveloperActivitySurface } from "./developer/DeveloperActivityPage";
 import { ModelAccessPicker } from "./developer/ModelAccessPicker";
+import { MoneyRunway } from "./operator/MoneyRunway";
 import { count, dateTime, money, tokens } from "../lib/format";
 import type {
   ActivityEvent, ApiKeyRecord, CreateKeyInput, CreateKeyResult, InviteRecord, ModelRecord, ModelUsageRecord, UsagePoint,
@@ -135,36 +136,36 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
 
   return <div className="app-frame">
     <a href="#main-content" className="skip-link">Skip to content</a>
-    <aside className="sidebar" aria-label="Primary navigation">
-      <a className="brand" href={role === "operator" ? "/operator" : "/developer"}>
-        <span className="brand-symbol"><Gauge size={17} strokeWidth={2.2} /></span>
-        <span>provider<span className="brand-dot">.</span></span>
-      </a>
-      {canSwitchWorkspace && <><label className="portal-label" htmlFor="portal-select">Workspace</label><div className="portal-select-wrap">
-        <select id="portal-select" value={role} onChange={switchRole} aria-label="Choose portal">
-          <option value="developer">Developer portal</option>
-          <option value="operator">Operator portal</option>
-        </select>
-        <ChevronDown size={14} aria-hidden="true" />
-      </div></>}
-      <span className="nav-caption">{title} workspace</span>
-      <nav className="primary-nav">
-        {nav.map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `nav-link${isActive ? " is-active" : ""}`}>
-          <item.icon size={17} strokeWidth={1.8} aria-hidden="true" /> <span>{item.label}</span>
-        </NavLink>)}
-      </nav>
-      <div className="sidebar-bottom">
-        <div className="connection-state"><span className="status-dot status-neutral" /> Same-origin session</div>
+    <header className="portal-header">
+      <div className="portal-header-inner">
+        <a className="brand" href={role === "operator" ? "/operator" : "/developer"}>
+          <span className="brand-symbol"><Gauge size={17} strokeWidth={2.2} /></span>
+          <span>provider<span className="brand-dot">.</span></span>
+        </a>
+        <span className="workspace-context">{title}</span>
+        {canSwitchWorkspace && <div className="portal-select-wrap"><label className="sr-only" htmlFor="portal-select">Workspace</label>
+          <select id="portal-select" value={role} onChange={switchRole} aria-label="Choose portal">
+            <option value="developer">Developer portal</option>
+            <option value="operator">Operator portal</option>
+          </select>
+          <ChevronDown size={14} aria-hidden="true" />
+        </div>}
+        <nav className="primary-nav" aria-label="Primary navigation">
+          {nav.map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `nav-link${isActive ? " is-active" : ""}`}>
+            <item.icon size={17} strokeWidth={1.8} aria-hidden="true" /> <span>{item.label}</span>
+          </NavLink>)}
+        </nav>
         <div className="account-row">
           <span className="account-avatar" aria-hidden="true">{userName ? userName.slice(0, 1).toUpperCase() : "P"}</span>
           <span className="account-copy"><strong>{userName ?? "Layout preview"}</strong><small>{preview ? "No account data" : title + " access"}</small></span>
           {preview ? <CircleHelp size={16} aria-label="Preview only" /> : <button className="icon-button" type="button" aria-label="Sign out" onClick={() => { void api.logout().then(() => window.location.assign("/")).catch(() => window.location.reload()); }}><LogOut size={16} /></button>}
         </div>
       </div>
-    </aside>
+    </header>
 
     <div className="mobile-topbar">
       <a className="brand" href={role === "operator" ? "/operator" : "/developer"}><span className="brand-symbol"><Gauge size={17} /></span><span>provider<span className="brand-dot">.</span></span></a>
+      <span className="mobile-workspace-context">{title}{userName ? ` · ${userName}` : ""}</span>
       <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}>
         <Dialog.Trigger asChild><button type="button" className="icon-button mobile-menu-button" aria-label="Open navigation"><Menu size={19} /></button></Dialog.Trigger>
         <Dialog.Portal>
@@ -174,6 +175,7 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
             {canSwitchWorkspace && <><label className="portal-label" htmlFor="mobile-portal">Workspace</label><div className="portal-select-wrap"><select id="mobile-portal" value={role} onChange={switchRole}><option value="developer">Developer portal</option><option value="operator">Operator portal</option></select><ChevronDown size={14} /></div></>}
             <nav className="sheet-nav">{nav.map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `nav-link${isActive ? " is-active" : ""}`}><item.icon size={17} /><span>{item.label}</span></NavLink>)}</nav>
             <Dialog.Description className="muted-copy">{preview ? "Layout preview only. No account data is loaded." : `Signed in as ${userName ?? "your account"}.`}</Dialog.Description>
+            {!preview && <button className="button button-quiet mobile-signout" type="button" onClick={() => { void api.logout().then(() => window.location.assign("/")).catch(() => window.location.reload()); }}><LogOut size={16} /> Sign out</button>}
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
@@ -197,7 +199,6 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
       </Routes>
       <footer className="page-footer"><span>Sponsored Provider</span><span>OpenAI-compatible gateway</span></footer>
     </main>
-    <nav className="bottom-nav" aria-label="Quick navigation">{nav.slice(0, 4).map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `bottom-link${isActive ? " is-active" : ""}`}><item.icon size={18} /><span>{item.label}</span></NavLink>)}<button type="button" className="bottom-link" onClick={() => setMobileOpen(true)}><Menu size={18} /><span>More</span></button></nav>
   </div>;
 }
 
@@ -209,14 +210,13 @@ function StatStrip({ usage }: { usage: UsageSummary | null }) {
   if (!usage) return <EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact />;
 
   const rows = [
-    ["Requests", count(usage?.requests)],
-    ["OK / rejected", `${count(usage?.successfulRequests)} / ${count(usage?.rejectedRequests)}`],
-    ["Reported input / output", `${tokens(usage?.inputTokens)} / ${tokens(usage?.outputTokens)}`],
-    ["Reported total tokens", tokens(usage?.totalTokens)],
-    ["Estimated spend", usage?.estimatedSpendUsd == null ? "Not reported" : formatUsd(usage.estimatedSpendUsd)],
+    ["Requests", count(usage.requests), `${count(usage.successfulRequests)} successful · ${count(usage.rejectedRequests)} rejected`],
+    ["Input / output", `${count(usage.inputTokens)} / ${count(usage.outputTokens)}`, "Reported tokens"],
+    ["Total tokens", tokens(usage.totalTokens), "Reported total"],
+    ["Estimated spend", usage.estimatedSpendUsd == null ? "Not reported" : formatUsd(usage.estimatedSpendUsd), usage.source === "provider_reported" ? "Provider reported" : usage.source === "mixed" ? "Mixed source" : "Gateway estimate"],
   ];
 
-  return <div className="stat-strip" aria-label="Usage summary">{rows.map(([label, value], index) => <div className={`stat-cell${index === 0 ? " stat-cell-primary" : ""}`} key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>;
+  return <div className="stat-strip" aria-label="Usage summary">{rows.map(([label, value, context], index) => <div className={`stat-cell${index === 0 ? " stat-cell-primary" : ""}`} key={label}><span>{label}</span><strong>{value}</strong><small>{context}</small></div>)}</div>;
 }
 
 function DataNotice({ error, onRetry }: { error: string | null; onRetry?: () => void }) {
@@ -302,23 +302,63 @@ function LoadingLine() { return <div className="loading-line" role="status"><spa
 
 function DeveloperHome() {
   const data = useLoad(api.getDeveloperDashboard);
+  const models = useLoad(api.listModels);
   const dash = data.value;
 
   return <>
-    <PageHeader title="Home" description="Your keys, allowance, and recent activity in one place." action={<span className="period-chip"><Clock3 size={14} /> Current allowance period</span>} />
+    <PageHeader title="Home" description="Your sponsored usage, approved models, and API keys." />
     <DataNotice error={data.error} onRetry={data.reload} />
     {data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} />}
+    <nav className="developer-quick-links" aria-label="Developer shortcuts">
+      <NavLink to="/developer/keys"><KeyRound size={16} /> API keys <ArrowRight size={14} /></NavLink>
+      <NavLink to="/developer/models"><Boxes size={16} /> Models <ArrowRight size={14} /></NavLink>
+      <NavLink to="/developer/activity"><Activity size={16} /> Activity <ArrowRight size={14} /></NavLink>
+      <NavLink to="/developer/quickstart"><Code2 size={16} /> Quickstart <ArrowRight size={14} /></NavLink>
+    </nav>
     <div className="content-grid home-grid">
+      <AllowanceSummary allowance={dash?.allowance ?? null} />
+      <QuickstartExample models={models.value ?? []} loading={models.loading} />
       <MetricPanel usage={dash?.usage ?? null} series={dash?.series ?? []} />
       <section className="section-block"><div className="section-heading"><div><h2>API keys</h2><p>Only keys issued to your account.</p></div><NavLink className="text-link" to="/developer/keys">Manage <ArrowRight size={15} /></NavLink></div>
         {data.loading ? <LoadingLine /> : dash?.keys.length ? <KeyTable keys={dash.keys.slice(0, 4)} /> : <EmptyState title="No keys yet" body="Create a key to use approved models through the OpenAI-compatible endpoint." action={<NavLink className="button button-secondary" to="/developer/keys">Create an API key <ArrowRight size={15} /></NavLink>} compact />}
       </section>
       <ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} developer />
-      <AllowanceSummary allowance={dash?.allowance ?? null} />
       <DeveloperInviteCard />
     </div>
     <ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
   </>;
+}
+
+function QuickstartExample({ models, loading }: { models: ModelRecord[]; loading: boolean }) {
+  const available = models.filter((model) => model.approved && model.available);
+  const [selectedId, setSelectedId] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState("");
+  const modelId = available.some((model) => model.id === selectedId) ? selectedId : available[0]?.id ?? "YOUR_APPROVED_MODEL_ID";
+  const snippet = `curl ${window.location.origin}/v1/chat/completions -H "Authorization: Bearer YOUR_SPONSORED_KEY" -H "Content-Type: application/json" -d '{"model":"${modelId}","messages":[{"role":"user","content":"Hello"}]}'`;
+
+  async function copyExample() {
+    try {
+      await navigator.clipboard.writeText(snippet);
+      setCopied(true);
+      setCopyError("");
+    } catch {
+      setCopied(false);
+      setCopyError("Clipboard access failed. Select and copy the example manually.");
+    }
+  }
+
+  return <section className="section-block quickstart-example" aria-labelledby="first-call-title">
+    <div className="section-heading"><div><h2 id="first-call-title">Make your first request</h2><p>OpenAI-compatible endpoint · use your own sponsored key.</p></div><Code2 size={18} aria-hidden="true" /></div>
+    {available.length > 0 && <label className="quickstart-model"><span>Model ID</span><select aria-label="Quickstart model" value={modelId} onChange={(event) => { setSelectedId(event.target.value); setCopied(false); }}>
+      {available.map((model) => <option value={model.id} key={model.id}>{model.providerName} · {model.id}</option>)}
+    </select></label>}
+    {loading && <LoadingLine />}
+    {!loading && available.length === 0 && <p className="field-help">No approved model is available here. Choose an approved model from the catalog before sending a request.</p>}
+    <pre className="code-block"><code>{snippet}</code><button type="button" className="button button-secondary copy-code" onClick={() => { void copyExample(); }}><Copy size={14} />{copied ? "Copied" : "Copy example"}</button></pre>
+    <span className="sr-only" aria-live="polite">{copied ? "Request example copied" : copyError}</span>
+    {copyError && <p className="inline-notice notice-error" role="alert">{copyError}</p>}
+  </section>;
 }
 
 export function DeveloperInviteCard() {
@@ -569,13 +609,10 @@ function ActivitySection({ rows, loading, error, developer = false }: { rows: Ac
 }
 
 function QuickstartPage() {
-  const [copied, setCopied] = useState(false);
+  const models = useLoad(api.listModels);
   const base = `${window.location.origin}/v1`;
-  const snippet = `curl ${base}/chat/completions \\\n+  -H "Authorization: Bearer YOUR_SPONSORED_KEY" \\\n+  -H "Content-Type: application/json" \\\n+  -d '{"model":"YOUR_APPROVED_MODEL","messages":[{"role":"user","content":"Hello"}]}'`;
 
-  async function copySnippet() { await navigator.clipboard.writeText(snippet); setCopied(true); }
-
-  return <><PageHeader title="Quickstart" description="Use your sponsored key with any OpenAI-compatible client." /><div className="quickstart-layout"><section className="section-block quickstart-main"><div className="section-heading"><div><h2>Make your first request</h2><p>Keep your key private. Do not paste it into source control.</p></div><Code2 size={19} /></div><ol className="steps-list"><li><span>1</span><div><strong>Create an API key</strong><p>Choose all approved models or pick a subset. The secret is shown once.</p><NavLink className="text-link" to="/developer/keys">Open API keys <ArrowRight size={14} /></NavLink></div></li><li><span>2</span><div><strong>Set your client endpoint</strong><p>Base URL for compatible clients:</p><code className="endpoint-value">{base}</code></div></li><li><span>3</span><div><strong>Send a chat completion</strong><p>Use an approved model ID from the catalog.</p></div></li></ol><pre className="code-block"><code>{snippet}</code><button type="button" className="button button-secondary copy-code" onClick={copySnippet}><Copy size={14} />{copied ? "Copied" : "Copy"}</button></pre></section><aside className="quickstart-aside"><section className="section-block"><h2>What gets tracked</h2><p>Request totals, reported token counts, latency, result, and a clearly labeled local cost estimate.</p><p>Prompts and completions are not stored.</p></section><section className="section-block"><h2>Usage truth</h2><p>Missing provider token or cost data is shown as “Not reported,” never as zero or free.</p></section><a className="text-link" href="/docs" target="_blank" rel="noreferrer">API documentation <ExternalLink size={14} /></a></aside></div></>;
+  return <><PageHeader title="Quickstart" description="Use your sponsored key with any OpenAI-compatible client." /><div className="quickstart-layout"><div><ol className="steps-list"><li><span>1</span><div><strong>Create an API key</strong><p>Choose all approved models or pick a subset. The secret is shown once.</p><NavLink className="text-link" to="/developer/keys">Open API keys <ArrowRight size={14} /></NavLink></div></li><li><span>2</span><div><strong>Set your client endpoint</strong><p>Base URL for compatible clients:</p><code className="endpoint-value">{base}</code></div></li><li><span>3</span><div><strong>Choose an approved model</strong><p>Select a model from the published catalog before you send a request.</p><NavLink className="text-link" to="/developer/models">Browse models <ArrowRight size={14} /></NavLink></div></li></ol><QuickstartExample models={models.value ?? []} loading={models.loading} /></div><aside className="quickstart-aside"><section className="section-block"><h2>What gets tracked</h2><p>Request totals, reported token counts, latency, result, and estimated or provider-reported cost.</p><p>Prompts and completions are not stored.</p></section><section className="section-block"><h2>Usage truth</h2><p>Missing provider token or cost data is shown as “Not reported,” never as zero or free.</p></section><a className="text-link" href="/docs" target="_blank" rel="noreferrer">API documentation <ExternalLink size={14} /></a></aside></div></>;
 }
 
 function OperatorOverview() {
@@ -670,19 +707,19 @@ export function InviteDialog({ open, onOpenChange, token, setToken }: { open: bo
 }
 
 function PeopleTable({ people, onEditPolicy, onToggle }: { people: PersonRecord[]; onEditPolicy: (person: PersonRecord) => void; onToggle: (person: PersonRecord) => void }) {
-  return <div className="table-scroll"><table><thead><tr><th>Person</th><th>Status</th><th>Allowance</th><th>Used</th><th>RPM</th><th>Keys</th><th>Requests</th><th>Last active</th><th>Actions</th></tr></thead><tbody>{people.map((person) => <tr key={person.id}><td><strong>{person.displayName}</strong><small>{person.email ?? "Email not provided"}</small></td><td><StatusLabel status={person.status} /></td><td>{person.allowanceUsd == null ? "Not assigned" : `${formatUsd(person.allowanceUsd)} / ${person.allowancePeriod}`}</td><td>{formatUsd(person.usedUsd)}</td><td>{count(person.rpmLimit)}</td><td>{count(person.keyCount)}</td><td>{count(person.requestCount)}</td><td>{dateTime(person.lastActiveAt)}</td><td><div className="row-actions"><button type="button" className="button button-quiet button-small" onClick={() => onEditPolicy(person)}>Limits</button><button type="button" className="button button-quiet button-small" onClick={() => { void onToggle(person); }}>{person.status === "disabled" ? "Enable" : "Disable"}</button></div></td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll"><table><thead><tr><th>Person</th><th>Status</th><th>Shared allowance</th><th>RPM</th><th>Keys</th><th>Requests</th><th>Last active</th><th>Actions</th></tr></thead><tbody>{people.map((person) => <tr key={person.id}><td><strong>{person.displayName}</strong><small>{person.email ?? "Email not provided"}</small></td><td><StatusLabel status={person.status} /></td><td><MoneyRunway label={`${person.displayName} shared allowance`} usedUsd={person.usedUsd} limitUsd={person.allowanceUsd} period={person.allowancePeriod} reservedUsd={person.reservedUsd} remainingUsd={remainingUsd(person.allowanceUsd, person.usedUsd, person.reservedUsd)} resetAt={person.allowanceResetAt} /></td><td>{count(person.rpmLimit)}</td><td>{count(person.keyCount)}</td><td>{count(person.requestCount)}</td><td>{dateTime(person.lastActiveAt)}</td><td><div className="row-actions"><button type="button" className="button button-quiet button-small" onClick={() => onEditPolicy(person)}>Limits</button><button type="button" className="button button-quiet button-small" onClick={() => { void onToggle(person); }}>{person.status === "disabled" ? "Enable" : "Disable"}</button></div></td></tr>)}</tbody></table></div>;
 }
 
 export function PersonPolicyDialog({ person, onClose, onSaved }: { person: PersonRecord | null; onClose: () => void; onSaved: () => void }) {
   const [allowance, setAllowance] = useState("");
-  const [period, setPeriod] = useState<"daily" | "weekly">("weekly");
+  const [period, setPeriod] = useState<"daily" | "weekly" | "monthly">("monthly");
   const [rpm, setRpm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setAllowance(person?.allowanceUsd == null ? "" : String(person.allowanceUsd));
-    setPeriod(person?.allowancePeriod === "daily" ? "daily" : "weekly");
+    setPeriod(person?.allowancePeriod === "daily" || person?.allowancePeriod === "monthly" ? person.allowancePeriod : "weekly");
     setRpm(person?.rpmLimit == null ? "" : String(person.rpmLimit));
     setError(null);
   }, [person]);
@@ -714,7 +751,42 @@ export function PersonPolicyDialog({ person, onClose, onSaved }: { person: Perso
     }
   }
 
-  return <Dialog.Root open={Boolean(person)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="person-policy-description"><div className="dialog-title-row"><div><Dialog.Title>Account limits</Dialog.Title><Dialog.Description id="person-policy-description">{person?.displayName} · limits apply across all of this person’s keys.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div><form className="dialog-form" onSubmit={save}><label className="field-label" htmlFor="person-allowance">USD allowance</label><input id="person-allowance" inputMode="decimal" value={allowance} onChange={(event) => setAllowance(event.target.value)} placeholder="Unlimited" /><label className="field-label" htmlFor="person-allowance-period">Allowance period</label><select id="person-allowance-period" value={period} disabled={!allowance} onChange={(event) => setPeriod(event.target.value === "daily" ? "daily" : "weekly")}><option value="daily">Daily</option><option value="weekly">Weekly</option></select><label className="field-label" htmlFor="person-rpm">Requests per minute</label><input id="person-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Unlimited" /><p className="field-help">Each key the person owns shares this user-wide RPM bucket.</p>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save limits"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root open={Boolean(person)} onOpenChange={(open) => { if (!open) onClose(); }}>
+    <Dialog.Portal>
+      <Dialog.Overlay className="dialog-overlay" />
+      <Dialog.Content className="dialog-content" aria-describedby="person-policy-description">
+        <div className="dialog-title-row">
+          <div>
+            <Dialog.Title>Account limits</Dialog.Title>
+            <Dialog.Description id="person-policy-description">{person?.displayName} · limits apply across all of this person’s keys.</Dialog.Description>
+          </div>
+          <Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close>
+        </div>
+        <form className="dialog-form" onSubmit={save}>
+          <label className="field-label" htmlFor="person-allowance">USD allowance</label>
+          <input id="person-allowance" inputMode="decimal" value={allowance} onChange={(event) => setAllowance(event.target.value)} placeholder="Unlimited" />
+          <label className="field-label" htmlFor="person-allowance-period">Allowance period</label>
+          <select id="person-allowance-period" value={period} disabled={!allowance} onChange={(event) => {
+            const value = event.target.value;
+
+            if (value === "daily" || value === "weekly" || value === "monthly") setPeriod(value);
+          }}>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+          <label className="field-label" htmlFor="person-rpm">Requests per minute</label>
+          <input id="person-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Unlimited" />
+          <p className="field-help">Each key the person owns shares this user-wide RPM bucket.</p>
+          {error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}
+          <div className="dialog-actions">
+            <Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close>
+            <button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save limits"}</button>
+          </div>
+        </form>
+      </Dialog.Content>
+    </Dialog.Portal>
+  </Dialog.Root>;
 }
 
 function ProvidersPage() {

@@ -91,7 +91,7 @@ export interface PersonRecord {
   email: string | null;
   status: "active" | "pending" | "disabled";
   allowanceUsd: string | null;
-  allowancePeriod: "daily" | "weekly" | null;
+  allowancePeriod: "daily" | "weekly" | "monthly" | null;
   rpmLimit: number | null;
   usedUsd: string | null;
   reservedUsd: string;
@@ -372,7 +372,7 @@ export interface PortalApi {
   revokeInvite(inviteId: string): Promise<InviteRecord>;
   getDeveloperInvites(): Promise<DeveloperInviteStatus>;
   createDeveloperInvite(): Promise<CreateInviteResult>;
-  updatePersonPolicy(userId: string, input: { allowanceUsd: string | null; allowancePeriod: "daily" | "weekly" | null; rpmLimit: number | null }): Promise<void>;
+  updatePersonPolicy(userId: string, input: { allowanceUsd: string | null; allowancePeriod: "daily" | "weekly" | "monthly" | null; rpmLimit: number | null }): Promise<void>;
   setPersonEnabled(userId: string, enabled: boolean): Promise<void>;
   setGlobalStop(stopped: boolean): Promise<void>;
   updateGuardrails(input: { globalSpendCapUsd?: number; safetyReserveUsd?: number }): Promise<void>;

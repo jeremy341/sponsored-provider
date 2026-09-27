@@ -41,3 +41,24 @@ export function ratioPercent(value: string | null, total: string | null): number
 
   return Number(percent > 100n ? 100n : percent);
 }
+
+export function remainingUsd(limit: string | null, used: string | null, reserved: string | null): string | null {
+  const decimal = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
+
+  if (limit == null || used == null || reserved == null || !decimal.test(limit) || !decimal.test(used) || !decimal.test(reserved)) return null;
+
+  const values = [limit, used, reserved].map((value) => value.split("."));
+  const scale = Math.max(...values.map(([, fraction = ""]) => fraction.length));
+  const integers = values.map(([whole, fraction = ""]) => BigInt(whole + fraction.padEnd(scale, "0")));
+  const remaining = integers[0] - integers[1] - integers[2];
+
+  if (remaining <= 0n) return "0";
+
+  if (scale === 0) return remaining.toString();
+
+  const digits = remaining.toString().padStart(scale + 1, "0");
+  const whole = digits.slice(0, -scale);
+  const fraction = digits.slice(-scale).replace(/0+$/, "");
+
+  return fraction ? `${whole}.${fraction}` : whole;
+}
