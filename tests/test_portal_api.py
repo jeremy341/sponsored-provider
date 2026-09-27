@@ -512,7 +512,7 @@ def test_key_policy_edit_endpoint_is_csrf_protected_and_owner_scoped(tmp_path):
     assert client.patch(f"/api/developer/keys/{key['id']}", json=payload).status_code == 403
     response = client.patch(f"/api/developer/keys/{key['id']}", json=payload, headers={"X-CSRF-Token": client.cookies.get("portal_csrf")})
     assert response.status_code == 200
-    assert response.json()["spendCapUsd"] == 3
+    assert response.json()["spendCapUsd"] == "3"
 
     client.cookies.clear()
     _login(client, repository, "other")
@@ -694,6 +694,93 @@ def test_portal_key_resolves_for_gateway_and_usage_is_immutable_with_owner_snaps
     with pytest.raises(sqlite3.IntegrityError):
         with repository.connect() as connection:
             connection.execute("DELETE FROM portal_usage_events WHERE id=?", (event_id,))
+
+
+def test_developer_dashboard_returns_decimal_allowance_runway_fields(tmp_path, monkeypatch):
+    client, repository = _app(tmp_path)
+    user, _ = _login(client, repository, "credit-view")
+    repository.assign_user_allowance(user["id"], 1_000_000_001, "weekly", user["id"])
+    monkeypatch.setattr(repository, "user_period_usage_nano_usd", lambda _user_id, _period: (123_456_789, 234_567_891))
+
+    allowance = client.get("/api/developer/dashboard").json()["allowance"]
+
+    assert allowance["usedUsd"] == "0.123456789"
+    assert allowance["reservedUsd"] == "0.234567891"
+    assert allowance["consumedUsd"] == "0.35802468"
+    assert allowance["limitUsd"] == "1.000000001"
+    assert allowance["remainingUsd"] == "0.641975321"
+    assert allowance["period"] == "weekly"
+    assert allowance["resetAt"]
+    assert allowance["source"] == "gateway estimate and active reservations"
+
+
+def test_developer_model_catalog_exposes_public_id_and_decimal_prices_only(tmp_path):
+    client, repository = _app(tmp_path, ("provider-public",))
+    _login(client, repository, "catalog-view")
+    repository.add_catalog_model(
+        provider_id="provider-public", model_id="raw/model-name", provider_name="Public Brand",
+        capabilities=["text", "vision"], input_price_per_million=0.3, output_price_per_million=1.2,
+        cached_input_price_per_million=0.05, price_source="verified", approved=True,
+    )
+    _enable_connection(repository, "provider-public")
+    _discover_models(repository, "provider-public", ["raw/model-name"])
+
+    response = client.get("/api/models")
+
+    assert response.status_code == 200
+    model = response.json()[0]
+    assert model["id"] == "provider-public::raw/model-name"
+    assert model["inputUsdPerMillion"] == "0.3"
+    assert model["outputUsdPerMillion"] == "1.2"
+    assert model["cacheUsdPerMillion"] == "0.05"
+    assert "upstreamModelId" not in model
+    assert "providerId" not in model
+
+
+def test_developer_activity_has_request_id_token_completeness_and_no_client_ip(tmp_path):
+    client, repository = _app(tmp_path)
+    user, _ = _login(client, repository, "activity-view")
+    key = repository.create_user_key(user["id"], "Activity key", allowed_models_mode="all_approved")
+    repository.record_gateway_usage(
+        repository.find_gateway_key(key["api_key"]), model="provider::model", input_tokens=7,
+        output_tokens=2, total_tokens=9, latency_ms=25, status="success", estimated_cost_usd=0.000011,
+        client_ip="192.0.2.44", request_id="req_activity_public_id",
+    )
+
+    event = client.get("/api/activity").json()["items"][0]
+
+    assert event["requestId"] == "req_activity_public_id"
+    assert event["tokenCompleteness"] == "complete"
+    assert event["estimatedCostUsd"] == "0.000011"
+    assert "requestIp" not in event
+    assert "prompt" not in event
+
+
+def test_key_spend_caps_round_trip_as_nano_safe_decimal_strings(tmp_path):
+    client, repository = _app(tmp_path)
+    user, _ = _login(client, repository, "decimal-key-cap")
+    headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    created = client.post("/api/developer/keys", headers=headers, json={
+        "label": "Precise cap", "modelAccess": {"mode": "all_approved"},
+        "spendCapUsd": "0.123456789", "spendPeriod": "week", "rpmLimit": None,
+    })
+
+    assert created.status_code == 201
+    key = created.json()["key"]
+    assert key["spendCapUsd"] == "0.123456789"
+    with repository.connect() as connection:
+        row = connection.execute("SELECT cap_nano_usd FROM provider_budgets WHERE key_id=?", (key["id"],)).fetchone()
+    assert row["cap_nano_usd"] == 123_456_789
+
+    updated = client.patch(f"/api/developer/keys/{key['id']}", headers=headers, json={
+        "label": key["label"], "modelAccess": {"mode": "all_approved"},
+        "spendCapUsd": "0.987654321", "spendPeriod": "week", "rpmLimit": None,
+    })
+    assert updated.status_code == 200
+    assert updated.json()["spendCapUsd"] == "0.987654321"
+    with repository.connect() as connection:
+        row = connection.execute("SELECT cap_nano_usd FROM provider_budgets WHERE key_id=?", (key["id"],)).fetchone()
+    assert row["cap_nano_usd"] == 987_654_321
 
 
 def test_user_allowance_reservations_are_shared_across_all_keys(tmp_path):
