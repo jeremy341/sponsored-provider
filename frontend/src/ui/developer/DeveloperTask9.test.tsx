@@ -69,7 +69,8 @@ describe("Task 9 developer views", () => {
   it("omits unknown cached-input prices instead of implying they are free", async () => {
     render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, cacheUsdPerMillion: null }]) })} />);
     await userEvent.click(await screen.findByRole("button", { name: /View details for Acme AI \/ Model X/i }));
-    expect(screen.queryByText(/cached input/i)).not.toBeInTheDocument();
+    expect(screen.getByText("Not reported")).toBeInTheDocument();
+    expect(screen.queryByText("$0.05")).not.toBeInTheDocument();
   });
 
   it("shows an honest empty catalog in preview mode without API errors", async () => {
@@ -86,6 +87,21 @@ describe("Task 9 developer views", () => {
     render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} />);
     await userEvent.click(await screen.findByRole("button", { name: /View details for Acme AI \/ Model X/i }));
     expect(screen.queryByText("Cached input")).not.toBeInTheDocument();
+  });
+
+  it("does not present unverified catalog rates as usable prices", async () => {
+    render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} />);
+    expect(await screen.findByRole("heading", { name: "Acme AI" })).toBeInTheDocument();
+    expect(screen.getAllByText(/price not verified/i).length).toBeGreaterThan(0);
+    await userEvent.click(screen.getByRole("button", { name: /View details for Acme AI \/ Model X/i }));
+    expect(screen.getAllByText(/price not verified/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText("$0.30")).not.toBeInTheDocument();
+    expect(screen.queryByText("$1.20")).not.toBeInTheDocument();
+  });
+
+  it("labels provider-reported cost distinctly from gateway estimates", async () => {
+    render(<DeveloperActivityPage portalApi={api({ listActivity: vi.fn().mockResolvedValue({ items: [{ ...event, costSource: "provider_reported" }], nextCursor: null }) })} />);
+    expect(await screen.findByText("Provider reported")).toBeInTheDocument();
   });
 
   it("shows only safe request facts and renders unknown tokens as not reported", async () => {

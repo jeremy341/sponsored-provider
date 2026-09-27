@@ -11,9 +11,12 @@ export function MoneyRunway({ label, usedUsd, limitUsd, reservedUsd, remainingUs
 }) {
   const percent = ratioPercent(usedUsd, limitUsd);
   const reset = resetAt ? formatBerlinReset(resetAt) : null;
+  const formattedLimit = formatUsd(limitUsd);
+  const compactLimit = formattedLimit.endsWith(".00") ? formattedLimit.slice(0, -3) : formattedLimit;
+  const limitLabel = period === "monthly" ? `${compactLimit}/month` : `${formattedLimit}${period ? ` · ${period}` : ""}`;
 
   return <div className="runway money-runway">
-    <div className="runway-values"><span>{label} · {usedUsd == null ? "Usage not reported" : `${formatUsd(usedUsd)} used`}</span><strong>{limitUsd == null ? "No limit assigned" : `${formatUsd(limitUsd)}${period ? ` · ${period}` : ""}`}</strong></div>
+    <div className="runway-values"><span>{label} · {usedUsd == null ? "Usage not reported" : `${formatUsd(usedUsd)} used`}</span><strong>{limitUsd == null ? "No limit assigned" : limitLabel}</strong></div>
     <div className="runway-track" role="progressbar" aria-label={`${label} used`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent ?? undefined} aria-valuetext={percent == null ? "Usage or limit not reported" : `${percent}% used`}>
       {percent != null && <span style={{ transform: `scaleX(${percent / 100})` }} />}
     </div>
