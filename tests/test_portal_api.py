@@ -624,7 +624,7 @@ def test_approved_catalog_with_stale_profile_reference_stays_unknown_and_unrouta
     assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
 
 
-def test_historic_usage_api_keeps_float_compatible_cost_after_schema_migration(tmp_path):
+def test_historic_usage_api_serializes_legacy_cost_as_nano_safe_decimal_string(tmp_path):
     client, repository = _app(tmp_path)
     user, _ = _login(client, repository, "member-a")
     key = repository.create_user_key(user["id"], "Historic", allowed_models_mode="all_approved")
@@ -641,7 +641,7 @@ def test_historic_usage_api_keeps_float_compatible_cost_after_schema_migration(t
     item = client.get("/api/activity").json()["items"][0]
     assert item["modelId"] == "removed-model"
     assert item["providerName"] == "Old provider"
-    assert item["estimatedCostUsd"] == 0.000000123456
+    assert item["estimatedCostUsd"] == "0.000000124"
     assert item["occurredAt"] == "2025-01-02T03:04:05+00:00"
 
 
@@ -742,7 +742,7 @@ def test_people_usage_does_not_multiply_when_user_has_multiple_keys(tmp_path):
     person = repository.list_people()[0]
     assert person["keyCount"] == 2
     assert person["requestCount"] == 1
-    assert person["usedUsd"] == 0.01
+    assert person["usedUsd"] == "0.01"
 
 
 def test_person_usage_matches_daily_allowance_period_not_lifetime_total(tmp_path):
@@ -754,7 +754,7 @@ def test_person_usage_matches_daily_allowance_period_not_lifetime_total(tmp_path
     repository.record_usage(user["id"], key["id"], model="today", input_tokens=2, output_tokens=1, total_tokens=3, latency_ms=20, status="ok", estimated_cost_usd=0.1)
 
     person = repository.list_people()[0]
-    assert person["usedUsd"] == 0.1
+    assert person["usedUsd"] == "0.1"
 
 
 def test_latency_percentile_requires_twenty_samples_and_uses_full_history(tmp_path):
@@ -922,17 +922,157 @@ def test_operator_can_set_connection_budget_and_people_exposes_credit_reset(tmp_
     profile = _legacy.create_upstream("Credits provider", "openai_compatible", "https://93.184.216.34/v1", "secret")
     connection_id = repository.register_connection(profile["id"], "credits", "Credits provider", "Primary").id
     response = client.post(f"/api/operator/connections/{connection_id}/budget", headers=headers, json={
-        "limitNanoUsd": 500_000_000, "period": "monthly", "reserveNanoUsd": 25_000_000,
+        "limitUsd": "0.5", "period": "monthly", "reserveUsd": "0.025",
     })
     assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True, "connectionId": connection_id, "limitUsd": "0.5",
+        "period": "monthly", "reserveUsd": "0.025",
+    }
     with repository.connect() as connection:
         budget = connection.execute("SELECT cap_nano_usd,period,reserve_nano_usd FROM provider_budgets WHERE connection_id=?", (connection_id,)).fetchone()
     assert tuple(budget) == (500_000_000, "monthly", 25_000_000)
     people = client.get("/api/operator/people").json()
     person = next(item for item in people if item["id"] == user["id"])
-    assert person["allowanceNanoUsd"] == 250_000_000
-    assert person["allowancePeriod"] == "week"
+    assert person["allowanceUsd"] == "0.25"
+    assert person["allowancePeriod"] == "weekly"
     assert person["allowanceResetAt"]
+
+
+def test_operator_provider_list_returns_safe_per_connection_budget_records(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "listed-model"}]})
+        )
+        created = _create_provider(client, headers, name="Acme connection", brand_slug="acme")
+    assert created.status_code == 201
+    connection_id = created.json()["id"]
+    budget_response = client.post(f"/api/operator/connections/{connection_id}/budget", headers=headers, json={
+        "limitUsd": "1.25", "period": "monthly", "reserveUsd": "0.10",
+    })
+    assert budget_response.status_code == 200
+    with repository.connect() as connection:
+        row = connection.execute("SELECT id FROM provider_connections WHERE id=?", (connection_id,)).fetchone()
+    assert row
+    records = client.get("/api/operator/providers").json()
+    record = next(item for item in records if item["id"] == connection_id)
+    assert record["brandSlug"] == "acme"
+    assert record["connectionLabel"] == "Primary"
+    assert record["providerKind"] == "openai_compatible"
+    assert record["mappingStatus"] == "mapped"
+    assert record["discoveredModels"] == 1
+    assert record["budget"] == {
+        "limitUsd": "1.25", "period": "monthly", "reserveUsd": "0.1",
+        "usedUsd": "0", "reservedUsd": "0", "remainingUsd": "1.15",
+    } | {"resetAt": record["budget"]["resetAt"]}
+    assert record["budget"]["resetAt"]
+    assert record["health"] in {"healthy", "degraded", "disabled", "unknown"}
+    assert "provider-secret-never-return" not in str(record)
+    assert not any("secret" in key.lower() or "key" in key.lower() for key in record)
+
+
+def test_operator_budget_accepts_decimal_strings_and_returns_nano_safe_strings(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(return_value=httpx.Response(200, json={"data": []}))
+        created = _create_provider(client, headers)
+    connection_id = created.json()["id"]
+    response = client.post(f"/api/operator/connections/{connection_id}/budget", headers=headers, json={
+        "limitUsd": "0.0000000019", "period": "daily", "reserveUsd": "0.0000000006",
+    })
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "ok": True, "connectionId": connection_id, "limitUsd": "0.000000001",
+        "period": "daily", "reserveUsd": "0.000000001",
+    }
+
+
+def test_operator_people_returns_decimal_string_credit_and_reservation_fields(tmp_path):
+    client, repository, _legacy, operator, _headers = _operator_app(tmp_path)
+    user = repository.upsert_user(subject="person-serialization", email="person@example.test", name="Person")
+    repository.assign_user_allowance(user["id"], 250_000_001, "weekly", operator["id"])
+    key = repository.create_user_key(user["id"], "Allowance key", allowed_models_mode="all_approved")
+    with repository.connect() as connection:
+        connection.execute(
+            "INSERT INTO portal_budget_reservations_v2(id,owner_user_id,key_id,amount_nano_usd,created_at,status) VALUES(?,?,?,?,?,'active')",
+            ("person-reservation", user["id"], key["id"], 7, datetime.now(timezone.utc).isoformat()),
+        )
+    person = next(item for item in client.get("/api/operator/people").json() if item["id"] == user["id"])
+    assert person["allowanceUsd"] == "0.250000001"
+    assert person["usedUsd"] == "0.000000007"
+    assert person["reservedUsd"] == "0.000000007"
+    assert person["allowanceResetAt"]
+
+
+def test_operator_person_policy_accepts_decimal_string_allowance_and_keeps_csrf(tmp_path):
+    client, repository, _legacy, operator, headers = _operator_app(tmp_path)
+    user = repository.upsert_user(subject="decimal-allowance", email="decimal@example.test", name="Decimal")
+    path = f"/api/operator/people/{user['id']}/policy"
+    payload = {"allowanceUsd": "0.0000000019", "allowancePeriod": "daily", "rpmLimit": None}
+
+    assert client.patch(path, json=payload).status_code == 403
+    response = client.patch(path, json=payload, headers=headers)
+
+    assert response.status_code == 200
+    person = next(item for item in client.get("/api/operator/people").json() if item["id"] == user["id"])
+    assert person["allowanceUsd"] == "0.000000001"
+    assert person["allowancePeriod"] == "daily"
+    assert person["reservedUsd"] == "0"
+
+
+def test_operator_usage_filters_are_applied_before_cursor_pagination(tmp_path):
+    client, repository, legacy, _operator, _headers = _operator_app(tmp_path)
+    connection_ids = {}
+    for slug in ("acme", "beta"):
+        profile = legacy.create_upstream(f"{slug} profile", "openai_compatible", "https://93.184.216.34/v1", "secret")
+        connection_ids[slug] = repository.register_connection(profile["id"], slug, slug.title(), "Primary").id
+    owner = repository.upsert_user(subject="filter-owner", email="filter@example.test", name="Filter owner")
+    key = repository.create_user_key(owner["id"], "Filter key", allowed_models_mode="all_approved")
+    for model, occurred_at, status, connection_id in (
+        ("model-alpha", "2026-09-26T22:30:00+00:00", "ok", connection_ids["acme"]),
+        ("model-beta", "2026-09-27T10:00:00+00:00", "error", connection_ids["beta"]),
+        ("model-alpha", "2026-09-27T11:00:00+00:00", "ok", connection_ids["acme"]),
+    ):
+        repository.record_usage(owner["id"], key["id"], model=model, input_tokens=2, output_tokens=1, total_tokens=3,
+            latency_ms=10, status=status, estimated_cost_usd=0.000000001, provider_id=connection_id,
+            occurred_at=occurred_at, request_id=f"request-{model}-{occurred_at}")
+    response = client.get("/api/operator/usage", params={
+        "brandSlug": "acme", "connectionId": connection_ids["acme"], "model": "alpha",
+        "from": "2026-09-27", "to": "2026-09-27", "outcome": "success", "limit": 10,
+    })
+    assert response.status_code == 200
+    assert [item["modelId"] for item in response.json()["items"]] == ["model-alpha", "model-alpha"]
+    assert response.json()["items"][0]["brandSlug"] == "acme"
+    assert response.json()["items"][0]["connectionId"] == connection_ids["acme"]
+    assert "prompt" not in response.text.lower()
+    assert "completion" not in response.text.lower()
+    assert isinstance(response.json()["items"][0]["estimatedCostUsd"], str)
+    paged = client.get("/api/operator/usage", params={
+        "brandSlug": "acme", "connectionId": connection_ids["acme"], "model": "alpha",
+        "from": "2026-09-27", "to": "2026-09-27", "outcome": "success", "limit": 1,
+    })
+    assert len(paged.json()["items"]) == 1
+    assert paged.json()["items"][0]["occurredAt"] == "2026-09-27T11:00:00+00:00"
+    assert paged.json()["nextCursor"]
+
+
+def test_operator_usage_cursor_keeps_events_with_the_same_timestamp(tmp_path):
+    client, repository, _legacy, _operator, _headers = _operator_app(tmp_path)
+    owner = repository.upsert_user(subject="cursor-owner", email="cursor@example.test", name="Cursor owner")
+    key = repository.create_user_key(owner["id"], "Cursor key", allowed_models_mode="all_approved")
+    occurred_at = "2026-09-27T12:00:00+00:00"
+    for index in range(3):
+        repository.record_usage(owner["id"], key["id"], model=f"model-{index}", input_tokens=1,
+            output_tokens=1, total_tokens=2, latency_ms=1, status="ok", estimated_cost_usd=0.000000001,
+            occurred_at=occurred_at, request_id=f"same-time-{index}")
+
+    first = client.get("/api/operator/usage", params={"limit": 1}).json()
+    second = client.get("/api/operator/usage", params={"limit": 1, "cursor": first["nextCursor"]}).json()
+    third = client.get("/api/operator/usage", params={"limit": 1, "cursor": second["nextCursor"]}).json()
+
+    ids = [first["items"][0]["id"], second["items"][0]["id"], third["items"][0]["id"]]
+    assert len(set(ids)) == 3
 
 
 def test_preflight_rejects_missing_finite_output_ceiling():

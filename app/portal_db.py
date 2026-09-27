@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from app.catalog import DiscoveredModel, PriceSuggestion
 from app.periods import period_window
@@ -2647,14 +2649,96 @@ class PortalDatabase:
             rows = conn.execute(query, args).fetchall()
         return [dict(row) | {"model": row["model_id"]} for row in rows]
 
-    def list_all_usage(self, *, limit: int = 100, before: str | None = None) -> list[dict[str, Any]]:
-        limit = max(1, min(int(limit), 200))
-        query = "SELECT id,owner_user_id,owner_name_snapshot,owner_email_snapshot,key_id,key_label_snapshot,provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,estimated_cost_usd,client_ip,request_id FROM portal_usage_events"
+    def list_all_usage(
+        self,
+        *,
+        limit: int = 100,
+        before: str | None = None,
+        brand_slug: str | None = None,
+        connection_id: str | None = None,
+        model: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        to_date_exclusive: str | None = None,
+        outcome: str | None = None,
+    ) -> list[dict[str, Any]]:
+        return self.list_operator_usage(
+            limit=limit, before=before, brand_slug=brand_slug, connection_id=connection_id,
+            model=model, from_date=from_date, to_date=to_date, to_date_exclusive=to_date_exclusive,
+            outcome=outcome,
+        )
+
+    def list_operator_usage(
+        self,
+        *,
+        limit: int = 100,
+        before: str | None = None,
+        brand_slug: str | None = None,
+        connection_id: str | None = None,
+        model: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        to_date_exclusive: str | None = None,
+        outcome: str | None = None,
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 201))
+        query = """SELECT event.id,event.owner_user_id,event.owner_name_snapshot,event.owner_email_snapshot,
+            event.key_id,event.key_label_snapshot,event.provider_id,event.provider_name_snapshot,event.model_id,
+            event.occurred_at,event.status,event.error_category,event.latency_ms,event.input_tokens,
+            event.output_tokens,event.total_tokens,event.cached_tokens,event.estimated_cost_usd,
+            event.amount_nano_usd,event.client_ip,event.request_id,event.brand_snapshot,
+            brand.slug brand_slug,COALESCE(event.brand_snapshot,brand.name) brand_name,
+            connection.id connection_id,connection.label connection_label,
+            COALESCE(connection.provider_kind,'unknown') provider_kind
+            FROM portal_usage_events event
+            LEFT JOIN provider_connections connection
+                ON connection.id=event.provider_id OR connection.legacy_profile_id=event.provider_id
+            LEFT JOIN provider_brands brand ON brand.id=COALESCE(event.brand_id,connection.brand_id)"""
         args: list[Any] = []
+        clauses: list[str] = []
         if before:
-            query += " WHERE occurred_at<?"
-            args.append(before)
-        query += " ORDER BY occurred_at DESC,id DESC LIMIT ?"
+            if "|" in before:
+                cursor_time, cursor_id = before.rsplit("|", 1)
+                if not cursor_time or not cursor_id:
+                    raise ValueError("Invalid operator usage cursor")
+                clauses.append("(event.occurred_at<? OR (event.occurred_at=? AND event.id<?))")
+                args.extend((cursor_time, cursor_time, cursor_id))
+            else:
+                clauses.append("event.occurred_at<?")
+                args.append(before)
+        if brand_slug:
+            clauses.append("brand.slug=?")
+            args.append(brand_slug)
+        if connection_id:
+            clauses.append("(connection.id=? OR event.provider_id=?)")
+            args.extend((connection_id, connection_id))
+        if model:
+            clauses.append("event.model_id LIKE ? ESCAPE '\\'")
+            escaped = model.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args.append(f"%{escaped}%")
+        if from_date:
+            if len(from_date) == 10:
+                from_date = datetime.fromisoformat(from_date).replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(timezone.utc).isoformat()
+            clauses.append("julianday(event.occurred_at)>=julianday(?)")
+            args.append(from_date)
+        if to_date and not to_date_exclusive:
+            if len(to_date) == 10:
+                to_date = (datetime.fromisoformat(to_date) + timedelta(days=1)).replace(tzinfo=ZoneInfo("Europe/Berlin")).astimezone(timezone.utc).isoformat()
+            clauses.append("julianday(event.occurred_at)<julianday(?)")
+            args.append(to_date)
+        if to_date_exclusive:
+            clauses.append("julianday(event.occurred_at)<julianday(?)")
+            args.append(to_date_exclusive)
+        if outcome == "success":
+            clauses.append("event.status IN ('ok','success')")
+        elif outcome == "error":
+            clauses.append("event.status IN ('error','rejected','interrupted')")
+        elif outcome:
+            clauses.append("event.status=?")
+            args.append(outcome)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY event.occurred_at DESC,event.id DESC LIMIT ?"
         args.append(limit)
         with self.connect() as conn:
             rows = conn.execute(query, args).fetchall()
@@ -2736,17 +2820,44 @@ class PortalDatabase:
                 ORDER BY u.created_at DESC""").fetchall()
         people = []
         for row in rows:
-            current_used = self.user_period_spend(row["id"], row["allowance_period"]) if row["allowance_period"] else row["used_usd"]
+            period = row["allowance_period"]
+            amount_nano = self.user_allowance_nano_usd(row["id"])
+            used_nano, reserved_nano = self.user_period_usage_nano_usd(row["id"], period)
             people.append({
                 "id": row["id"], "displayName": row["display_name"], "email": row["email"],
                 "status": "disabled" if row["status"] != "active" else "active",
-                "allowanceUsd": row["allowance_usd"], "allowancePeriod": {"daily": "day", "weekly": "week"}.get(row["allowance_period"]),
-                "allowanceNanoUsd": self.user_allowance_nano_usd(row["id"]),
-                "allowanceResetAt": self.period_reset_at(row["allowance_period"]),
-                "rpmLimit": row["rpm_limit"], "usedUsd": current_used, "keyCount": row["key_count"] or 0,
+                "allowanceUsd": self._format_nano_usd(amount_nano), "allowancePeriod": period,
+                "allowanceResetAt": self.period_reset_at(period),
+                "rpmLimit": row["rpm_limit"], "usedUsd": self._format_nano_usd(
+                    used_nano + reserved_nano if used_nano is not None else (reserved_nano or None)
+                ),
+                "reservedUsd": self._format_nano_usd(reserved_nano), "keyCount": row["key_count"] or 0,
                 "requestCount": row["request_count"] or 0, "lastActiveAt": row["last_active_at"],
             })
         return people
+
+    @staticmethod
+    def _format_nano_usd(amount: int | None) -> str | None:
+        if amount is None:
+            return None
+        value = format(Decimal(amount).scaleb(-9).normalize(), "f")
+        return value if value not in {"-0", ""} else "0"
+
+    def user_period_usage_nano_usd(self, owner_user_id: str, period: str | None) -> tuple[int | None, int]:
+        window = period_window(period, _now()) if period in {"daily", "weekly"} else None
+        event_where = "owner_user_id=?"
+        reservation_where = "owner_user_id=? AND status='active'"
+        event_args: list[Any] = [owner_user_id]
+        reservation_args: list[Any] = [owner_user_id]
+        if window:
+            event_where += " AND julianday(occurred_at)>=julianday(?)"
+            reservation_where += " AND julianday(created_at)>=julianday(?)"
+            event_args.append(window.start_utc.isoformat())
+            reservation_args.append(window.start_utc.isoformat())
+        with self.connect() as conn:
+            events = conn.execute(f"SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE {event_where}", event_args).fetchall()
+            reserved = conn.execute(f"SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE {reservation_where}", reservation_args).fetchall()
+        return (self._sum_nano_rows(events) if events else None, sum(row["amount_nano_usd"] for row in reserved))
 
     def user_allowance_nano_usd(self, owner_user_id: str) -> int | None:
         with self.connect() as conn:
@@ -2771,6 +2882,90 @@ class PortalDatabase:
         return [{"id": row["provider_id"], "name": row["provider_name"], "baseUrlDisplay": "", "enabled": True,
                  "health": "unknown", "lastSyncAt": row["last_sync_at"], "discoveredModels": row["discovered_models"],
                  "approvedModels": row["approved_models"]} for row in rows]
+
+    def list_operator_connections(self) -> list[dict[str, Any]]:
+        now = _now()
+        with self.connect() as conn:
+            rows = conn.execute("""SELECT connection.id,connection.brand_id,connection.legacy_profile_id,
+                    connection.base_url,connection.provider_kind,connection.enabled,connection.mapping_status,
+                    connection.label,brand.slug brand_slug,brand.name brand_name,
+                    COALESCE(profile.health_status,'unknown') profile_health,profile.last_checked_at,
+                    (SELECT COUNT(*) FROM connection_models discovered
+                        WHERE discovered.connection_id=connection.id AND discovered.active=1) discovered_models,
+                    (SELECT COUNT(DISTINCT offer.id) FROM offer_routes route
+                        JOIN catalog_offers offer ON offer.id=route.offer_id
+                        JOIN price_versions price ON price.offer_id=offer.id AND price.is_active=1
+                        JOIN connection_models discovered ON discovered.connection_id=route.connection_id
+                            AND discovered.upstream_model_id=route.upstream_model_id
+                        WHERE route.connection_id=connection.id AND offer.brand_id=connection.brand_id
+                            AND route.active=1 AND offer.active=1
+                            AND offer.approved=1 AND discovered.active=1 AND discovered.is_stale=0
+                            AND price.input_rate IS NOT NULL AND price.output_rate IS NOT NULL) approved_models,
+                    (SELECT MAX(discovered.last_seen_at) FROM connection_models discovered
+                        WHERE discovered.connection_id=connection.id) last_discovery_at
+                FROM provider_connections connection
+                JOIN provider_brands brand ON brand.id=connection.brand_id
+                LEFT JOIN upstream_profiles profile ON profile.id=connection.legacy_profile_id
+                ORDER BY brand.slug,connection.label,connection.id""").fetchall()
+            records = []
+            for row in rows:
+                budget = conn.execute("SELECT cap_nano_usd,period,reserve_nano_usd FROM provider_budgets WHERE connection_id=?", (row["id"],)).fetchone()
+                limit = budget["cap_nano_usd"] if budget else None
+                period = budget["period"] if budget else None
+                reserve = budget["reserve_nano_usd"] if budget else 0
+                window = period_window(period, now) if period in {"daily", "weekly", "monthly", "lifetime"} else None
+                args: list[Any] = [row["id"]]
+                scope = "provider_id=?"
+                if row["legacy_profile_id"]:
+                    scope = "(provider_id=? OR provider_id=?)"
+                    args.append(row["legacy_profile_id"])
+                if window:
+                    scope += " AND julianday(occurred_at)>=julianday(?)"
+                    args.append(window.start_utc.isoformat())
+                used_rows = conn.execute(f"SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE {scope}", args).fetchall()
+                reserve_args: list[Any] = [row["id"]]
+                reserve_scope = "connection_id=? AND status='active'"
+                if window:
+                    reserve_scope += " AND julianday(created_at)>=julianday(?)"
+                    reserve_args.append(window.start_utc.isoformat())
+                active_reservations = conn.execute(f"SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE {reserve_scope}", reserve_args).fetchall()
+                used = self._sum_nano_rows(used_rows)
+                reserved = sum(item["amount_nano_usd"] for item in active_reservations)
+                remaining = max(0, limit - reserve - used - reserved) if limit is not None else None
+                profile_health = row["profile_health"]
+                health = profile_health if profile_health in {"healthy", "degraded", "disabled"} else "unknown"
+                if not row["enabled"]:
+                    health = "disabled"
+                last_sync = row["last_discovery_at"] or row["last_checked_at"]
+                base_url = row["base_url"] or ""
+                try:
+                    parts = urlsplit(base_url)
+                    host = parts.hostname or ""
+                    if ":" in host and not host.startswith("["):
+                        host = f"[{host}]"
+                    if parts.port:
+                        host = f"{host}:{parts.port}"
+                    base_url = parts._replace(netloc=host, query="", fragment="").geturl()
+                except ValueError:
+                    base_url = ""
+                records.append({
+                    "id": row["id"], "brandId": row["brand_id"], "brandSlug": row["brand_slug"],
+                    "brandName": row["brand_name"], "connectionLabel": row["label"],
+                    "providerKind": row["provider_kind"] or "unknown", "baseUrlDisplay": base_url,
+                    "enabled": bool(row["enabled"]), "mappingStatus": row["mapping_status"] or "unmapped",
+                    "health": health, "lastSyncAt": last_sync,
+                    "discoveredModels": row["discovered_models"] or 0,
+                    "approvedModels": row["approved_models"] or 0,
+                    "budget": {
+                        "limitUsd": self._format_nano_usd(limit), "period": period,
+                        "reserveUsd": self._format_nano_usd(reserve) or "0",
+                        "usedUsd": self._format_nano_usd(used) or "0",
+                        "reservedUsd": self._format_nano_usd(reserved) or "0",
+                        "remainingUsd": self._format_nano_usd(remaining),
+                        "resetAt": self.period_reset_at(period, now),
+                    },
+                })
+        return records
 
     def audit(self, actor_user_id: str, action: str, target_type: str, target_id: str | None, details: dict[str, Any] | None = None) -> None:
         with self.connect() as conn:

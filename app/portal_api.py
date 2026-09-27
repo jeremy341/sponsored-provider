@@ -11,6 +11,7 @@ import re
 import socket
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from typing import Any
 from urllib.parse import urlparse, urlsplit
 
@@ -124,13 +125,24 @@ def _activity_record(event: dict[str, Any], *, operator: bool = False) -> dict[s
         "id": event["id"], "occurredAt": event["occurred_at"], "modelId": event["model_id"],
         "providerName": event["provider_name_snapshot"] or "Unknown provider", "keyLabel": event["key_label_snapshot"],
         "inputTokens": event["input_tokens"], "outputTokens": event["output_tokens"], "totalTokens": event["total_tokens"],
-        "estimatedCostUsd": event["estimated_cost_usd"],
+        "estimatedCostUsd": PortalDatabase._format_nano_usd(
+            event.get("amount_nano_usd")
+            if event.get("amount_nano_usd") is not None
+            else PortalDatabase._charge_nano_usd(event["estimated_cost_usd"])
+        ),
         "costSource": "gateway_estimate" if event["estimated_cost_usd"] is not None else "unknown",
         "status": status, "errorCategory": event["error_category"], "latencyMs": event["latency_ms"],
         "cachedTokens": event["cached_tokens"], "requestIp": event.get("client_ip"),
     }
     if operator:
         row["userId"] = event.get("owner_user_id")
+        row.update({
+            "brandSlug": event.get("brand_slug"),
+            "brandName": event.get("brand_name") or event.get("brand_snapshot"),
+            "connectionId": event.get("connection_id") or event.get("provider_id"),
+            "connectionLabel": event.get("connection_label"),
+            "providerKind": event.get("provider_kind"),
+        })
     return row
 
 
@@ -653,8 +665,14 @@ def create_portal_router(service: PortalService) -> APIRouter:
         try:
             allowance_period = {"day": "daily", "week": "weekly", "daily": "daily", "weekly": "weekly", None: None}.get(data.get("allowancePeriod"), "invalid")
             amount = data.get("allowanceNanoUsd")
-            if amount is None and data.get("allowanceUsd") is not None:
-                amount = repo._cap_nano_usd(data["allowanceUsd"])
+            if "allowanceUsd" in data:
+                allowance_usd = data["allowanceUsd"]
+                if allowance_usd is not None and not isinstance(allowance_usd, str):
+                    raise ValueError("Allowance must be a decimal string or null")
+                amount = repo._cap_nano_usd(allowance_usd)
+            elif "allowanceNanoUsd" in data and amount is not None:
+                if isinstance(amount, bool) or not isinstance(amount, int):
+                    raise ValueError("Legacy allowanceNanoUsd must be an integer")
             rpm_limit = data.get("rpmLimit")
             if rpm_limit is not None and (isinstance(rpm_limit, bool) or not isinstance(rpm_limit, int) or rpm_limit < 1):
                 raise ValueError("RPM must be positive or unlimited")
@@ -685,21 +703,44 @@ def create_portal_router(service: PortalService) -> APIRouter:
 
     @router.get("/api/operator/providers")
     async def list_providers(_session=Depends(operator)):
-        records = {item["id"]: item for item in repo.list_providers()}
-        if service.legacy_database:
-            for upstream in service.legacy_database.list_upstreams():
-                provider = records.get(upstream["id"], {
-                    "id": upstream["id"], "name": upstream["name"], "enabled": upstream["enabled"],
-                    "health": upstream["health_status"], "lastSyncAt": upstream["last_checked_at"],
-                    "discoveredModels": len(upstream["models"]), "approvedModels": 0,
-                })
-                provider["baseUrlDisplay"] = upstream["base_url"]
-                provider["enabled"] = bool(upstream["enabled"])
-                provider["health"] = upstream["health_status"] if upstream["health_status"] in {"healthy", "degraded", "disabled"} else "unknown"
-                provider["lastSyncAt"] = upstream["last_checked_at"]
-                provider["discoveredModels"] = max(provider["discoveredModels"], len(upstream["models"]))
-                records[upstream["id"]] = provider
-        return list(records.values())
+        records = repo.list_operator_connections()
+        if not service.legacy_database:
+            return records
+        with repo.connect() as connection:
+            represented_profiles = {
+                row["legacy_profile_id"] for row in connection.execute(
+                    "SELECT legacy_profile_id FROM provider_connections WHERE legacy_profile_id IS NOT NULL"
+                )
+            }
+        for profile in service.legacy_database.list_upstreams():
+            if profile["id"] in represented_profiles:
+                continue
+            try:
+                parts = urlsplit(profile["base_url"])
+                host = parts.hostname or ""
+                if ":" in host and not host.startswith("["):
+                    host = f"[{host}]"
+                if parts.port:
+                    host = f"{host}:{parts.port}"
+                base_url = parts._replace(netloc=host, query="", fragment="").geturl()
+            except ValueError:
+                base_url = ""
+            health = profile["health_status"] if profile["health_status"] in {"healthy", "degraded", "disabled"} else "unknown"
+            if not profile["enabled"]:
+                health = "disabled"
+            records.append({
+                "id": profile["id"], "brandId": None, "brandSlug": None,
+                "brandName": profile["name"], "connectionLabel": profile["name"],
+                "providerKind": profile["provider_kind"], "baseUrlDisplay": base_url,
+                "enabled": bool(profile["enabled"]), "mappingStatus": "unmapped",
+                "health": health, "lastSyncAt": profile["last_checked_at"],
+                "discoveredModels": len(profile["models"]), "approvedModels": 0,
+                "budget": {
+                    "limitUsd": None, "period": None, "reserveUsd": "0", "usedUsd": "0",
+                    "reservedUsd": "0", "remainingUsd": None, "resetAt": None,
+                },
+            })
+        return records
 
     @router.get("/api/operator/models")
     async def list_operator_models(_session=Depends(operator)):
@@ -823,13 +864,31 @@ def create_portal_router(service: PortalService) -> APIRouter:
         if not isinstance(data, dict):
             raise HTTPException(status_code=422, detail="Budget object is required")
         try:
-            repo.set_connection_budget(connection_id, data.get("limitNanoUsd"), data.get("period"), data.get("reserveNanoUsd", 0), actor["id"])
+            period = data.get("period")
+            if period is not None and not isinstance(period, str):
+                raise ValueError("period must be a string or null")
+            if "limitUsd" in data or "reserveUsd" in data:
+                limit_usd = data.get("limitUsd")
+                if "reserveUsd" not in data or not isinstance(data["reserveUsd"], str):
+                    raise ValueError("reserveUsd must be a decimal string")
+                if "limitUsd" not in data or (limit_usd is not None and not isinstance(limit_usd, str)):
+                    raise ValueError("limitUsd must be a decimal string or null")
+                limit_nano = repo._cap_nano_usd(limit_usd)
+                reserve_nano = repo._charge_nano_usd(data["reserveUsd"])
+            else:
+                limit_nano = data.get("limitNanoUsd")
+                reserve_nano = data.get("reserveNanoUsd", 0)
+                if limit_nano is not None and (isinstance(limit_nano, bool) or not isinstance(limit_nano, int)):
+                    raise ValueError("Legacy limitNanoUsd must be an integer or null")
+                if isinstance(reserve_nano, bool) or not isinstance(reserve_nano, int):
+                    raise ValueError("Legacy reserveNanoUsd must be an integer")
+            repo.set_connection_budget(connection_id, limit_nano, period, reserve_nano or 0, actor["id"])
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {"ok": True, "connectionId": connection_id, "limitNanoUsd": data.get("limitNanoUsd"),
-                "period": data.get("period"), "reserveNanoUsd": data.get("reserveNanoUsd", 0)}
+        return {"ok": True, "connectionId": connection_id, "limitUsd": repo._format_nano_usd(limit_nano),
+                "period": period, "reserveUsd": repo._format_nano_usd(reserve_nano) or "0"}
 
     @router.post("/api/operator/providers", status_code=201)
     async def create_provider(request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
@@ -1084,10 +1143,42 @@ def create_portal_router(service: PortalService) -> APIRouter:
         session=Depends(operator),
         cursor: str | None = Query(default=None, max_length=100),
         limit: int = Query(default=50, ge=1, le=200),
+        brand_slug: str | None = Query(default=None, alias="brandSlug", max_length=100),
+        connection_id: str | None = Query(default=None, alias="connectionId", max_length=100),
+        model: str | None = Query(default=None, max_length=200),
+        from_date: str | None = Query(default=None, alias="from", max_length=40),
+        to_date: str | None = Query(default=None, alias="to", max_length=40),
+        outcome: str | None = Query(default=None, max_length=20),
     ):
-        rows = repo.list_all_usage(limit=limit + 1, before=cursor)
+        try:
+            berlin = ZoneInfo("Europe/Berlin")
+            def parse_bound(value: str | None, *, upper: bool) -> str | None:
+                if value is None:
+                    return None
+                if len(value) == 10:
+                    local = datetime.fromisoformat(value) + (timedelta(days=1) if upper else timedelta())
+                    parsed = local.replace(tzinfo=berlin)
+                else:
+                    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=berlin)
+                    if upper:
+                        parsed += timedelta(microseconds=1)
+                return parsed.astimezone(timezone.utc).isoformat()
+
+            from_utc = parse_bound(from_date, upper=False)
+            to_utc = parse_bound(to_date, upper=True)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="Usage dates must be ISO calendar dates or timestamps") from exc
+        if outcome not in {None, "success", "error", "ok", "rejected", "interrupted"}:
+            raise HTTPException(status_code=422, detail="Unsupported usage outcome")
+        rows = repo.list_operator_usage(
+            limit=limit + 1, before=cursor, brand_slug=brand_slug, connection_id=connection_id,
+            model=model, from_date=from_utc, to_date_exclusive=to_utc, outcome=outcome,
+        )
         has_more = len(rows) > limit
         page = rows[:limit]
-        return {"items": [_activity_record(item, operator=True) for item in page], "nextCursor": page[-1]["occurred_at"] if has_more and page else None}
+        next_cursor = f"{page[-1]['occurred_at']}|{page[-1]['id']}" if has_more and page else None
+        return {"items": [_activity_record(item, operator=True) for item in page], "nextCursor": next_cursor}
 
     return router
