@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.catalog import DiscoveredModel, PriceSuggestion
+from app.routing import public_model_id, resolve_offer_routes
 
 
 def _now() -> datetime:
@@ -69,6 +70,11 @@ class CatalogOffer:
     brand_id: str
     canonical_model_id: str
     display_name: str
+    active: bool = False
+    approved: bool = False
+    input_rate: str | None = None
+    output_rate: str | None = None
+    cached_input_rate: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +83,16 @@ class OfferRoute:
     offer_id: str
     connection_id: str
     upstream_model_id: str
+    brand_id: str | None = None
+    position: int = 0
+    active: bool = False
+    connection_enabled: bool = False
+    mapping_status: str = "unmapped"
+    identity_status: str = "unknown"
+    discovery_active: bool = False
+    discovery_stale: bool = True
+    confirmed: bool = False
+    price_matches: bool = False
 
 
 @dataclass(frozen=True)
@@ -292,11 +308,27 @@ class PortalDatabase:
                 (3, self._migrate_identity_and_numeric_safety),
                 (4, self._migrate_local_auth_and_invite_quotas),
                 (5, self._migrate_provider_discovery_and_prices),
+                (6, self._migrate_ordered_offer_routes),
             )
             for version, migration in migrations:
                 if version not in applied:
                     migration(conn)
                     conn.execute("INSERT INTO portal_schema_migrations(version,applied_at) VALUES(?,?)", (version, _iso()))
+
+    @staticmethod
+    def _migrate_ordered_offer_routes(conn: sqlite3.Connection) -> None:
+        PortalDatabase._add_columns(conn, "offer_routes", {"sort_order": "INTEGER NOT NULL DEFAULT 0"})
+        conn.execute("CREATE INDEX IF NOT EXISTS offer_routes_order ON offer_routes(offer_id,sort_order,id)")
+        conn.execute("""UPDATE offer_routes SET active=1 WHERE active=0
+            AND EXISTS (SELECT 1 FROM provider_connections connection
+                JOIN provider_brands brand ON brand.id=connection.brand_id
+                JOIN connection_models discovered ON discovered.connection_id=connection.id
+                    AND discovered.upstream_model_id=offer_routes.upstream_model_id
+                WHERE connection.id=offer_routes.connection_id AND connection.enabled=1
+                    AND connection.mapping_status='mapped' AND brand.identity_status='mapped'
+                    AND discovered.active=1 AND discovered.is_stale=0)
+            AND EXISTS (SELECT 1 FROM catalog_offers offer JOIN price_versions price ON price.offer_id=offer.id
+                WHERE offer.id=offer_routes.offer_id AND offer.approved=1 AND price.is_active=1)""")
 
     def _migrate_local_auth_and_invite_quotas(self, conn: sqlite3.Connection) -> None:
         """Add local credentials while retaining every existing OIDC identity."""
@@ -1164,12 +1196,8 @@ class PortalDatabase:
                 offer = conn.execute("SELECT id,approved,active FROM catalog_offers WHERE brand_id=? AND canonical_model_id=?",
                                      (connection["brand_id"], model.id)).fetchone()
                 route_id = f"route:{uuid.uuid5(uuid.NAMESPACE_URL, connection_id + ':' + offer['id'] + ':' + model.id).hex}"
-                conn.execute("""INSERT OR IGNORE INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active)
-                    VALUES(?,?,?,?,0)""", (route_id, offer["id"], connection_id, model.id))
-                active_price = conn.execute("SELECT 1 FROM price_versions WHERE offer_id=? AND is_active=1", (offer["id"],)).fetchone()
-                eligible = bool(offer["approved"] and offer["active"] and connection["enabled"] and active_price)
-                conn.execute("UPDATE offer_routes SET active=? WHERE offer_id=? AND connection_id=? AND upstream_model_id=?",
-                             (int(eligible), offer["id"], connection_id, model.id))
+                conn.execute("""INSERT OR IGNORE INTO offer_routes(id,offer_id,connection_id,upstream_model_id)
+                    VALUES(?,?,?,?)""", (route_id, offer["id"], connection_id, model.id))
 
             stale_count = conn.execute("SELECT COUNT(*) FROM connection_models WHERE connection_id=? AND is_stale=1", (connection_id,)).fetchone()[0]
             if before:
@@ -1179,7 +1207,6 @@ class PortalDatabase:
     def mark_discovery_stale(self, connection_id: str, stale_at: datetime | None = None) -> int:
         with self.connect() as conn:
             conn.execute("UPDATE connection_models SET is_stale=1,active=0 WHERE connection_id=?", (connection_id,))
-            conn.execute("UPDATE offer_routes SET active=0 WHERE connection_id=?", (connection_id,))
             return conn.execute("SELECT COUNT(*) FROM connection_models WHERE connection_id=? AND is_stale=1", (connection_id,)).fetchone()[0]
 
     def list_discovered_models(self, connection_id: str) -> list[dict[str, Any]]:
@@ -1242,6 +1269,115 @@ class PortalDatabase:
         self.audit(actor_id, "offer.price_approved", "offer", offer_id,
                    {"suggestion_id": version_id, "price_version_id": effective_id, "source": suggestion["source"]})
 
+    @staticmethod
+    def _route_price_matches(route: sqlite3.Row, price: sqlite3.Row | None) -> bool:
+        if not price or not route["pricing_json"]:
+            return price is not None
+        try:
+            reported_all = json.loads(route["pricing_json"])
+            reported = reported_all.get(route["upstream_model_id"])
+            if not isinstance(reported, dict):
+                return True
+            values = (reported.get("input"), reported.get("output"), reported.get("cache"))
+            if values[0] is None or values[1] is None:
+                return False
+            normalized = tuple(PortalDatabase._canonical_rate(value) for value in values)
+            expected = (price["input_rate"], price["output_rate"], price["cached_input_rate"])
+            return normalized == expected
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return False
+
+    @classmethod
+    def _load_offer_routes(cls, conn: sqlite3.Connection, offer_id: str, *, active_override: bool | None = None) -> tuple[CatalogOffer, list[OfferRoute]] | None:
+        offer_row = conn.execute("SELECT * FROM catalog_offers WHERE id=?", (offer_id,)).fetchone()
+        if not offer_row:
+            return None
+        price = conn.execute("SELECT * FROM price_versions WHERE offer_id=? AND is_active=1", (offer_id,)).fetchone()
+        offer = CatalogOffer(
+            offer_row["id"], offer_row["brand_id"], offer_row["canonical_model_id"], offer_row["display_name"],
+            bool(offer_row["active"]) if active_override is None else active_override, bool(offer_row["approved"]),
+            price["input_rate"] if price else None, price["output_rate"] if price else None,
+            price["cached_input_rate"] if price else None,
+        )
+        profile_join = ("LEFT JOIN upstream_profiles profile ON profile.id=connection.legacy_profile_id"
+                        if cls._table_exists(conn, "upstream_profiles")
+                        else "LEFT JOIN (SELECT NULL AS id,NULL AS pricing_json) profile ON 0")
+        rows = conn.execute(f"""SELECT route.*,connection.brand_id connection_brand_id,
+                connection.enabled connection_enabled,connection.mapping_status,
+                brand.identity_status,discovered.active discovery_active,discovered.is_stale discovery_stale,
+                profile.id exact_profile_id,profile.pricing_json
+            FROM offer_routes route
+            LEFT JOIN provider_connections connection ON connection.id=route.connection_id
+            LEFT JOIN provider_brands brand ON brand.id=connection.brand_id
+            LEFT JOIN connection_models discovered ON discovered.connection_id=connection.id
+                AND discovered.upstream_model_id=route.upstream_model_id
+            {profile_join}
+            WHERE route.offer_id=? ORDER BY route.sort_order,route.id""", (offer_id,)).fetchall()
+        routes = []
+        for row in rows:
+            price_matches = cls._route_price_matches(row, price)
+            confirmed = bool(
+                offer.approved and price and row["exact_profile_id"]
+                and row["connection_brand_id"] == offer.brand_id
+                and row["mapping_status"] == "mapped" and row["identity_status"] == "mapped"
+                and row["discovery_active"] and not row["discovery_stale"] and price_matches
+            )
+            routes.append(OfferRoute(
+                row["id"], row["offer_id"], row["connection_id"], row["upstream_model_id"],
+                row["connection_brand_id"], row["sort_order"], bool(row["active"]),
+                bool(row["connection_enabled"]), row["mapping_status"] or "unmapped",
+                row["identity_status"] or "unknown", bool(row["discovery_active"]),
+                bool(row["discovery_stale"]), confirmed, price_matches,
+            ))
+        return offer, routes
+
+    def list_offer_routes(self, offer_id: str) -> list[OfferRoute]:
+        with self.connect() as conn:
+            loaded = self._load_offer_routes(conn, offer_id)
+        if not loaded:
+            raise LookupError("Catalog offer does not exist")
+        return resolve_offer_routes(*loaded)
+
+    def set_offer_route_order(self, offer_id: str, connection_ids: list[str], actor_id: str) -> None:
+        if not isinstance(connection_ids, list) or any(not isinstance(value, str) or not value for value in connection_ids):
+            raise ValueError("connectionIds must be an ordered array of connection IDs")
+        if len(connection_ids) != len(set(connection_ids)):
+            raise ValueError("A connection may appear only once in the route order")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            loaded = self._load_offer_routes(conn, offer_id)
+            if not loaded:
+                raise LookupError("Catalog offer does not exist")
+            _offer, routes = loaded
+            routes_by_connection = {route.connection_id: route for route in routes}
+            for connection_id in connection_ids:
+                route = routes_by_connection.get(connection_id)
+                if not route or not route.confirmed or not route.price_matches:
+                    raise ValueError("Every ordered route must have an exact fresh discovery and matching confirmed price")
+            selected = set(connection_ids)
+            remaining = [route.connection_id for route in routes if route.connection_id not in selected]
+            ordering = connection_ids + remaining
+            for position, connection_id in enumerate(ordering):
+                conn.execute("UPDATE offer_routes SET sort_order=? WHERE offer_id=? AND connection_id=?",
+                             (position, offer_id, connection_id))
+        self.audit(actor_id, "offer.routes_updated", "offer", offer_id, {"connection_ids": connection_ids})
+
+    def set_route_available(self, route_id: str, enabled: bool, actor_id: str) -> None:
+        if not isinstance(enabled, bool):
+            raise ValueError("Route availability must be boolean")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT offer_id FROM offer_routes WHERE id=?", (route_id,)).fetchone()
+            if not row:
+                raise LookupError("Offer route does not exist")
+            loaded = self._load_offer_routes(conn, row["offer_id"])
+            _offer, routes = loaded
+            route = next(item for item in routes if item.id == route_id)
+            if enabled and not (route.confirmed and route.price_matches and route.connection_enabled):
+                raise ValueError("Route requires an exact mapped, enabled, freshly discovered matching price")
+            conn.execute("UPDATE offer_routes SET active=? WHERE id=?", (int(enabled), route_id))
+        self.audit(actor_id, "route.availability_updated", "route", route_id, {"enabled": enabled})
+
     def set_offer_available(self, offer_id: str, enabled: bool, actor_id: str) -> None:
         if not isinstance(enabled, bool):
             raise ValueError("Offer availability must be boolean")
@@ -1250,32 +1386,12 @@ class PortalDatabase:
             offer = conn.execute("SELECT * FROM catalog_offers WHERE id=?", (offer_id,)).fetchone()
             if not offer:
                 raise LookupError("Catalog offer does not exist")
-            eligible_routes = []
-            if self._table_exists(conn, "upstream_profiles"):
-                eligible_routes = conn.execute("""SELECT route.id FROM offer_routes route
-                    JOIN catalog_offers published ON published.id=route.offer_id
-                    JOIN provider_connections connection ON connection.id=route.connection_id
-                        AND connection.brand_id=published.brand_id
-                    JOIN provider_brands brand ON brand.id=connection.brand_id
-                    JOIN connection_models discovered ON discovered.connection_id=connection.id
-                        AND discovered.upstream_model_id=route.upstream_model_id
-                    WHERE route.offer_id=? AND brand.identity_status='mapped'
-                        AND connection.mapping_status='mapped' AND connection.enabled=1
-                        AND discovered.active=1 AND discovered.is_stale=0
-                        AND published.approved=1
-                        AND EXISTS (SELECT 1 FROM upstream_profiles profile WHERE profile.id=connection.legacy_profile_id)
-                        AND EXISTS (SELECT 1 FROM price_versions price WHERE price.offer_id=route.offer_id AND price.is_active=1)""", (offer_id,)).fetchall()
+            loaded = self._load_offer_routes(conn, offer_id, active_override=enabled)
+            eligible_routes = resolve_offer_routes(*loaded) if loaded else []
             if enabled and not eligible_routes:
                 raise ValueError("Offer requires an approved price and an exact mapped, enabled, freshly discovered route")
             effective_at = _iso()
             conn.execute("UPDATE catalog_offers SET active=?,updated_at=? WHERE id=?", (int(enabled), effective_at, offer_id))
-            if enabled:
-                eligible_ids = [route["id"] for route in eligible_routes]
-                placeholders = ",".join("?" for _ in eligible_ids)
-                conn.execute(f"UPDATE offer_routes SET active=CASE WHEN id IN ({placeholders}) THEN 1 ELSE 0 END WHERE offer_id=?",
-                             (*eligible_ids, offer_id))
-            else:
-                conn.execute("UPDATE offer_routes SET active=0 WHERE offer_id=?", (offer_id,))
         self.audit(actor_id, "offer.availability_changed", "offer", offer_id, {"enabled": enabled})
 
     def list_operator_offers(self) -> list[dict[str, Any]]:
@@ -1288,18 +1404,8 @@ class PortalDatabase:
                 active = conn.execute("SELECT * FROM price_versions WHERE offer_id=? AND is_active=1", (row["id"],)).fetchone()
                 pending = conn.execute("SELECT * FROM price_suggestions WHERE offer_id=? AND status='pending' ORDER BY created_at DESC,id DESC LIMIT 1", (row["id"],)).fetchone()
                 suggestions = conn.execute("SELECT * FROM price_suggestions WHERE offer_id=? AND status='pending' ORDER BY created_at DESC,id DESC", (row["id"],)).fetchall()
-                eligible = None
-                if self._table_exists(conn, "upstream_profiles"):
-                    eligible = conn.execute("""SELECT 1 FROM offer_routes route
-                        JOIN provider_connections connection ON connection.id=route.connection_id
-                        JOIN provider_brands brand ON brand.id=connection.brand_id
-                        JOIN connection_models discovered ON discovered.connection_id=connection.id
-                            AND discovered.upstream_model_id=route.upstream_model_id
-                        WHERE route.offer_id=? AND route.active=1 AND brand.identity_status='mapped'
-                            AND connection.mapping_status='mapped' AND connection.enabled=1
-                            AND discovered.active=1 AND discovered.is_stale=0
-                            AND EXISTS (SELECT 1 FROM upstream_profiles profile WHERE profile.id=connection.legacy_profile_id)
-                        LIMIT 1""", (row["id"],)).fetchone()
+                loaded = self._load_offer_routes(conn, row["id"])
+                eligible = bool(loaded and resolve_offer_routes(*loaded))
                 results.append({
                     "id": row["id"], "brandSlug": row["brand_slug"], "brandName": row["brand_name"],
                     "canonicalModelId": row["canonical_model_id"], "displayName": row["display_name"],
@@ -1456,9 +1562,13 @@ class PortalDatabase:
                 normalized_query += " AND offer.active=1"
             normalized_query += " ORDER BY provider_name,model_id"
             normalized_rows = conn.execute(normalized_query).fetchall() if self._table_exists(conn, "upstream_profiles") else []
+            if approved_only:
+                normalized_rows = [row for row in normalized_rows
+                                   if (loaded := self._load_offer_routes(conn, row["offer_id"]))
+                                   and resolve_offer_routes(*loaded)]
         legacy = [dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in rows]
         normalized = [dict(row) | {"capabilities": json.loads(row["capabilities_json"] or "[]"),
-                                   "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in normalized_rows]
+                                   "public_model_id": public_model_id(row["provider_id"], row["model_id"])} for row in normalized_rows]
         legacy_keys = {(model["provider_id"], model["model_id"]) for model in legacy}
         normalized = [model for model in normalized if (model["migration_ref"], model["model_id"]) not in legacy_keys]
         public_ids = {model["public_model_id"] for model in legacy}
