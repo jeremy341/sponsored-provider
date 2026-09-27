@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from decimal import Decimal
 from datetime import datetime, timezone
@@ -10,21 +11,29 @@ from app.portal_db import PortalDatabase
 
 
 def _budget_setup(tmp_path):
-    repository = PortalDatabase(str(tmp_path / "budget.db"), key_pepper="p" * 40)
+    database_path = str(tmp_path / "budget.db")
+    legacy = Database(database_path, "legacy-budget-fixture-pepper", Fernet.generate_key().decode())
+    repository = PortalDatabase(database_path, key_pepper="p" * 40)
     owner = repository.upsert_user(subject="budget-member", email="budget@example.test", name="Budget member", role="operator")
     key_a = repository.create_user_key(owner["id"], "A", allowed_models_mode="all_approved")
     key_b = repository.create_user_key(owner["id"], "B", allowed_models_mode="all_approved")
     with repository.connect() as connection:
         connection.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at,identity_status,slug) VALUES('brand-a','A',NULL,'2026-01-01T00:00:00+00:00','mapped','brand-a')")
         connection.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at,identity_status,slug) VALUES('brand-b','B',NULL,'2026-01-01T00:00:00+00:00','mapped','brand-b')")
-        connection.execute("INSERT INTO provider_connections(id,brand_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,label) VALUES('conn-a','brand-a','https://a.example','openai_compatible','secret',1,'2026-01-01T00:00:00+00:00','mapped','A')")
-        connection.execute("INSERT INTO provider_connections(id,brand_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,label) VALUES('conn-b','brand-b','https://b.example','openai_compatible','secret',1,'2026-01-01T00:00:00+00:00','mapped','B')")
+        connection.execute("INSERT INTO provider_connections(id,brand_id,legacy_profile_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,label) VALUES('conn-a','brand-a','conn-a','https://a.example','openai_compatible','secret',1,'2026-01-01T00:00:00+00:00','mapped','A')")
+        connection.execute("INSERT INTO provider_connections(id,brand_id,legacy_profile_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,label) VALUES('conn-b','brand-b','conn-b','https://b.example','openai_compatible','secret',1,'2026-01-01T00:00:00+00:00','mapped','B')")
         connection.execute("INSERT INTO catalog_offers(id,brand_id,canonical_model_id,display_name,approved,active,updated_at) VALUES('offer-a','brand-a','model-a','Model A',1,1,'2026-01-01T00:00:00+00:00')")
         connection.execute("INSERT INTO catalog_offers(id,brand_id,canonical_model_id,display_name,approved,active,updated_at) VALUES('offer-b','brand-b','model-b','Model B',1,1,'2026-01-01T00:00:00+00:00')")
         connection.execute("INSERT INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active) VALUES('route-a','offer-a','conn-a','model-a',1)")
         connection.execute("INSERT INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active) VALUES('route-b','offer-b','conn-b','model-b',1)")
+        connection.execute("INSERT INTO connection_models(connection_id,upstream_model_id,metadata_json,active,is_stale,last_seen_at) VALUES('conn-a','model-a','{}',1,0,'2026-01-01T00:00:00+00:00')")
+        connection.execute("INSERT INTO connection_models(connection_id,upstream_model_id,metadata_json,active,is_stale,last_seen_at) VALUES('conn-b','model-b','{}',1,0,'2026-01-01T00:00:00+00:00')")
         connection.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,source,is_active,effective_at) VALUES('price-approved','offer-a','0.001','0.002','operator',1,'2026-01-01T00:00:00+00:00')")
         connection.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,source,is_active,effective_at) VALUES('price-b','offer-b','0.001','0.002','operator',1,'2026-01-01T00:00:00+00:00')")
+    with legacy.connect() as upstream:
+        for connection_id, name, model_id in (("conn-a", "A", "model-a"), ("conn-b", "B", "model-b")):
+            upstream.execute("INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,models_json,created_at) VALUES(?,?,?,?,?,?,?)",
+                             (connection_id, name, "openai_compatible", f"https://{name.lower()}.example/v1", "encrypted-test-secret", json.dumps([model_id]), "2026-01-01T00:00:00+00:00"))
     return repository, owner, key_a, key_b
 
 

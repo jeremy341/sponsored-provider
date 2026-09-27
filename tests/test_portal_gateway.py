@@ -182,6 +182,25 @@ def test_out_of_budget_rejection_is_logged_without_upstream_dispatch(tmp_path):
 
 
 @respx.mock
+def test_connection_budget_rejects_before_upstream_dispatch(tmp_path):
+    _settings, portal, _user, issued, public_model_id, _offer, connections, _price = _ready_offer_gateway(tmp_path)
+    portal.set_connection_budget(connections[0][0].id, 1, "lifetime", 0, "operator")
+    upstream = respx.post("https://1.1.1.1/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {issued['api_key']}"}, json={
+                "model": public_model_id, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 8,
+            })
+        assert response.status_code == 429
+        assert response.json()["error"]["code"] == "budget_exhausted"
+        assert not upstream.called
+    finally:
+        app.dependency_overrides.clear()
+
+
+@respx.mock
 def test_same_brand_fallback_is_used_only_when_first_route_is_known_undelivered(tmp_path):
     _settings, portal, user, issued, public_model_id, _offer, connections, _price = _ready_offer_gateway(
         tmp_path, upstream_models=("raw-primary", "raw-fallback")
@@ -271,6 +290,64 @@ def test_usage_snapshots_keep_provider_connection_and_price_version_after_disabl
 
 
 @respx.mock
+def test_tool_schemas_are_included_in_the_preflight_input_estimate(tmp_path):
+    _settings, _portal, _user, issued, public_model_id, _offer, _connections, _price = _ready_offer_gateway(
+        tmp_path, user_allowance=0.0001
+    )
+    upstream = respx.post("https://1.1.1.1/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    tools = [{"type": "function", "function": {
+        "name": "large_schema", "description": "x" * 12000,
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }}]
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {issued['api_key']}"}, json={
+                "model": public_model_id, "messages": [{"role": "user", "content": "hi"}],
+                "tools": tools, "max_tokens": 8,
+            })
+        assert response.status_code == 429
+        assert response.json()["error"]["code"] == "budget_exhausted"
+        assert not upstream.called
+    finally:
+        app.dependency_overrides.clear()
+
+
+@respx.mock
+def test_reservation_rechecks_route_review_state_before_dispatch(tmp_path, monkeypatch):
+    _settings, _portal, _user, issued, public_model_id, _offer, connections, _price = _ready_offer_gateway(tmp_path)
+    connection_id, upstream_model_id = connections[0][0].id, connections[0][2]
+    upstream = respx.post("https://1.1.1.1/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    reserve = PortalDatabase.reserve_request_budget
+    invalidated = False
+
+    def invalidate_after_route_resolution(repository, *args, **kwargs):
+        nonlocal invalidated
+        if not invalidated:
+            invalidated = True
+            repository.mark_discovery_stale(connection_id)
+            repository.apply_discovery(
+                connection_id, [DiscoveredModel(upstream_model_id)], datetime.now(timezone.utc)
+            )
+        return reserve(repository, *args, **kwargs)
+
+    monkeypatch.setattr(PortalDatabase, "reserve_request_budget", invalidate_after_route_resolution)
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {issued['api_key']}"}, json={
+                "model": public_model_id, "messages": [{"role": "user", "content": "hello"}], "max_tokens": 8,
+            })
+        assert invalidated
+        assert response.status_code != 200
+        assert not upstream.called
+    finally:
+        app.dependency_overrides.clear()
+
+
+@respx.mock
 def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usage(tmp_path):
     database_path = str(tmp_path / f"portal-gateway-{uuid4().hex}.db")
     settings = Settings(
@@ -345,6 +422,39 @@ def test_authenticated_model_rejection_is_logged_without_sending_upstream(tmp_pa
         assert event["status"] == "rejected"
         assert event["error_category"] == "model_not_found"
         assert event["total_tokens"] is None
+    finally:
+        app.dependency_overrides.clear()
+
+
+@respx.mock
+def test_spend_capped_legacy_key_requires_output_bound_and_reports_reason(tmp_path):
+    database_path = str(tmp_path / f"legacy-unbounded-{uuid4().hex}.db")
+    settings = Settings(
+        database_path=database_path,
+        provider_key_pepper="legacy-bound-test",
+        provider_secret_key=Fernet.generate_key().decode(),
+        admin_token="admin",
+        alibaba_api_key="legacy-upstream-secret",
+        alibaba_base_url="https://1.1.1.1/v1",
+        allowed_models="legacy-model",
+        input_price_per_million=1,
+        output_price_per_million=2,
+        provider_hard_stop_usd=10,
+    )
+    legacy = Database(database_path, settings.provider_key_pepper, settings.provider_secret_key)
+    key, _metadata = legacy.create_key("Spend-capped legacy", {"spend_limit_usd": 1})
+    upstream = respx.post("https://1.1.1.1/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {key}"}, json={
+                "model": "legacy-model", "messages": [{"role": "user", "content": "unbounded output"}],
+            })
+        assert response.status_code == 429
+        assert response.json()["error"]["code"] == "key_budget_exhausted"
+        assert not upstream.called
     finally:
         app.dependency_overrides.clear()
 
