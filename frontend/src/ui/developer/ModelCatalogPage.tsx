@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Copy, Search, X } from "lucide-react";
 import type { ModelRecord, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
+import { getLayoutPreviewRole } from "../../lib/preview";
 
 export function ModelCatalogPage({ portalApi }: { portalApi: PortalApi }) {
   const [models, setModels] = useState<ModelRecord[]>([]);
@@ -15,6 +16,14 @@ export function ModelCatalogPage({ portalApi }: { portalApi: PortalApi }) {
   const [selected, setSelected] = useState<ModelRecord | null>(null);
 
   async function load() {
+    if (getLayoutPreviewRole() === "developer") {
+      setModels([]);
+      setLoading(false);
+      setError("");
+
+      return;
+    }
+
     setLoading(true);
     setError("");
 

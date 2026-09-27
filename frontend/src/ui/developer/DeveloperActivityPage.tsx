@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Activity, Search } from "lucide-react";
 import type { ActivityEvent, ApiKeyRecord, DeveloperActivityFilter, Page, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
+import { getLayoutPreviewRole } from "../../lib/preview";
 
 export function DeveloperActivityPage({ portalApi }: { portalApi: PortalApi }) {
   const [rows, setRows] = useState<ActivityEvent[]>([]);
@@ -11,12 +12,25 @@ export function DeveloperActivityPage({ portalApi }: { portalApi: PortalApi }) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  useEffect(() => { void portalApi.listKeys().then(setKeys).catch(() => setKeys([])); }, [portalApi]);
+  useEffect(() => {
+
+    if (getLayoutPreviewRole() === "developer") { setKeys([]); return; }
+
+    void portalApi.listKeys().then(setKeys).catch(() => setKeys([]));
+  }, [portalApi]);
 
   useEffect(() => {
     let active = true;
     setLoading(true);
     setError("");
+
+    if (getLayoutPreviewRole() === "developer") {
+      setRows([]);
+      setNextCursor(null);
+      setLoading(false);
+
+      return () => { active = false; };
+    }
 
     portalApi.listActivity(filters).then((page: Page<ActivityEvent>) => {
       if (active) {
