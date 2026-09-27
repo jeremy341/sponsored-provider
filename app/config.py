@@ -17,11 +17,15 @@ class Settings(BaseSettings):
     database_path: str = "./provider.db"
     provider_key_pepper: str = ""
     provider_secret_key: str = ""
+    admin_token: str = ""
+    hackclub_client_id: str = ""
+    hackclub_client_secret: str = ""
+    portal_redirect_uri: str = ""
+    portal_bootstrap_operator_email: str = ""
     portal_public_origin: str = ""
     portal_cookie_secure: bool = True
     portal_auth_rate_limit_attempts: int = 5
     portal_auth_rate_limit_window_seconds: int = 900
-    admin_token: str = ""
     rate_limit_requests_per_minute: int = 0
     provider_hard_stop_usd: float = 34.70
     provider_warning_usd: float = 25.0

@@ -38,9 +38,9 @@ class PriceMatch:
 
 @dataclass(frozen=True)
 class PriceSuggestion:
-    input_usd_per_million: float | None
-    output_usd_per_million: float | None
-    cached_input_usd_per_million: float | None = None
+    input_usd_per_million: str | float | None
+    output_usd_per_million: str | float | None
+    cached_input_usd_per_million: str | float | None = None
     source: str = "manual"
     source_url: str | None = None
     evidence: str | None = None

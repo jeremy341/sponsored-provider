@@ -48,7 +48,10 @@ async def lifespan(_app):
 
 
 app = FastAPI(title="Sponsored Provider", version="0.1.0", lifespan=lifespan)
+APP_ROOT = Path(__file__).resolve().parent.parent
+PORTAL_DIST = APP_ROOT / "frontend" / "dist"
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+app.mount("/assets", StaticFiles(directory=PORTAL_DIST / "assets", check_dir=False), name="portal-assets")
 rate_limiter = RateLimiter()
 
 
@@ -443,8 +446,9 @@ async def provider_error_handler(_, exc: ProviderError):
 
 
 @app.get("/health")
-async def health(settings: Settings = Depends(get_settings)):
-    return {"ok": not settings.emergency_stop, "service": "sponsored-provider", "stopped": settings.emergency_stop}
+async def health(settings: Settings = Depends(get_settings), portal_db: PortalDatabase = Depends(get_portal_db)):
+    stopped = bool(settings.emergency_stop or portal_db.get_runtime_setting("global_stopped", False))
+    return {"ok": not stopped, "service": "sponsored-provider", "stopped": stopped}
 
 
 @app.get("/dashboard")
@@ -452,13 +456,30 @@ async def dashboard():
     return FileResponse(Path(__file__).parent / "static" / "index.html")
 
 
+def portal_index():
+    index = PORTAL_DIST / "index.html"
+    if not index.is_file():
+        raise ProviderError("The portal frontend has not been built. Run npm run build in the frontend directory.", "portal_frontend_not_built", 503)
+    return FileResponse(index)
+
+
 @app.get("/", include_in_schema=False)
 async def root():
+    if (PORTAL_DIST / "index.html").is_file():
+        return portal_index()
     return RedirectResponse(url="/dashboard", status_code=307)
 
 
 @app.get("/auth/login", include_in_schema=False)
 async def auth_login_shell():
+    return portal_index()
+
+
+@app.get("/developer", include_in_schema=False)
+@app.get("/developer/{portal_path:path}", include_in_schema=False)
+@app.get("/operator", include_in_schema=False)
+@app.get("/operator/{portal_path:path}", include_in_schema=False)
+async def portal_routes(portal_path: str = ""):
     return portal_index()
 
 
@@ -876,33 +897,35 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
                 latency_stream = int((time.perf_counter() - started_stream) * 1000)
                 if stream_input_tokens is not None or stream_output_tokens is not None:
                     if stream_cached_tokens and stream_input_tokens:
-                        actual_cost = round((stream_input_tokens - stream_cached_tokens) / 1_000_000 * input_price + stream_cached_tokens / 1_000_000 * cache_price + (stream_output_tokens or 0) / 1_000_000 * output_price, 6)
+                        actual_cost = round((stream_input_tokens - stream_cached_tokens) / 1_000_000 * input_price + stream_cached_tokens / 1_000_000 * cache_price + (stream_output_tokens or 0) / 1_000_000 * output_price, 12)
                     else:
                         actual_cost = estimate_cost(stream_input_tokens, stream_output_tokens, settings, input_price, output_price)
-                    db.record_usage(key["id"], model=model, input_tokens=stream_input_tokens, output_tokens=stream_output_tokens, total_tokens=stream_total_tokens or ((stream_input_tokens or 0) + (stream_output_tokens or 0) if stream_input_tokens is not None or stream_output_tokens is not None else None), estimated_cost_usd=actual_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
+                    record_request_usage(db, portal_db, key, model=model, input_tokens=stream_input_tokens, output_tokens=stream_output_tokens, total_tokens=stream_total_tokens or ((stream_input_tokens or 0) + (stream_output_tokens or 0) if stream_input_tokens is not None or stream_output_tokens is not None else None), estimated_cost_usd=actual_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, cached_tokens=stream_cached_tokens, price_snapshot={"input": input_price, "output": output_price, "cache": cache_price})
                 else:
-                    db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
+                    record_request_usage(db, portal_db, key, model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=latency_stream, status="success", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, price_snapshot={"input": input_price, "output": output_price, "cache": cache_price})
             except ProviderError as exc:
-                db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=int((time.perf_counter() - started_stream) * 1000), status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code)
+                record_request_usage(db, portal_db, key, model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=int((time.perf_counter() - started_stream) * 1000), status="failed", stream=True, client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code, price_snapshot={"input": input_price, "output": output_price, "cache": cache_price})
                 yield f'data: {json.dumps({"error": {"message": exc.message, "code": exc.code}})}\n\n'
         return StreamingResponse(stream_body(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
     started = time.perf_counter()
     try:
         body, latency = await client.chat_completion(payload)
     except ProviderError as exc:
-        db.record_usage(key["id"], model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=0, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code)
+        record_request_usage(db, portal_db, key, model=model, input_tokens=None, output_tokens=None, total_tokens=None, estimated_cost_usd=projected_cost, latency_ms=int((time.perf_counter() - started) * 1000), status="failed", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, error_category=exc.code, price_snapshot={"input": input_price, "output": output_price, "cache": cache_price})
         raise
     usage = body.get("usage") or {}
     input_tokens = usage.get("prompt_tokens")
     output_tokens = usage.get("completion_tokens")
     total_tokens = usage.get("total_tokens")
     cached_tokens = (usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-    if cached_tokens and input_tokens:
-        estimated_cost = round((input_tokens - cached_tokens) / 1_000_000 * input_price + cached_tokens / 1_000_000 * cache_price + (output_tokens or 0) / 1_000_000 * output_price, 6)
+    if input_tokens is None and output_tokens is None:
+        estimated_cost = projected_cost
+    elif cached_tokens and input_tokens:
+        estimated_cost = round((input_tokens - cached_tokens) / 1_000_000 * input_price + cached_tokens / 1_000_000 * cache_price + (output_tokens or 0) / 1_000_000 * output_price, 12)
     else:
         estimated_cost = estimate_cost(input_tokens, output_tokens, settings, input_price, output_price)
-    db.record_usage(key["id"], model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id)
-    if db.usage_summary()["totals"]["estimated_cost_usd"] >= settings.provider_hard_stop_usd:
+    record_request_usage(db, portal_db, key, model=model, input_tokens=input_tokens, output_tokens=output_tokens, total_tokens=total_tokens, estimated_cost_usd=estimated_cost, latency_ms=latency, status="success", stream=bool(payload.get("stream")), client_ip=client_ip, upstream_profile_id=upstream_id, reservation_id=reservation_id, cached_tokens=cached_tokens, price_snapshot={"input": input_price, "output": output_price, "cache": cache_price})
+    if not key.get("_portal_key") and db.usage_summary()["totals"]["estimated_cost_usd"] >= global_limit_usd:
         db.set_key_state(key["id"], False)
     return body
 
@@ -910,4 +933,4 @@ async def chat(request: Request, settings: Settings = Depends(get_settings), aut
 def estimate_cost(input_tokens, output_tokens, settings: Settings, input_price=None, output_price=None) -> float:
     input_price = settings.input_price_per_million if input_price is None else input_price
     output_price = settings.output_price_per_million if output_price is None else output_price
-    return round((input_tokens or 0) / 1_000_000 * input_price + (output_tokens or 0) / 1_000_000 * output_price, 6)
+    return round((input_tokens or 0) / 1_000_000 * input_price + (output_tokens or 0) / 1_000_000 * output_price, 12)

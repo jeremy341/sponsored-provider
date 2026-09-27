@@ -79,56 +79,15 @@ def test_id_token_rejects_tampered_signature(signing_key):
         oidc.validate_id_token(f"{header}.{payload}.{changed}", expected_nonce="expected-nonce", jwks={"keys": [_jwk(signing_key.public_key())]})
 
 
-def test_login_callback_requires_matching_state_nonce_and_consumes_invite(tmp_path, signing_key):
+def test_identityless_runtime_does_not_mount_hca_callback(tmp_path):
     repo = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="x" * 40)
-    operator = repo.upsert_user(subject="operator", email="operator@example.test", name="Operator", role="operator")
-    invite, raw_invite = repo.create_invite(issuer_user_id=operator["id"], expires_in_seconds=600)
-    expected_nonce = {"value": None}
-
-    def upstream(request):
-        if request.url.path.endswith("/.well-known/openid-configuration"):
-            return httpx.Response(200, json={
-                "issuer": "https://auth.hackclub.com",
-                "authorization_endpoint": "https://auth.hackclub.com/oauth/authorize",
-                "token_endpoint": "https://auth.hackclub.com/oauth/token",
-                "jwks_uri": "https://auth.hackclub.com/oauth/discovery/keys",
-                "response_types_supported": ["code"],
-                "id_token_signing_alg_values_supported": ["RS256"],
-            })
-        if request.url.path.endswith("/oauth/token"):
-            form = parse_qs(request.content.decode())
-            payload = base64.urlsafe_b64decode(form["code"][0] + "==").decode()
-            expected_nonce["value"] = json.loads(payload)["nonce"]
-            return httpx.Response(200, json={"id_token": _token(signing_key, nonce=expected_nonce["value"])})
-        if request.url.path.endswith("/oauth/discovery/keys"):
-            return httpx.Response(200, json={"keys": [_jwk(signing_key.public_key())]})
-        return httpx.Response(404)
-
-    oidc = HackClubOIDC("portal-client", "client-secret", "https://portal.example/auth/callback", transport=httpx.MockTransport(upstream))
-    service = PortalService(repo, oidc, cookie_secure=True)
+    service = PortalService(repo, identity=None, cookie_secure=True)
     app = FastAPI()
     app.include_router(create_portal_router(service))
 
     with TestClient(app, base_url="https://portal.example") as client:
-        start = client.get("/auth/login", params={"invite": raw_invite}, follow_redirects=False)
-        assert start.status_code == 302
-        authorize = parse_qs(urlparse(start.headers["location"]).query)
-        state = authorize["state"][0]
-        nonce = authorize["nonce"][0]
-        assert "openid" in authorize["scope"][0].split()
-        assert "verification_status" not in authorize["scope"][0].split()
-
-        mismatch = client.get("/auth/callback", params={"code": _b64(json.dumps({"nonce": nonce}).encode()), "state": "bad"})
-        assert mismatch.status_code == 400
-
-        callback = client.get("/auth/callback", params={"code": _b64(json.dumps({"nonce": nonce}).encode()), "state": state}, follow_redirects=False)
-        assert callback.status_code == 303
-        assert "HttpOnly" in callback.headers["set-cookie"]
-        assert "Secure" in callback.headers["set-cookie"]
-        assert callback.headers["set-cookie"].lower().find("samesite=lax") >= 0
-        assert client.get("/api/session").json()["role"] == "developer"
-        assert next(item for item in repo.list_invites() if item["id"] == invite["id"])["consumed_at"] is not None
-        assert client.get("/auth/callback", params={"code": "again", "state": state}).status_code == 400
+        assert client.get("/auth/callback").status_code == 404
+        assert client.get("/auth/login").status_code == 405
 
 
 def test_new_identity_without_invite_is_rejected_but_existing_user_can_sign_in(tmp_path):
