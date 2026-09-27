@@ -99,6 +99,47 @@ def test_provider_cap_is_scoped_to_selected_connection_and_period(tmp_path):
     assert repository.reserve_request_budget(owner["id"], first["id"], "offer-b", "conn-b", 100, datetime(2026, 9, 27, 10, tzinfo=timezone.utc), None)
 
 
+def test_operator_connection_catalog_reports_connection_budget_and_usage(tmp_path):
+    repository, owner, key, _ = _budget_setup(tmp_path)
+    repository.set_connection_budget("conn-a", 100, "daily", 20, "operator")
+    repository.record_usage(owner["id"], key["id"], model="model-a", input_tokens=1, output_tokens=1,
+        total_tokens=2, latency_ms=1, status="ok", estimated_cost_usd=0.00000003,
+        amount_nano_usd=30, provider_id="conn-a")
+
+    record = next(item for item in repository.list_operator_connections() if item["id"] == "conn-a")
+
+    assert record["brandSlug"] == "brand-a"
+    assert record["brandName"] == "A"
+    assert record["connectionLabel"] == "A"
+    assert record["providerKind"] == "openai_compatible"
+    assert record["budget"] == {
+        "limitUsd": "0.0000001", "period": "daily", "reserveUsd": "0.00000002",
+        "usedUsd": "0.00000003", "reservedUsd": "0", "remainingUsd": "0.00000005",
+        "resetAt": record["budget"]["resetAt"],
+    }
+    assert record["budget"]["resetAt"]
+
+
+def test_all_usage_filters_run_before_limit_and_do_not_expose_prompt_fields(tmp_path):
+    repository, owner, key, _ = _budget_setup(tmp_path)
+    for model, provider_id, status, occurred_at in (
+        ("alpha", "conn-a", "ok", "2026-09-26T22:30:00+00:00"),
+        ("beta", "conn-b", "error", "2026-09-27T10:00:00+00:00"),
+        ("alpha", "conn-a", "rejected", "2026-09-27T11:00:00+00:00"),
+    ):
+        repository.record_usage(owner["id"], key["id"], model=model, input_tokens=1, output_tokens=1,
+            total_tokens=2, latency_ms=1, status=status, estimated_cost_usd=0.00000001,
+            provider_id=provider_id, occurred_at=occurred_at)
+
+    rows = repository.list_all_usage(limit=1, brand_slug="brand-a", connection_id="conn-a",
+        model="alpha", from_date="2026-09-27", to_date="2026-09-27", outcome="success")
+
+    assert len(rows) == 1
+    assert rows[0]["model_id"] == "alpha"
+    assert rows[0]["status"] == "ok"
+    assert "prompt" not in rows[0] and "completion" not in rows[0]
+
+
 def test_disabled_connection_cannot_receive_a_new_budget_reservation(tmp_path):
     repository, owner, first, _ = _budget_setup(tmp_path)
     with repository.connect() as connection:
