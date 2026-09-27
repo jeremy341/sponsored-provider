@@ -486,13 +486,23 @@ class PortalDatabase:
                 "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='portal_users' AND sql IS NOT NULL"
             )
         ]
-        updated_sql = updated_sql.replace("CREATE TABLE portal_users", "CREATE TABLE portal_users_monthly", 1)
+        updated_sql, table_replacements = re.subn(
+            r"CREATE TABLE(?:\s+IF NOT EXISTS)?\s+portal_users\b",
+            "CREATE TABLE portal_users_monthly",
+            updated_sql,
+            count=1,
+        )
+        if table_replacements != 1:
+            return
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(portal_users)")]
         quoted_columns = ",".join('"' + name.replace('"', '""') + '"' for name in columns)
-        owns_transaction = not conn.in_transaction
-        if owns_transaction:
-            conn.execute("BEGIN IMMEDIATE")
+        if conn.in_transaction:
+            conn.commit()
+        foreign_keys_enabled = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        if foreign_keys_enabled:
+            conn.execute("PRAGMA foreign_keys=OFF")
         try:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(updated_sql)
             conn.execute(
                 f"INSERT INTO portal_users_monthly ({quoted_columns}) SELECT {quoted_columns} FROM portal_users"
@@ -502,13 +512,17 @@ class PortalDatabase:
             conn.execute("ALTER TABLE portal_users_monthly RENAME TO portal_users")
             for statement in index_sql:
                 conn.execute(statement)
+            violations = conn.execute("PRAGMA foreign_key_check").fetchall()
+            if violations:
+                raise sqlite3.IntegrityError("Foreign key violations after portal user migration")
         except BaseException:
-            if owns_transaction:
-                conn.rollback()
+            conn.rollback()
             raise
         else:
-            if owns_transaction:
-                conn.commit()
+            conn.commit()
+        finally:
+            if foreign_keys_enabled:
+                conn.execute("PRAGMA foreign_keys=ON")
 
     def _migrate_provider_discovery_and_prices(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "provider_brands"):
