@@ -48,6 +48,7 @@ def _eligible(offer: CatalogOffer, route: OfferRoute) -> bool:
         and getattr(route, "identity_status", None) == "mapped"
         and getattr(route, "discovery_active", False) is True
         and getattr(route, "discovery_stale", True) is False
+        and getattr(route, "review_required", False) is False
         and getattr(route, "confirmed", False) is True
         and _rates_match(offer, route)
     )

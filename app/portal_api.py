@@ -199,7 +199,7 @@ def create_portal_router(service: PortalService) -> APIRouter:
         if service.models_dev_catalog is None:
             service.models_dev_catalog = await asyncio.to_thread(ModelsDevCatalog.fetch)
         for model in discovered:
-            offer_id = repo.get_offer_id(connection["brand_slug"], model.id)
+            offer_id = repo.get_discovered_offer_id(connection_id, model.id)
             if not offer_id:
                 continue
             match = service.models_dev_catalog.lookup(connection["brand_slug"], model.id)
@@ -736,6 +736,22 @@ def create_portal_router(service: PortalService) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"ok": True, "enabled": data["enabled"]}
+
+    @router.patch("/api/operator/connections/{connection_id}/models/mapping")
+    async def map_discovered_model(connection_id: str, request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        data = await request.json()
+        if not isinstance(data, dict) or not isinstance(data.get("upstreamModelId"), str) or not isinstance(data.get("offerId"), str):
+            raise HTTPException(status_code=422, detail="upstreamModelId and offerId are required strings")
+        try:
+            repo.map_connection_model(connection_id, data["upstreamModelId"], data["offerId"], actor["id"])
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True, "connectionId": connection_id, "upstreamModelId": data["upstreamModelId"],
+                "offerId": data["offerId"], "mappingSource": "manual"}
 
     @router.post("/api/operator/providers", status_code=201)
     async def create_provider(request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):
