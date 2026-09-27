@@ -391,7 +391,12 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raise HTTPException(status_code=422, detail="A valid invitation token is required")
         try:
             user = repo.create_local_account_with_invite(
-                raw_token=token, username=username.strip(), password_hash=encoded, display_name=username.strip()
+                raw_token=token, username=username.strip(), password_hash=encoded, display_name=username.strip(),
+                default_allowance_nano_usd=(
+                    service.settings.default_developer_allowance_nano_usd
+                    if service.settings is not None
+                    else Settings.DEFAULT_DEVELOPER_ALLOWANCE_NANO_USD
+                ),
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail="Invitation is invalid, expired, revoked, exhausted, or requires verified email") from exc
@@ -738,7 +743,7 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raise HTTPException(status_code=404, detail="Developer not found")
         data = await request.json()
         try:
-            allowance_period = {"day": "daily", "week": "weekly", "daily": "daily", "weekly": "weekly", None: None}.get(data.get("allowancePeriod"), "invalid")
+            allowance_period = {"day": "daily", "week": "weekly", "month": "monthly", "daily": "daily", "weekly": "weekly", "monthly": "monthly", None: None}.get(data.get("allowancePeriod"), "invalid")
             amount = data.get("allowanceNanoUsd")
             if "allowanceUsd" in data:
                 allowance_usd = data["allowanceUsd"]

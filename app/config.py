@@ -1,15 +1,18 @@
 from functools import lru_cache
 import json
 import secrets
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from typing import ClassVar
 
 from cryptography.fernet import Fernet
 
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    DEFAULT_DEVELOPER_ALLOWANCE_NANO_USD: ClassVar[int] = 7_000_000_000
     _bootstrap_generated: bool = PrivateAttr(default=False)
     alibaba_api_key: str = ""
     alibaba_base_url: str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
@@ -26,6 +29,7 @@ class Settings(BaseSettings):
     portal_cookie_secure: bool = True
     portal_auth_rate_limit_attempts: int = 5
     portal_auth_rate_limit_window_seconds: int = 900
+    default_developer_allowance_usd: str = "7"
     rate_limit_requests_per_minute: int = 0
     provider_hard_stop_usd: float = 34.70
     provider_warning_usd: float = 25.0
@@ -36,6 +40,21 @@ class Settings(BaseSettings):
     upstream_timeout_seconds: float = 300.0
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+    @field_validator("default_developer_allowance_usd")
+    @classmethod
+    def validate_default_developer_allowance(cls, value: str) -> str:
+        try:
+            amount = Decimal(value)
+        except (InvalidOperation, TypeError):
+            raise ValueError("Default developer allowance must be a decimal USD amount") from None
+        if not amount.is_finite() or amount < 0 or amount * 1_000_000_000 != (amount * 1_000_000_000).to_integral_value():
+            raise ValueError("Default developer allowance must be non-negative and precise to nano-USD")
+        return value
+
+    @property
+    def default_developer_allowance_nano_usd(self) -> int:
+        return int(Decimal(self.default_developer_allowance_usd) * 1_000_000_000)
 
     def model_post_init(self, __context):
         secret_path = Path(self.database_path).with_name("runtime-secrets.json")

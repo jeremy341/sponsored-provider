@@ -208,7 +208,7 @@ class PortalDatabase:
                     role TEXT NOT NULL CHECK(role IN ('operator','developer')),
                     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','suspended')),
                     allowance_usd REAL,
-                    allowance_period TEXT CHECK(allowance_period IS NULL OR allowance_period IN ('daily','weekly')),
+                    allowance_period TEXT CHECK(allowance_period IS NULL OR allowance_period IN ('daily','weekly','monthly')),
                     rpm_limit INTEGER,
                     allowance_timezone TEXT NOT NULL DEFAULT 'UTC',
                     created_at TEXT NOT NULL,
@@ -362,6 +362,7 @@ class PortalDatabase:
             # These nullable reservation snapshot columns are an additive extension
             # to schema 8 and also repair already-initialized schema-8 databases.
             self._ensure_gateway_route_snapshot_columns(conn)
+            self._migrate_monthly_allowance_period(conn)
 
     @staticmethod
     def _ensure_gateway_route_snapshot_columns(conn: sqlite3.Connection) -> None:
@@ -421,7 +422,7 @@ class PortalDatabase:
                 role TEXT NOT NULL CHECK(role IN ('operator','developer')),
                 status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','suspended')),
                 allowance_usd REAL,
-                allowance_period TEXT CHECK(allowance_period IS NULL OR allowance_period IN ('daily','weekly')),
+                allowance_period TEXT CHECK(allowance_period IS NULL OR allowance_period IN ('daily','weekly','monthly')),
                 rpm_limit INTEGER,
                 allowance_timezone TEXT NOT NULL DEFAULT 'UTC',
                 created_at TEXT NOT NULL,
@@ -462,6 +463,52 @@ class PortalDatabase:
             "revoked_by_user_id": "TEXT",
         })
         conn.execute("UPDATE portal_invites SET uses_count=1 WHERE consumed_at IS NOT NULL AND uses_count=0")
+
+    @staticmethod
+    def _migrate_monthly_allowance_period(conn: sqlite3.Connection) -> None:
+        """Rebuild only the constrained user table, preserving its schema and rows."""
+        table = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='portal_users'"
+        ).fetchone()
+        if not table or "'monthly'" in table["sql"]:
+            return
+        old_sql = table["sql"]
+        updated_sql, replacements = re.subn(
+            r"allowance_period(\s+TEXT\s+CHECK\(allowance_period IS NULL OR allowance_period IN \()'daily','weekly'(\)\))",
+            r"allowance_period\1'daily','weekly','monthly'\2",
+            old_sql,
+            count=1,
+        )
+        if replacements != 1:
+            return
+        index_sql = [
+            row["sql"] for row in conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='portal_users' AND sql IS NOT NULL"
+            )
+        ]
+        updated_sql = updated_sql.replace("CREATE TABLE portal_users", "CREATE TABLE portal_users_monthly", 1)
+        columns = [row["name"] for row in conn.execute("PRAGMA table_info(portal_users)")]
+        quoted_columns = ",".join('"' + name.replace('"', '""') + '"' for name in columns)
+        owns_transaction = not conn.in_transaction
+        if owns_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute(updated_sql)
+            conn.execute(
+                f"INSERT INTO portal_users_monthly ({quoted_columns}) SELECT {quoted_columns} FROM portal_users"
+            )
+            conn.execute("PRAGMA defer_foreign_keys=ON")
+            conn.execute("DROP TABLE portal_users")
+            conn.execute("ALTER TABLE portal_users_monthly RENAME TO portal_users")
+            for statement in index_sql:
+                conn.execute(statement)
+        except BaseException:
+            if owns_transaction:
+                conn.rollback()
+            raise
+        else:
+            if owns_transaction:
+                conn.commit()
 
     def _migrate_provider_discovery_and_prices(self, conn: sqlite3.Connection) -> None:
         if not self._table_exists(conn, "provider_brands"):
@@ -886,7 +933,8 @@ class PortalDatabase:
         return {"entitled": True, "can_issue": issued_at is None, "issued_at": issued_at, "invite": invite}
 
     def create_local_account_with_invite(
-        self, *, raw_token: str, username: str, password_hash: str, display_name: str
+        self, *, raw_token: str, username: str, password_hash: str, display_name: str,
+        default_allowance_nano_usd: int | None = None,
     ) -> dict[str, Any]:
         clean_username = username.strip() if isinstance(username, str) else ""
         if not clean_username or len(clean_username) > 64 or any(ord(char) < 32 for char in clean_username):
@@ -894,6 +942,12 @@ class PortalDatabase:
         normalized = clean_username.casefold()
         if not password_hash:
             raise ValueError("Password hash is required")
+        if default_allowance_nano_usd is not None and (
+            isinstance(default_allowance_nano_usd, bool)
+            or not isinstance(default_allowance_nano_usd, int)
+            or default_allowance_nano_usd < 0
+        ):
+            raise ValueError("Default allowance must be non-negative integer nano-USD")
         now = _iso()
         user_id = uuid.uuid4().hex
         token_hash = _digest(raw_token, self.key_pepper)
@@ -911,6 +965,15 @@ class PortalDatabase:
                     "VALUES(?,NULL,0,?,'developer','active',?,?,?,?,?,'argon2id',?)",
                     (user_id, display_name.strip() or clean_username, now, now, clean_username, normalized, password_hash, now),
                 )
+                if default_allowance_nano_usd is not None:
+                    conn.execute(
+                        "INSERT INTO user_allowances(id,user_id,amount_nano_usd,period,timezone,active,created_at) VALUES(?,?,?,'monthly','Europe/Berlin',1,?)",
+                        (uuid.uuid4().hex, user_id, default_allowance_nano_usd, now),
+                    )
+                    conn.execute(
+                        "UPDATE portal_users SET allowance_usd=?,allowance_period='monthly',allowance_timezone='Europe/Berlin' WHERE id=?",
+                        (default_allowance_nano_usd / 1_000_000_000, user_id),
+                    )
                 consumed_count = invite["uses_count"] + 1
                 exhausted_at = now if consumed_count >= invite["max_uses"] else None
                 update = conn.execute(
@@ -1141,8 +1204,8 @@ class PortalDatabase:
     def assign_user_allowance(self, user_id: str, amount_nano_usd: int | None, period: str | None, actor_id: str) -> None:
         if amount_nano_usd is not None and (isinstance(amount_nano_usd, bool) or not isinstance(amount_nano_usd, int) or amount_nano_usd < 0):
             raise ValueError("Allowance must be a non-negative integer number of nano-USD")
-        if period not in (None, "daily", "weekly") or (amount_nano_usd is None) != (period is None):
-            raise ValueError("Allowance amount and daily or weekly period must be set together")
+        if period not in (None, "daily", "weekly", "monthly") or (amount_nano_usd is None) != (period is None):
+            raise ValueError("Allowance amount and daily, weekly, or monthly period must be set together")
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             user = conn.execute("SELECT id FROM portal_users WHERE id=?", (user_id,)).fetchone()
@@ -1312,7 +1375,10 @@ class PortalDatabase:
                     return None
                 used_nano = self._sum_nano_rows(events)
                 reserved_nano = sum(row["amount_nano_usd"] for row in reserved)
-                if used_nano + reserved_nano + estimated_nano_usd > cap:
+                projected_nano_usd = used_nano + reserved_nano + estimated_nano_usd
+                if projected_nano_usd > cap or (
+                    kind == "user" and period == "monthly" and projected_nano_usd == cap
+                ):
                     return None
             conn.execute("""INSERT INTO portal_budget_reservations_v2(
                     id,owner_user_id,key_id,amount_nano_usd,created_at,status,offer_id,
@@ -1435,10 +1501,10 @@ class PortalDatabase:
     def set_user_policy(self, user_id: str, *, allowance_usd: float | None, allowance_period: str | None, rpm_limit: int | None) -> None:
         if allowance_usd is not None and (isinstance(allowance_usd, bool) or not isinstance(allowance_usd, (int, float)) or not math.isfinite(allowance_usd) or allowance_usd < 0):
             raise ValueError("Allowance must be finite and non-negative")
-        if allowance_period not in {None, "daily", "weekly"}:
-            raise ValueError("Allowance period must be daily or weekly")
+        if allowance_period not in {None, "daily", "weekly", "monthly"}:
+            raise ValueError("Allowance period must be daily, weekly, or monthly")
         if allowance_usd is not None and allowance_period is None:
-            raise ValueError("A finite allowance requires a daily or weekly period")
+            raise ValueError("A finite allowance requires a daily, weekly, or monthly period")
         if rpm_limit is not None and (isinstance(rpm_limit, bool) or not isinstance(rpm_limit, int) or rpm_limit < 1):
             raise ValueError("RPM must be positive or unlimited")
         with self.connect() as conn:
@@ -2993,7 +3059,7 @@ class PortalDatabase:
         return value if value not in {"-0", ""} else "0"
 
     def user_period_usage_nano_usd(self, owner_user_id: str, period: str | None) -> tuple[int | None, int]:
-        window = period_window(period, _now()) if period in {"daily", "weekly"} else None
+        window = period_window(period, _now()) if period in {"daily", "weekly", "monthly"} else None
         event_where = "owner_user_id=?"
         reservation_where = "owner_user_id=? AND status='active'"
         event_args: list[Any] = [owner_user_id]
@@ -3003,6 +3069,11 @@ class PortalDatabase:
             reservation_where += " AND julianday(created_at)>=julianday(?)"
             event_args.append(window.start_utc.isoformat())
             reservation_args.append(window.start_utc.isoformat())
+            if window.end_utc:
+                event_where += " AND julianday(occurred_at)<julianday(?)"
+                reservation_where += " AND julianday(created_at)<julianday(?)"
+                event_args.append(window.end_utc.isoformat())
+                reservation_args.append(window.end_utc.isoformat())
         with self.connect() as conn:
             events = conn.execute(f"SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE {event_where}", event_args).fetchall()
             reserved = conn.execute(f"SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE {reservation_where}", reservation_args).fetchall()
@@ -3019,8 +3090,8 @@ class PortalDatabase:
     def user_period_spend_nano_usd(self, owner_user_id: str, period: str | None) -> int:
         window = period_window(period if period in {"daily", "weekly", "monthly", "lifetime"} else "lifetime", _now())
         with self.connect() as conn:
-            events = conn.execute("SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE owner_user_id=? AND julianday(occurred_at)>=julianday(?)", (owner_user_id, window.start_utc.isoformat())).fetchall()
-            reserved = conn.execute("SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE owner_user_id=? AND status='active' AND julianday(created_at)>=julianday(?)", (owner_user_id, window.start_utc.isoformat())).fetchall()
+            events = conn.execute("SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE owner_user_id=? AND julianday(occurred_at)>=julianday(?) AND (julianday(occurred_at)<julianday(?) OR ? IS NULL)", (owner_user_id, window.start_utc.isoformat(), window.end_utc.isoformat() if window.end_utc else None, window.end_utc.isoformat() if window.end_utc else None)).fetchall()
+            reserved = conn.execute("SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE owner_user_id=? AND status='active' AND julianday(created_at)>=julianday(?) AND (julianday(created_at)<julianday(?) OR ? IS NULL)", (owner_user_id, window.start_utc.isoformat(), window.end_utc.isoformat() if window.end_utc else None, window.end_utc.isoformat() if window.end_utc else None)).fetchall()
         return self._sum_nano_rows(events) + sum(row["amount_nano_usd"] for row in reserved)
 
     def list_providers(self) -> list[dict[str, Any]]:
