@@ -1,6 +1,6 @@
 # Sponsored Provider
 
-Small, budget-controlled OpenAI-compatible proxy for an approved Alibaba Cloud Model Studio model.
+Invite-only, budget-controlled OpenAI-compatible gateway with operator and developer portals. Operator-managed providers and their credentials are entered through the portal; developers create personal keys and see only their own request history.
 
 ## Local setup
 
@@ -13,11 +13,11 @@ pytest
 uvicorn app.main:app --reload
 ```
 
-For a zero-configuration start, `.env` is optional. On first launch the app generates `runtime-secrets.json` beside the database (ignored by Git) and uses the saved values for dashboard authentication, upstream-secret encryption, and provider-key hashing. Keep that file private and persistent on Nest. You can then add providers from the `Upstreams` dashboard tab.
+For a local legacy-dashboard start, `.env` is optional. On first launch the app generates `runtime-secrets.json` beside the database (ignored by Git) and uses the saved values for legacy dashboard authentication, upstream-secret encryption, and provider-key hashing. Keep that file private and persistent. The new portal is served from the same FastAPI process after you build `frontend/`.
 
 Open http://127.0.0.1:8000/dashboard for the usage dashboard.
 
-The dashboard accepts the `ADMIN_TOKEN` in its unlock field. It can create one-time provider keys, disable/enable/revoke keys, update the in-process model/budget/rate settings, and trigger or clear the emergency stop. For Nest, keep the service on localhost and use an SSH tunnel so the dashboard is available in your local browser without public admin exposure.
+The legacy `/dashboard` remains available during the staged portal rollout. The portal at `/` uses local usernames, passwords, and server-side secure session cookies; browser code does not store session tokens.
 
 Create a provider key locally:
 
@@ -26,6 +26,18 @@ python -m app.cli keys create --label local-client
 ```
 
 The key is shown once. Do not commit `.env`, the database, or any real credentials.
+
+## Build the portal
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+uvicorn app.main:app --host 127.0.0.1 --port 8080
+```
+
+FastAPI serves the built portal from `/` and its hashed assets from `/assets/`; existing `/v1` paths are unchanged. The development-only preview is `npm run dev -- --host 127.0.0.1` with `?preview=developer` or `?preview=operator`. Preview mode never calls account APIs or displays sample usage.
 
 ## Local account bootstrap and recovery
 
@@ -52,11 +64,11 @@ Hack Club Auth environment settings and OIDC validation were used by the earlier
 
 ## Provider profiles
 
-Set `PROVIDER_SECRET_KEY` once in the server environment. It encrypts upstream credentials stored by the dashboard. After that bootstrap step, use the `Upstreams` tab to add providers with a name, base URL, API key, model discovery, and health check. Provider secrets are never returned by the API.
+The operator portal accepts OpenAI-compatible HTTPS base URLs and API keys. Credentials are encrypted at rest using the generated upstream-secret key and are write-only in the portal. Discovered models start unapproved; an operator must verify and enter per-million input/output pricing before approval. Models without verified prices cannot be used by developer keys.
 
 ## Safety status
 
-The server does not call Alibaba at startup. Tests use mocked HTTP responses. Configure `ALLOWED_MODELS` and official input/output prices before making live calls. The dashboard reports local estimated usage, not a replacement for Alibaba's delayed billing view.
+The server does not call any upstream at startup. Tests use mocked HTTP responses. Usage is a gateway estimate based on request token usage and the price card recorded for the model; it is not a provider invoice or exact upstream balance. Spend reservations and input/output token limits reduce overshoot but cannot guarantee the upstream's exact bill if it reports different usage or ignores generation bounds.
 
 ## API
 
