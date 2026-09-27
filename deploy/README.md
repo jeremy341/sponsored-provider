@@ -20,11 +20,21 @@ For an existing identity-backed operator who needs a local password, run `python
 
 HCA OAuth settings and callback instructions describe the earlier integration only. Local username/password auth is active; the running application does not mount `/auth/callback`, and the portal provides no HCA control. Existing HCA environment values are not needed for local sign-in. See the [Hack Club Auth OIDC guide](https://auth.hackclub.com/docs/oidc-guide) for historical reference.
 
+## Credit and exposure scopes
+
+- Operator-assigned developer allowance is a shared daily or weekly USD budget across all of that developer's keys. It resets in `Europe/Berlin`; unused credit does not roll over.
+- A key may add a stricter spend cap or model allowlist. It cannot increase the developer's allowance or model access.
+- Each upstream connection may have a separate spend cap and safety reserve. A connection's headroom is independent from the user's remaining allowance; both must permit a request.
+- The portal serializes monetary values as decimal USD strings and enforces budgets using integer nano-USD reservations. Displayed cost is a local estimate, not an upstream invoice. Missing token or price data must remain “not reported,” not be presented as free.
+- Do not set a key to “unlimited” as a way to bypass a user allowance or connection cap. The gateway checks every applicable scope before dispatch and settles from reported usage or the conservative reservation estimate.
+
 ## Persistent storage and rollback
 
 The service defaults to `./provider.db` and stores generated `runtime-secrets.json` beside that database. If moving either into a shared directory, stop the service, back up both files, copy them together, update `DATABASE_PATH`, and verify the restored staging copy before changing the live working directory. Starting with a new empty database would make old key/usage records appear to vanish.
 
 Keep `/v1/models` and `/v1/chat/completions` unchanged. A rollback may restore the prior portal/dashboard UI, but do not delete the additive portal tables or usage ledger. Re-enable the old release only after confirming the database remains readable and no request process still uses the new checkout.
+
+For a staging restore rehearsal, copy the database and its matching `runtime-secrets.json` together into a disposable staging directory, preserve the original pair, start only the staging process against those copies, and verify login plus the existing `/v1` and `/dashboard` paths. Do not restore a production backup into the live path during a code rollback, and do not generate replacement secrets for an existing encrypted database: the saved encryption key is required to decrypt configured upstream credentials.
 
 ## Smoke checks before switching the public domain
 
