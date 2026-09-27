@@ -1,5 +1,6 @@
 import hashlib
 from pathlib import Path
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import httpx
@@ -8,6 +9,7 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
+from app.catalog import DiscoveredModel
 from app.database import Database
 from app.main import app, get_portal_db
 from app.portal_db import PortalDatabase
@@ -22,6 +24,7 @@ def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usa
         provider_secret_key=Fernet.generate_key().decode(),
         admin_token="admin-test-token",
         alibaba_api_key="test-upstream",
+        alibaba_base_url="https://1.1.1.1/v1",
         allowed_models="",
         input_price_per_million=1,
         output_price_per_million=1,
@@ -34,9 +37,10 @@ def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usa
     portal = PortalDatabase(database_path, key_pepper=portal_pepper)
     user = portal.upsert_user(subject="member", email="member@example.test", name="Member")
     portal.add_catalog_model(provider_id=profile["id"], model_id="model-a", provider_name="Test upstream", capabilities=["text"], input_price_per_million=1, output_price_per_million=1, price_source="test", approved=True)
-    with portal.connect() as connection:
-        connection.execute("UPDATE provider_connections SET enabled=1 WHERE legacy_profile_id=?", (profile["id"],))
+    connection = portal.register_connection(profile["id"], "test-upstream", "Test upstream", "Primary")
+    portal.apply_discovery(connection.id, [DiscoveredModel("model-a")], datetime.now(timezone.utc))
     issued = portal.create_user_key(user["id"], "Coding agent", allowed_models_mode="all_approved")
+    assert portal.find_gateway_key(issued["api_key"])["effective_model_ids"] == [f"{profile['id']}::model-a"]
     route = respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(200, json={
         "choices": [{"message": {"role": "assistant", "content": "ok"}}],
         "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
@@ -47,7 +51,7 @@ def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usa
             response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {issued['api_key']}"}, json={
                 "model": "model-a", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 10,
             })
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         assert route.called
         events = portal.list_usage(user["id"])
         assert len(events) == 1

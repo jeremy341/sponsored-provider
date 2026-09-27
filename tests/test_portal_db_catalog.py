@@ -230,6 +230,47 @@ def test_legacy_offer_requires_exact_active_discovery_before_routing(tmp_path):
     assert repository.find_gateway_key(key["api_key"])["effective_model_ids"] == []
 
 
+def test_model_availability_changes_only_the_exact_brand_offer(tmp_path):
+    from datetime import datetime, timezone
+
+    from app.catalog import DiscoveredModel
+
+    path = tmp_path / "portal.db"
+    legacy, _ = _legacy_database(path)
+    with legacy.connect() as connection:
+        connection.execute("UPDATE upstream_profiles SET models_json=?,enabled=1 WHERE id='provider-old'", ('["shared-model"]',))
+        connection.execute(
+            "INSERT INTO upstream_profiles(id,name,provider_kind,base_url,encrypted_api_key,models_json,created_at,enabled) VALUES(?,?,?,?,?,?,?,1)",
+            ("provider-second", "Second provider", "openai_compatible", "https://second.example/v1", "encrypted-second", '["shared-model"]', "2026-01-02T00:00:00+00:00"),
+        )
+    repository = PortalDatabase(str(path), key_pepper="p" * 40)
+    first = repository.register_connection("provider-old", "vendor-one", "Vendor One", "Primary")
+    second = repository.register_connection("provider-second", "vendor-two", "Vendor Two", "Primary")
+    for provider_id, name in (("provider-old", "Vendor One"), ("provider-second", "Vendor Two")):
+        repository.add_catalog_model(
+            provider_id=provider_id, model_id="shared-model", provider_name=name, capabilities=["text"],
+            input_price_per_million=1, output_price_per_million=2, price_source="reviewed", approved=True, active=True,
+        )
+    repository.apply_discovery(first.id, [DiscoveredModel("shared-model")], datetime.now(timezone.utc))
+    repository.apply_discovery(second.id, [DiscoveredModel("shared-model")], datetime.now(timezone.utc))
+
+    changed = repository.set_model_active("shared-model", active=False)
+    assert changed == 0
+    with repository.connect() as connection:
+        before_scoped_change = [tuple(row) for row in connection.execute("""SELECT brand.slug,offer.active
+            FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
+            WHERE offer.canonical_model_id='shared-model' ORDER BY brand.slug""")]
+    assert before_scoped_change == [("vendor-one", 1), ("vendor-two", 1)]
+
+    changed = repository.set_model_active("shared-model", active=False, provider_id="provider-old")
+    assert changed == 1
+    with repository.connect() as connection:
+        after_scoped_change = [tuple(row) for row in connection.execute("""SELECT brand.slug,offer.active
+            FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
+            WHERE offer.canonical_model_id='shared-model' ORDER BY brand.slug""")]
+    assert after_scoped_change == [("vendor-one", 0), ("vendor-two", 1)]
+
+
 def test_legacy_model_uses_its_exact_connection_within_multi_connection_brand(tmp_path):
     path = tmp_path / "portal.db"
     legacy, _ = _legacy_database(path)

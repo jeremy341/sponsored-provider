@@ -661,8 +661,10 @@ def create_portal_router(service: PortalService) -> APIRouter:
         try:
             for field in ("inputUsdPerMillion", "outputUsdPerMillion", "cachedInputUsdPerMillion"):
                 value = data.get(field)
-                if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0):
-                    raise ValueError("Prices must be finite non-negative USD per million")
+                if value is not None:
+                    if not isinstance(value, str):
+                        raise ValueError("Prices must be decimal strings in USD per million")
+                    repo._canonical_rate(value)
             evidence = str(data.get("source", "")).strip()
             if not evidence or len(evidence) > 240:
                 raise ValueError("A price source or evidence reference is required")
