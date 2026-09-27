@@ -101,6 +101,12 @@ def test_local_signup_requires_invite_and_creates_an_authenticated_session(tmp_p
     account = repository.get_local_user_by_username("new-user")
     assert account["username_normalized"] == "new-user"
     assert account["password_hash"].startswith("$argon2id$")
+    with repository.connect() as connection:
+        allowance = connection.execute(
+            "SELECT amount_nano_usd,period,timezone,active FROM user_allowances WHERE user_id=?",
+            (account["id"],),
+        ).fetchone()
+    assert tuple(allowance) == (7_000_000_000, "monthly", "Europe/Berlin", 1)
 
 
 def test_auth_request_logs_never_include_credentials_or_session_material(tmp_path, caplog):

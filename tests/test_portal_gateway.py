@@ -1,5 +1,6 @@
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -179,6 +180,49 @@ def test_out_of_budget_rejection_is_logged_without_upstream_dispatch(tmp_path):
         assert prompt not in json.dumps(events)
     finally:
         app.dependency_overrides.clear()
+
+
+@respx.mock
+def test_monthly_allowance_rejects_before_upstream_dispatch(tmp_path):
+    _settings, portal, user, issued, public_model_id, _offer, _connections, _price = _ready_offer_gateway(tmp_path)
+    portal.assign_user_allowance(user["id"], 0, "monthly", "operator")
+    upstream = respx.post("https://1.1.1.1/v1/chat/completions").mock(
+        return_value=httpx.Response(200, json={"choices": []})
+    )
+
+    try:
+        with TestClient(app) as client:
+            response = client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {issued['api_key']}"}, json={
+                "model": public_model_id, "messages": [{"role": "user", "content": "monthly cap"}], "max_tokens": 8,
+            })
+        assert response.status_code == 429
+        assert not upstream.called
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_monthly_allowance_reservations_are_shared_across_user_keys(tmp_path):
+    _settings, portal, user, issued, _model, offer_id, connections, _price = _ready_offer_gateway(tmp_path)
+    second_key = portal.create_user_key(user["id"], "Second monthly key", allowed_models_mode="all_approved")
+    portal.assign_user_allowance(user["id"], 7_000_000_000, "monthly", "operator")
+    now = datetime(2026, 9, 27, 12, tzinfo=timezone.utc)
+    connection_id = connections[0][0].id
+
+    keys = [issued["id"], second_key["id"]]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        concurrent = list(pool.map(
+            lambda key_id: portal.reserve_request_budget(
+                user["id"], key_id, offer_id, connection_id, 4_000_000_000, now, None
+            ),
+            keys,
+        ))
+    assert sum(reservation is not None for reservation in concurrent) == 1
+
+    second = portal.reserve_request_budget(user["id"], second_key["id"], offer_id, connection_id, 2_999_999_999, now, None)
+    blocked = portal.reserve_request_budget(user["id"], issued["id"], offer_id, connection_id, 1, now, None)
+
+    assert second is not None
+    assert blocked is None
 
 
 @respx.mock
