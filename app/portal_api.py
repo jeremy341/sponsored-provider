@@ -10,7 +10,7 @@ import math
 import re
 import socket
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 from typing import Any
 from urllib.parse import urlparse, urlsplit
@@ -111,9 +111,21 @@ def _key_record(key: dict[str, Any]) -> dict[str, Any]:
     model_access = {"mode": "all_approved"} if key["allowed_models_mode"] == "all_approved" else {"mode": "selected", "modelIds": key["allowed_models"]}
     period = {"daily": "day", "weekly": "week", "monthly": "month", "lifetime": "lifetime"}.get(key["spend_period"])
     status = "archived" if key.get("archived_at") else "disabled" if key.get("revoked_at") else "active"
+    spend_limit_nano = key.get("spend_limit_nano_usd")
+    if spend_limit_nano is None and key.get("spend_limit_usd") is not None:
+        spend_limit_nano = PortalDatabase._cap_nano_usd(key["spend_limit_usd"])
+    spend_limit_display = PortalDatabase._format_nano_usd(spend_limit_nano)
+    if spend_limit_nano == 0 and key.get("spend_limit_usd") is not None:
+        spend_limit_display = format(Decimal(str(key["spend_limit_usd"])).normalize(), "f")
+    spend_used_nano = key.get("spend_used_nano_usd")
+    if spend_used_nano is None and key.get("spend_used_usd") is not None:
+        spend_used_nano = PortalDatabase._charge_nano_usd(key["spend_used_usd"])
+
     return {
         "id": key["id"], "label": key["label"], "prefix": key["key_prefix"], "modelAccess": model_access,
-        "spendCapUsd": key["spend_limit_usd"], "spendUsedUsd": key.get("spend_used_usd"), "spendPeriod": period, "spendResetAt": key.get("spend_reset_at"), "rpmLimit": key["rpm_limit"],
+        "spendCapUsd": spend_limit_display,
+        "spendUsedUsd": PortalDatabase._format_nano_usd(spend_used_nano),
+        "spendPeriod": period, "spendResetAt": key.get("spend_reset_at"), "rpmLimit": key["rpm_limit"],
         "createdAt": key["created_at"], "lastUsedAt": key.get("last_used_at"), "status": status,
     }
 
@@ -121,10 +133,13 @@ def _key_record(key: dict[str, Any]) -> dict[str, Any]:
 def _activity_record(event: dict[str, Any], *, operator: bool = False) -> dict[str, Any]:
     status = event["status"]
     status = "success" if status in {"ok", "success"} else status if status in {"error", "rejected", "interrupted"} else "error"
+    token_counts = (event["input_tokens"], event["output_tokens"], event["total_tokens"])
+    token_completeness = "complete" if all(value is not None for value in token_counts) else "partial" if any(value is not None for value in token_counts) else "unknown"
     row = {
         "id": event["id"], "occurredAt": event["occurred_at"], "modelId": event["model_id"],
         "providerName": event["provider_name_snapshot"] or "Unknown provider", "keyLabel": event["key_label_snapshot"],
         "inputTokens": event["input_tokens"], "outputTokens": event["output_tokens"], "totalTokens": event["total_tokens"],
+        "tokenCompleteness": token_completeness, "requestId": event.get("request_id"),
         "estimatedCostUsd": PortalDatabase._format_nano_usd(
             event.get("amount_nano_usd")
             if event.get("amount_nano_usd") is not None
@@ -132,10 +147,11 @@ def _activity_record(event: dict[str, Any], *, operator: bool = False) -> dict[s
         ),
         "costSource": "gateway_estimate" if event["estimated_cost_usd"] is not None else "unknown",
         "status": status, "errorCategory": event["error_category"], "latencyMs": event["latency_ms"],
-        "cachedTokens": event["cached_tokens"], "requestIp": event.get("client_ip"),
+        "cachedTokens": event["cached_tokens"],
     }
     if operator:
         row["userId"] = event.get("owner_user_id")
+        row["requestIp"] = event.get("client_ip")
         row.update({
             "brandSlug": event.get("brand_slug"),
             "brandName": event.get("brand_name") or event.get("brand_snapshot"),
@@ -151,12 +167,24 @@ def _model_usage_record(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _api_model(model: dict[str, Any], *, public_id: bool = False) -> dict[str, Any]:
-    return {
-        "id": model["public_model_id"] if public_id else model["model_id"], "upstreamModelId": model["model_id"], "providerId": model["provider_id"], "providerName": model["provider_name"], "capabilities": model["capabilities"],
-        "inputUsdPerMillion": model["input_price_per_million"], "outputUsdPerMillion": model["output_price_per_million"],
-        "cacheUsdPerMillion": model["cached_input_price_per_million"], "pricingVerified": bool(model["price_source"]),
+    def decimal_rate(value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            return format(Decimal(str(value)).normalize(), "f")
+        except (InvalidOperation, ValueError):
+            return None
+
+    record = {
+        "id": model["public_model_id"] if public_id else model["model_id"], "displayName": model.get("display_name") or model["model_id"],
+        "providerName": model["provider_name"], "capabilities": model["capabilities"],
+        "inputUsdPerMillion": decimal_rate(model["input_price_per_million"]), "outputUsdPerMillion": decimal_rate(model["output_price_per_million"]),
+        "cacheUsdPerMillion": decimal_rate(model["cached_input_price_per_million"]), "pricingVerified": bool(model["price_source"]),
         "priceSource": model["price_source"], "approved": bool(model["approved"]), "available": bool(model["active"]), "syncedAt": model["updated_at"],
     }
+    if not public_id:
+        record.update({"upstreamModelId": model["model_id"], "providerId": model["provider_id"]})
+    return record
 
 
 def _period_start(period: str | None, now: datetime) -> datetime | None:
@@ -618,6 +646,11 @@ def create_portal_router(service: PortalService) -> APIRouter:
         keys = repo.list_user_keys(user["id"])
         activity = repo.list_usage(user["id"], limit=8)
         summary = _dashboard_usage(user["id"])
+        allowance_period = user["allowance_period"]
+        used_nano, reserved_nano = repo.user_period_usage_nano_usd(user["id"], allowance_period)
+        used_nano = used_nano or 0
+        limit_nano = repo.user_allowance_nano_usd(user["id"])
+        consumed_nano = used_nano + reserved_nano
         return {
             "usage": summary if summary["requests"] else None,
             "series": repo.usage_timeseries(user["id"], days=14),
@@ -625,10 +658,13 @@ def create_portal_router(service: PortalService) -> APIRouter:
             "keys": [_key_record(item) for item in keys],
             "recentActivity": [_activity_record(item) for item in activity],
             "allowance": {
-                "usedUsd": summary["allowanceUsedUsd"], "limitUsd": summary["allowanceLimitUsd"],
-                "usedNanoUsd": repo.user_period_spend_nano_usd(user["id"], user["allowance_period"]),
-                "limitNanoUsd": repo.user_allowance_nano_usd(user["id"]),
-                "period": user["allowance_period"], "resetAt": repo.period_reset_at(user["allowance_period"]),
+                "usedUsd": repo._format_nano_usd(used_nano), "reservedUsd": repo._format_nano_usd(reserved_nano) or "0",
+                "consumedUsd": repo._format_nano_usd(consumed_nano) or "0",
+                "limitUsd": repo._format_nano_usd(limit_nano),
+                "remainingUsd": repo._format_nano_usd(max(0, limit_nano - consumed_nano)) if limit_nano is not None else None,
+                "usedNanoUsd": used_nano, "reservedNanoUsd": reserved_nano, "limitNanoUsd": limit_nano,
+                "period": allowance_period, "resetAt": repo.period_reset_at(allowance_period),
+                "source": "gateway estimate and active reservations",
             },
         }
 

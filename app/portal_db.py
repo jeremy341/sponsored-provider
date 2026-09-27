@@ -2020,7 +2020,7 @@ class PortalDatabase:
             rows = conn.execute(query).fetchall()
             normalized_query = """SELECT DISTINCT offer.id offer_id,COALESCE(brand.slug,brand.migration_ref,brand.id) provider_id,
                 brand.migration_ref,
-                brand.name provider_name,offer.canonical_model_id model_id,offer.capabilities_json,
+                brand.name provider_name,offer.display_name display_name,offer.canonical_model_id model_id,offer.capabilities_json,
                 price.input_rate input_price_per_million,
                 price.output_rate output_price_per_million,
                 price.cached_input_rate cached_input_price_per_million,
@@ -2193,7 +2193,7 @@ class PortalDatabase:
         *,
         allowed_models_mode: str = "all_approved",
         allowed_models: list[str] | None = None,
-        spend_limit_usd: float | None = None,
+        spend_limit_usd: str | int | float | None = None,
         spend_period: str | None = None,
         rpm_limit: int | None = None,
     ) -> dict[str, Any]:
@@ -2207,8 +2207,11 @@ class PortalDatabase:
             raise ValueError("Select at least one approved model")
         if allowed_models_mode == "all_approved" and models:
             raise ValueError("All-approved model policy cannot include a pinned model list")
-        if spend_limit_usd is not None and (isinstance(spend_limit_usd, bool) or not isinstance(spend_limit_usd, (int, float)) or not math.isfinite(spend_limit_usd) or spend_limit_usd <= 0):
+        spend_limit_decimal = Decimal(str(spend_limit_usd)) if spend_limit_usd is not None else None
+        if spend_limit_decimal is not None and (not spend_limit_decimal.is_finite() or spend_limit_decimal <= 0):
             raise ValueError("Spend limit must be positive or omitted")
+        spend_limit_nano_usd = self._cap_nano_usd(spend_limit_usd)
+        spend_limit_compat = float(spend_limit_decimal) if spend_limit_decimal is not None else None
         if spend_period is not None and spend_period not in {"daily", "weekly", "monthly", "lifetime"}:
             raise ValueError("Unsupported spend period")
         if (spend_limit_usd is None) != (spend_period is None):
@@ -2224,8 +2227,11 @@ class PortalDatabase:
             user = conn.execute("SELECT * FROM portal_users WHERE id=? AND status='active'", (owner_user_id,)).fetchone()
             if not user:
                 raise PermissionError("Active owner is required")
-            if spend_limit_usd is not None and user["allowance_usd"] is not None:
-                if spend_period != user["allowance_period"] or spend_limit_usd > user["allowance_usd"]:
+            allowance = conn.execute("SELECT amount_nano_usd,period FROM user_allowances WHERE user_id=? AND active=1", (owner_user_id,)).fetchone()
+            allowance_limit_nano = allowance["amount_nano_usd"] if allowance else self._cap_nano_usd(user["allowance_usd"])
+            allowance_period = allowance["period"] if allowance else user["allowance_period"]
+            if spend_limit_nano_usd is not None and allowance_limit_nano is not None:
+                if spend_period != allowance_period or spend_limit_nano_usd > allowance_limit_nano:
                     raise ValueError("A key spend cap cannot exceed or outlive the user allowance")
             if rpm_limit is not None and user["rpm_limit"] is not None and rpm_limit > user["rpm_limit"]:
                 raise ValueError("A key RPM cannot exceed the user-wide RPM")
@@ -2248,13 +2254,28 @@ class PortalDatabase:
                     raise ValueError("One or more selected models are not approved and priced")
                 models = sorted(normalized_models)
             conn.execute("INSERT INTO portal_keys(id,owner_user_id,label,key_prefix,key_hash,allowed_models_mode,allowed_models_json,spend_limit_usd,spend_period,rpm_limit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                         (key_id, owner_user_id, label, raw[:14], _digest(raw, self.key_pepper), allowed_models_mode, json.dumps(models), spend_limit_usd, spend_period, rpm_limit, now))
-        return {"id": key_id, "owner_id": owner_user_id, "label": label, "key_prefix": raw[:14], "api_key": raw, "allowed_models_mode": allowed_models_mode, "allowed_models": models, "spend_limit_usd": spend_limit_usd, "spend_period": spend_period, "rpm_limit": rpm_limit, "created_at": now, "enabled": True}
+                         (key_id, owner_user_id, label, raw[:14], _digest(raw, self.key_pepper), allowed_models_mode, json.dumps(models), spend_limit_compat, spend_period, rpm_limit, now))
+            if spend_limit_nano_usd is not None:
+                conn.execute("INSERT INTO provider_budgets(id,key_id,cap_nano_usd,period,created_at) VALUES(?,?,?,?,?) ON CONFLICT(key_id) DO UPDATE SET cap_nano_usd=excluded.cap_nano_usd,period=excluded.period",
+                             (f"portal-key:{key_id}", key_id, spend_limit_nano_usd, spend_period, now))
+        return {"id": key_id, "owner_id": owner_user_id, "label": label, "key_prefix": raw[:14], "api_key": raw, "allowed_models_mode": allowed_models_mode, "allowed_models": models, "spend_limit_usd": spend_limit_compat, "spend_limit_nano_usd": spend_limit_nano_usd, "spend_period": spend_period, "rpm_limit": rpm_limit, "created_at": now, "enabled": True}
 
     def list_user_keys(self, owner_user_id: str) -> list[dict[str, Any]]:
         with self.connect() as conn:
-            rows = conn.execute("SELECT id,owner_user_id,label,key_prefix,allowed_models_mode,allowed_models_json,spend_limit_usd,spend_period,rpm_limit,created_at,last_used_at,revoked_at,archived_at FROM portal_keys WHERE owner_user_id=? ORDER BY created_at DESC", (owner_user_id,)).fetchall()
-        return [dict(row) | {"allowed_models": json.loads(row["allowed_models_json"]), "enabled": row["revoked_at"] is None and row["archived_at"] is None, "spend_used_usd": self.key_period_spend(owner_user_id, row["id"], row["spend_period"]), "spend_reset_at": self.period_reset_at(row["spend_period"])} for row in rows]
+            rows = conn.execute("SELECT key.id,key.owner_user_id,key.label,key.key_prefix,key.allowed_models_mode,key.allowed_models_json,key.spend_limit_usd,budget.cap_nano_usd spend_limit_nano_usd,key.spend_period,key.rpm_limit,key.created_at,key.last_used_at,key.revoked_at,key.archived_at FROM portal_keys key LEFT JOIN provider_budgets budget ON budget.key_id=key.id WHERE key.owner_user_id=? ORDER BY key.created_at DESC", (owner_user_id,)).fetchall()
+        records = []
+
+        for row in rows:
+            used_nano, reserved_nano = self.key_period_usage_nano_usd(owner_user_id, row["id"], row["spend_period"])
+            records.append(dict(row) | {
+                "allowed_models": json.loads(row["allowed_models_json"]),
+                "enabled": row["revoked_at"] is None and row["archived_at"] is None,
+                "spend_used_usd": self.key_period_spend(owner_user_id, row["id"], row["spend_period"]),
+                "spend_used_nano_usd": (used_nano or 0) + reserved_nano,
+                "spend_reset_at": self.period_reset_at(row["spend_period"]),
+            })
+
+        return records
 
     def find_gateway_key(self, raw_token: str) -> dict[str, Any] | None:
         """Resolve a bearer token for the existing ``/v1`` gateway adapter.
@@ -2301,8 +2322,20 @@ class PortalDatabase:
 
     def get_user_key(self, owner_user_id: str, key_id: str) -> dict[str, Any] | None:
         with self.connect() as conn:
-            row = conn.execute("SELECT id,owner_user_id,label,key_prefix,allowed_models_mode,allowed_models_json,spend_limit_usd,spend_period,rpm_limit,created_at,last_used_at,revoked_at,archived_at FROM portal_keys WHERE owner_user_id=? AND id=?", (owner_user_id, key_id)).fetchone()
-        return dict(row) | {"allowed_models": json.loads(row["allowed_models_json"]), "enabled": row["revoked_at"] is None and row["archived_at"] is None, "spend_used_usd": self.key_period_spend(owner_user_id, row["id"], row["spend_period"]), "spend_reset_at": self.period_reset_at(row["spend_period"])} if row else None
+            row = conn.execute("SELECT key.id,key.owner_user_id,key.label,key.key_prefix,key.allowed_models_mode,key.allowed_models_json,key.spend_limit_usd,budget.cap_nano_usd spend_limit_nano_usd,key.spend_period,key.rpm_limit,key.created_at,key.last_used_at,key.revoked_at,key.archived_at FROM portal_keys key LEFT JOIN provider_budgets budget ON budget.key_id=key.id WHERE key.owner_user_id=? AND key.id=?", (owner_user_id, key_id)).fetchone()
+
+        if not row:
+            return None
+
+        used_nano, reserved_nano = self.key_period_usage_nano_usd(owner_user_id, row["id"], row["spend_period"])
+
+        return dict(row) | {
+            "allowed_models": json.loads(row["allowed_models_json"]),
+            "enabled": row["revoked_at"] is None and row["archived_at"] is None,
+            "spend_used_usd": self.key_period_spend(owner_user_id, row["id"], row["spend_period"]),
+            "spend_used_nano_usd": (used_nano or 0) + reserved_nano,
+            "spend_reset_at": self.period_reset_at(row["spend_period"]),
+        }
 
     def key_period_spend(self, owner_user_id: str, key_id: str, period: str | None) -> float:
         start = self._period_start(period, _now())
@@ -2320,6 +2353,25 @@ class PortalDatabase:
             reserved = conn.execute(reservation_query, reservation_args).fetchone()[0]
         return float(used or 0) + float(reserved or 0)
 
+    def key_period_usage_nano_usd(self, owner_user_id: str, key_id: str, period: str | None) -> tuple[int | None, int]:
+        window = period_window(period if period in {"daily", "weekly", "monthly", "lifetime"} else "lifetime", _now())
+        clauses = ["owner_user_id=?", "key_id=?", "julianday(occurred_at)>=julianday(?)"]
+        event_args: list[Any] = [owner_user_id, key_id, window.start_utc.isoformat()]
+        reserved_clauses = ["owner_user_id=?", "key_id=?", "status='active'", "julianday(created_at)>=julianday(?)"]
+        reserved_args: list[Any] = [owner_user_id, key_id, window.start_utc.isoformat()]
+
+        if window.end_utc:
+            clauses.append("julianday(occurred_at)<julianday(?)")
+            event_args.append(window.end_utc.isoformat())
+            reserved_clauses.append("julianday(created_at)<julianday(?)")
+            reserved_args.append(window.end_utc.isoformat())
+
+        with self.connect() as conn:
+            events = conn.execute(f"SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE {' AND '.join(clauses)}", event_args).fetchall()
+            reserved = conn.execute(f"SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE {' AND '.join(reserved_clauses)}", reserved_args).fetchall()
+
+        return (self._sum_nano_rows(events) if events else None, sum(row["amount_nano_usd"] for row in reserved))
+
     def update_user_key_policy(
         self,
         owner_user_id: str,
@@ -2327,7 +2379,7 @@ class PortalDatabase:
         *,
         allowed_models_mode: str,
         allowed_models: list[str],
-        spend_limit_usd: float | None,
+        spend_limit_usd: str | int | float | None,
         spend_period: str | None,
         rpm_limit: int | None,
     ) -> bool:
@@ -2338,8 +2390,11 @@ class PortalDatabase:
             raise ValueError("All-approved model access cannot include a fixed list")
         if allowed_models_mode == "selected" and not models:
             raise ValueError("Select at least one approved model")
-        if spend_limit_usd is not None and (isinstance(spend_limit_usd, bool) or not isinstance(spend_limit_usd, (int, float)) or not math.isfinite(spend_limit_usd) or spend_limit_usd <= 0):
+        spend_limit_decimal = Decimal(str(spend_limit_usd)) if spend_limit_usd is not None else None
+        if spend_limit_decimal is not None and (not spend_limit_decimal.is_finite() or spend_limit_decimal <= 0):
             raise ValueError("Spend cap must be positive or unlimited")
+        spend_limit_nano_usd = self._cap_nano_usd(spend_limit_usd)
+        spend_limit_compat = float(spend_limit_decimal) if spend_limit_decimal is not None else None
         if (spend_limit_usd is None) != (spend_period is None):
             raise ValueError("Spend cap and reset period must be set together")
         if spend_period is not None and spend_period not in {"daily", "weekly", "monthly", "lifetime"}:
@@ -2354,8 +2409,11 @@ class PortalDatabase:
                 WHERE k.id=? AND k.owner_user_id=? AND k.archived_at IS NULL""", (key_id, owner_user_id)).fetchone()
             if not row:
                 return False
-            if spend_limit_usd is not None and row["allowance_usd"] is not None:
-                if spend_period != row["allowance_period"] or spend_limit_usd > row["allowance_usd"]:
+            allowance = conn.execute("SELECT amount_nano_usd,period FROM user_allowances WHERE user_id=? AND active=1", (owner_user_id,)).fetchone()
+            allowance_limit_nano = allowance["amount_nano_usd"] if allowance else self._cap_nano_usd(row["allowance_usd"])
+            allowance_period = allowance["period"] if allowance else row["allowance_period"]
+            if spend_limit_nano_usd is not None and allowance_limit_nano is not None:
+                if spend_period != allowance_period or spend_limit_nano_usd > allowance_limit_nano:
                     raise ValueError("A key cap cannot exceed or outlive the user allowance")
             if rpm_limit is not None and row["rpm_limit"] is not None and rpm_limit > row["rpm_limit"]:
                 raise ValueError("A key RPM cannot exceed the user-wide RPM")
@@ -2377,7 +2435,12 @@ class PortalDatabase:
                 if len(normalized_models) != len(models):
                     raise ValueError("Selected models must be approved and priced")
                 models = sorted(normalized_models)
-            conn.execute("UPDATE portal_keys SET allowed_models_mode=?,allowed_models_json=?,spend_limit_usd=?,spend_period=?,rpm_limit=? WHERE id=? AND owner_user_id=?", (allowed_models_mode, json.dumps(models), spend_limit_usd, spend_period, rpm_limit, key_id, owner_user_id))
+            conn.execute("UPDATE portal_keys SET allowed_models_mode=?,allowed_models_json=?,spend_limit_usd=?,spend_period=?,rpm_limit=? WHERE id=? AND owner_user_id=?", (allowed_models_mode, json.dumps(models), spend_limit_compat, spend_period, rpm_limit, key_id, owner_user_id))
+            if spend_limit_nano_usd is None:
+                conn.execute("DELETE FROM provider_budgets WHERE key_id=?", (key_id,))
+            else:
+                conn.execute("INSERT INTO provider_budgets(id,key_id,cap_nano_usd,period,created_at) VALUES(?,?,?,?,?) ON CONFLICT(key_id) DO UPDATE SET cap_nano_usd=excluded.cap_nano_usd,period=excluded.period",
+                             (f"portal-key:{key_id}", key_id, spend_limit_nano_usd, spend_period, _iso()))
         return True
 
     def revoke_user_key(self, owner_user_id: str, key_id: str) -> bool:
