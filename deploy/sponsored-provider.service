@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=%h/apps/sponsored-provider/current
 EnvironmentFile=-%h/apps/sponsored-provider/shared/.env
 Environment=DATABASE_PATH=%h/apps/sponsored-provider/shared/provider.db
+Environment=PORTAL_PUBLIC_ORIGIN=https://provider.jeremy-d.hackclub.app
 ExecStart=%h/apps/sponsored-provider/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8090 --workers 1
 Restart=on-failure
 RestartSec=5
