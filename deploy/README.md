@@ -14,6 +14,8 @@ This runbook is deliberately staged. Do not replace or restart the existing Nest
 
 For a clean database, build the portal and run `python -m app.cli auth bootstrap` from the application environment. The command prompts for the first operator's username and password and refuses to create a second initial operator. Operators issue invite links from **People & keys**; the default is five uses and seven days. Developers can create one single-use invite from Home. Invite tokens are shown only once, and the status API never returns them.
 
+When hosted behind Nest's HTTPS proxy, set `PORTAL_PUBLIC_ORIGIN` to the exact public origin (for example, `https://provider.jeremy-d.hackclub.app`). Same-origin checks must compare the browser origin to the public HTTPS site, not the app's internal HTTP listener.
+
 For an existing identity-backed operator who needs a local password, run `python -m app.cli auth adopt-operator --user-id USER_ID` from the protected console. For password recovery, run `python -m app.cli auth reset --username USERNAME`, authenticate with the operator account, and set a new password for the active account. Keep `runtime-secrets.json` persistent because it contains the database key pepper and encryption key for upstream credentials.
 
 ### Hack Club Auth (dormant historical integration)
