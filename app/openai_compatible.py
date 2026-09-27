@@ -27,16 +27,25 @@ def validate_public_https_base_url(value: str) -> str:
         raise ProviderError("Use a public HTTPS base URL without credentials, query, or fragment.", "invalid_upstream", 400)
     if port not in (None, 443) or host.endswith(".") or host.lower() in {"localhost", "localhost.localdomain"}:
         raise ProviderError("Local, ambiguous, and custom-port upstream URLs are not allowed.", "invalid_upstream", 400)
+    _resolve_public_addresses(host, port or 443)
+    return value
+
+
+def _resolve_public_addresses(host: str, port: int) -> list[str]:
     try:
-        addresses = [ipaddress.ip_address(host)]
+        host = host.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ProviderError("The upstream hostname is invalid.", "invalid_upstream", 400) from exc
+    try:
+        records = [ipaddress.ip_address(host)]
     except ValueError:
         try:
-            addresses = [ipaddress.ip_address(item[4][0]) for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)]
+            records = [ipaddress.ip_address(item[4][0]) for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)]
         except (OSError, ValueError) as exc:
             raise ProviderError("The upstream hostname could not be resolved safely.", "invalid_upstream", 400) from exc
-    if not addresses or any(not address.is_global for address in addresses):
+    if not records or any(not address.is_global for address in records):
         raise ProviderError("Upstream host must resolve only to public IP addresses.", "invalid_upstream", 400)
-    return value
+    return list(dict.fromkeys(str(address) for address in records))
 
 
 class OpenAICompatibleClient:
@@ -59,11 +68,29 @@ class OpenAICompatibleClient:
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
         )
 
+    def _pinned_target(self, path: str) -> tuple[str, dict[str, str], dict[str, str]]:
+        parsed = urlsplit(self.base_url)
+        host = parsed.hostname
+        if host is None:
+            raise ProviderError("The upstream URL has no hostname.", "invalid_upstream", 400)
+        port = parsed.port or 443
+        address = _resolve_public_addresses(host, port)[0]
+        # Use a checked literal as the actual URL host so the transport cannot
+        # resolve the provider hostname a second time after validation.
+        base = httpx.URL(self.base_url).copy_with(host=address)
+        target = f"{str(base).rstrip('/')}{path}"
+        sni_hostname = host.encode("idna").decode("ascii")
+        host_header = f"[{sni_hostname}]" if ":" in sni_hostname else sni_hostname
+        if parsed.port is not None:
+            host_header = f"{host_header}:{parsed.port}"
+        return target, {"Host": host_header}, {"sni_hostname": sni_hostname}
+
     async def _get_json(self, path: str, *, error_message: str) -> dict:
-        self.base_url = validate_public_https_base_url(self.base_url)
+        target, headers, extensions = self._pinned_target(path)
         async with self._client() as client:
             try:
-                response = await client.get(f"{self.base_url}{path}")
+                request = client.build_request("GET", target, headers=headers, extensions=extensions)
+                response = await client.send(request)
                 response.raise_for_status()
                 value = response.json()
                 if not isinstance(value, dict):
@@ -78,11 +105,12 @@ class OpenAICompatibleClient:
         return await self._get_json("/models", error_message="Upstream model discovery failed.")
 
     async def chat_completion(self, payload: dict) -> tuple[dict, int]:
-        self.base_url = validate_public_https_base_url(self.base_url)
+        target, headers, extensions = self._pinned_target("/chat/completions")
         started = time.perf_counter()
         async with self._client() as client:
             try:
-                response = await client.post(f"{self.base_url}/chat/completions", json=payload)
+                request = client.build_request("POST", target, json=payload, headers=headers, extensions=extensions)
+                response = await client.send(request)
                 response.raise_for_status()
                 value = response.json()
                 if not isinstance(value, dict):
@@ -94,12 +122,12 @@ class OpenAICompatibleClient:
                 raise ProviderError("The upstream model is unavailable.", "upstream_unavailable", 503) from exc
 
     async def stream_chat_completion(self, payload: dict):
-        self.base_url = validate_public_https_base_url(self.base_url)
+        target, headers, extensions = self._pinned_target("/chat/completions")
         client = self._client()
-        request = client.stream("POST", f"{self.base_url}/chat/completions", json=payload)
         response = None
         try:
-            response = await request.__aenter__()
+            request = client.build_request("POST", target, json=payload, headers=headers, extensions=extensions)
+            response = await client.send(request, stream=True)
             if response.status_code >= 400:
                 raise ProviderError("The upstream model request failed.", "upstream_error", response.status_code)
             async for line in response.aiter_lines():
@@ -108,5 +136,5 @@ class OpenAICompatibleClient:
             raise ProviderError("The upstream model is unavailable.", "upstream_unavailable", 503) from exc
         finally:
             if response is not None:
-                await request.__aexit__(None, None, None)
+                await response.aclose()
             await client.aclose()

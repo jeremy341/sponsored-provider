@@ -323,9 +323,9 @@ def test_new_offer_is_unavailable_until_price_approved_and_enabled(tmp_path):
     assert offer["available"] is False
 
     pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
-        "inputUsdPerMillion": 1,
-        "outputUsdPerMillion": 2,
-        "cachedInputUsdPerMillion": 0.5,
+        "inputUsdPerMillion": "1",
+        "outputUsdPerMillion": "2",
+        "cachedInputUsdPerMillion": "0.5",
         "source": "manual-review",
     })
     assert pending.status_code == 201
@@ -359,23 +359,62 @@ def test_price_change_remains_pending_until_approval(tmp_path):
     assert offers_response.status_code == 200
     offer = next(item for item in offers_response.json() if item["canonicalModelId"] == "model-a")
     initial = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
-        "inputUsdPerMillion": 1, "outputUsdPerMillion": 2, "source": "manual-v1",
+        "inputUsdPerMillion": "1", "outputUsdPerMillion": "2", "source": "manual-v1",
     })
     assert initial.status_code == 201
     assert client.post(f"/api/operator/offers/{offer['id']}/prices/{initial.json()['id']}/approve", headers=headers).status_code == 204
     assert client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True}).status_code == 200
 
     changed = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
-        "inputUsdPerMillion": 3, "outputUsdPerMillion": 4, "source": "manual-v2",
+        "inputUsdPerMillion": "3", "outputUsdPerMillion": "4", "source": "manual-v2",
     })
     assert changed.status_code == 201
     current = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
-    assert current["activePrice"]["inputUsdPerMillion"] == 1
+    assert current["activePrice"]["inputUsdPerMillion"] == "1"
     assert current["pendingPrice"]["id"] == changed.json()["id"]
-    assert current["pendingPrice"]["inputUsdPerMillion"] == 3
+    assert current["pendingPrice"]["inputUsdPerMillion"] == "3"
     client.cookies.clear()
     _login(client, repository, "developer-price-change")
     assert [item["id"] for item in client.get("/api/models").json()] == ["provider::model-a"]
+
+
+def test_offer_price_api_roundtrips_exact_decimal_strings(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "model-a"}]})
+        )
+        created = _create_provider(client, headers)
+    assert created.status_code == 201
+    offers = client.get("/api/operator/offers").json()
+    offer = next(item for item in offers if item["canonicalModelId"] == "model-a")
+
+    input_rate = "0.000000123456789"
+    output_rate = "0.000000000000003"
+    cached_rate = "0.000000000000001"
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": input_rate,
+        "outputUsdPerMillion": output_rate,
+        "cachedInputUsdPerMillion": cached_rate,
+        "source": "manual precision review",
+    })
+
+    assert pending.status_code == 201
+    refreshed = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+    suggestion = refreshed["pendingPrice"]
+    assert suggestion["inputUsdPerMillion"] == input_rate
+    assert suggestion["outputUsdPerMillion"] == output_rate
+    assert suggestion["cachedInputUsdPerMillion"] == cached_rate
+    assert all(isinstance(suggestion[field], str) for field in (
+        "inputUsdPerMillion", "outputUsdPerMillion", "cachedInputUsdPerMillion",
+    ))
+
+    approved = client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers)
+    assert approved.status_code == 204
+    effective = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])["activePrice"]
+    assert effective["inputUsdPerMillion"] == input_rate
+    assert effective["outputUsdPerMillion"] == output_rate
+    assert effective["cachedInputUsdPerMillion"] == cached_rate
 
 
 def test_disabled_offer_is_not_returned_to_developer_catalog(tmp_path):
@@ -390,7 +429,7 @@ def test_disabled_offer_is_not_returned_to_developer_catalog(tmp_path):
     assert offers_response.status_code == 200
     offer = next(item for item in offers_response.json() if item["canonicalModelId"] == "model-a")
     pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
-        "inputUsdPerMillion": 1, "outputUsdPerMillion": 2, "source": "manual-v1",
+        "inputUsdPerMillion": "1", "outputUsdPerMillion": "2", "source": "manual-v1",
     })
     assert pending.status_code == 201
     assert client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers).status_code == 204
@@ -422,7 +461,7 @@ def test_price_approval_does_not_enable_a_disabled_connection(tmp_path):
     assert offers_response.status_code == 200
     offer = next(item for item in offers_response.json() if item["canonicalModelId"] == "model-a")
     pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
-        "inputUsdPerMillion": 1, "outputUsdPerMillion": 2, "source": "manual-v1",
+        "inputUsdPerMillion": "1", "outputUsdPerMillion": "2", "source": "manual-v1",
     })
     assert pending.status_code == 201
     with repository.connect() as connection:

@@ -1316,18 +1316,18 @@ class PortalDatabase:
     def _api_price(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if not row:
             return None
-        return {"id": row["id"], "inputUsdPerMillion": float(row["input_rate"]) if row["input_rate"] is not None else None,
-                "outputUsdPerMillion": float(row["output_rate"]) if row["output_rate"] is not None else None,
-                "cachedInputUsdPerMillion": float(row["cached_input_rate"]) if row["cached_input_rate"] is not None else None,
+        return {"id": row["id"], "inputUsdPerMillion": row["input_rate"],
+                "outputUsdPerMillion": row["output_rate"],
+                "cachedInputUsdPerMillion": row["cached_input_rate"],
                 "source": row["source"]}
 
     @staticmethod
     def _api_suggestion(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if not row:
             return None
-        return {"id": row["id"], "inputUsdPerMillion": float(row["input_rate"]) if row["input_rate"] is not None else None,
-                "outputUsdPerMillion": float(row["output_rate"]) if row["output_rate"] is not None else None,
-                "cachedInputUsdPerMillion": float(row["cached_input_rate"]) if row["cached_input_rate"] is not None else None,
+        return {"id": row["id"], "inputUsdPerMillion": row["input_rate"],
+                "outputUsdPerMillion": row["output_rate"],
+                "cachedInputUsdPerMillion": row["cached_input_rate"],
                 "source": row["source"], "sourceUrl": row["source_url"],
                 "evidence": row["evidence"], "confidence": row["confidence"]}
 
@@ -1438,9 +1438,9 @@ class PortalDatabase:
             normalized_query = """SELECT offer.id offer_id,COALESCE(brand.slug,brand.migration_ref,brand.id) provider_id,
                 brand.migration_ref,
                 brand.name provider_name,offer.canonical_model_id model_id,offer.capabilities_json,
-                CAST(price.input_rate AS REAL) input_price_per_million,
-                CAST(price.output_rate AS REAL) output_price_per_million,
-                CAST(price.cached_input_rate AS REAL) cached_input_price_per_million,
+                price.input_rate input_price_per_million,
+                price.output_rate output_price_per_million,
+                price.cached_input_rate cached_input_price_per_million,
                 price.source price_source,offer.approved,offer.active,offer.updated_at
                 FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
                 JOIN price_versions price ON price.offer_id=offer.id AND price.is_active=1
@@ -1472,12 +1472,49 @@ class PortalDatabase:
             exact = [item for item in eligible if item["model_id"] == model_id]
         return exact[0] if len(exact) == 1 else None
 
-    def set_model_active(self, model_id: str, *, active: bool) -> int:
+    def set_model_active(self, model_id: str, *, active: bool, provider_id: str | None = None) -> int:
         with self.connect() as conn:
-            cursor = conn.execute("UPDATE portal_catalog_models SET active=?,updated_at=? WHERE model_id=?", (int(active), _iso(), model_id))
-            if not active:
-                conn.execute("UPDATE catalog_offers SET active=0,updated_at=? WHERE canonical_model_id=?", (_iso(), model_id))
-                conn.execute("UPDATE offer_routes SET active=0 WHERE offer_id IN (SELECT id FROM catalog_offers WHERE canonical_model_id=?)", (model_id,))
+            conn.execute("BEGIN IMMEDIATE")
+            if provider_id is None:
+                providers = conn.execute("SELECT DISTINCT provider_id FROM portal_catalog_models WHERE model_id=?", (model_id,)).fetchall()
+                if len(providers) != 1:
+                    return 0
+                provider_id = providers[0]["provider_id"]
+            brand = conn.execute("SELECT id FROM provider_brands WHERE migration_ref=?", (provider_id,)).fetchone()
+            if not brand:
+                return 0
+            offer = conn.execute("SELECT id,approved FROM catalog_offers WHERE brand_id=? AND canonical_model_id=?",
+                                 (brand["id"], model_id)).fetchone()
+            if not offer:
+                return 0
+            eligible_routes = []
+            if active and self._table_exists(conn, "upstream_profiles") and offer["approved"]:
+                eligible_routes = conn.execute("""SELECT route.id FROM offer_routes route
+                    JOIN provider_connections connection ON connection.id=route.connection_id
+                        AND connection.brand_id=? AND connection.legacy_profile_id=?
+                    JOIN provider_brands provider ON provider.id=connection.brand_id
+                    JOIN connection_models discovered ON discovered.connection_id=connection.id
+                        AND discovered.upstream_model_id=route.upstream_model_id
+                    WHERE route.offer_id=? AND provider.identity_status='mapped'
+                        AND connection.mapping_status='mapped' AND connection.enabled=1
+                        AND discovered.active=1 AND discovered.is_stale=0
+                        AND EXISTS (SELECT 1 FROM upstream_profiles profile WHERE profile.id=connection.legacy_profile_id)
+                        AND EXISTS (SELECT 1 FROM price_versions price WHERE price.offer_id=route.offer_id AND price.is_active=1)""",
+                    (brand["id"], provider_id, offer["id"])).fetchall()
+                if not eligible_routes:
+                    return 0
+            cursor = conn.execute("""UPDATE portal_catalog_models SET active=?,updated_at=?
+                WHERE provider_id=? AND model_id=?""", (int(active), _iso(), provider_id, model_id))
+            if not cursor.rowcount:
+                return 0
+            conn.execute("UPDATE catalog_offers SET active=?,updated_at=? WHERE id=?", (int(active), _iso(), offer["id"]))
+            if active:
+                route_ids = [route["id"] for route in eligible_routes]
+                placeholders = ",".join("?" for _ in route_ids)
+                conn.execute(f"UPDATE offer_routes SET active=CASE WHEN id IN ({placeholders}) THEN 1 ELSE 0 END WHERE offer_id=?",
+                             (*route_ids, offer["id"]))
+            else:
+                conn.execute("UPDATE offer_routes SET active=0 WHERE offer_id=?", (offer["id"],))
         return cursor.rowcount
 
     def get_runtime_setting(self, key: str, default: Any = None) -> Any:

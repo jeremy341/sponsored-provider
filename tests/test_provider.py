@@ -86,6 +86,7 @@ def test_admin_can_update_guardrails_and_emergency_stop(client):
 @respx.mock
 def test_admin_can_load_models_from_private_upstream_key(client):
     test_client, settings, _ = client
+    settings.alibaba_base_url = "https://1.1.1.1/v1"
     route = respx.get(f"{settings.normalized_base_url}/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "qwen-a"}, {"id": "qwen-a"}, {"id": "qwen-b"}]}))
     response = test_client.get("/api/admin/upstream-models", headers={"X-Admin-Token": "admin"})
     assert response.status_code == 200
@@ -169,6 +170,7 @@ def test_admin_can_block_client_ip_before_key_validation(client):
 @respx.mock
 def test_rate_limit_blocks_before_upstream(client):
     test_client, settings, db = client
+    settings.alibaba_base_url = "https://1.1.1.1/v1"
     settings.rate_limit_requests_per_minute = 1
     raw_key, _ = db.create_key("test")
     respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(503, json={"error": "busy"}))
@@ -181,6 +183,7 @@ def test_rate_limit_blocks_before_upstream(client):
 @respx.mock
 def test_chat_proxy_forwards_allowlisted_model_and_records_usage(client):
     test_client, settings, db = client
+    settings.alibaba_base_url = "https://1.1.1.1/v1"
     raw_key, _ = db.create_key("test")
     route = respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(200, json={"id": "chat-1", "choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}}))
     response = test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json={"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]})
@@ -206,6 +209,7 @@ def test_key_policy_can_require_approval_and_limit_models(client):
 @respx.mock
 def test_zero_key_rpm_means_unlimited_not_inherit_global_limit(client):
     test_client, settings, db = client
+    settings.alibaba_base_url = "https://1.1.1.1/v1"
     settings.rate_limit_requests_per_minute = 1
     raw_key, metadata = db.create_key("unlimited-rpm")
     test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"requests_per_minute": 0})
