@@ -915,3 +915,159 @@ def test_route_mutations_require_operator_role(tmp_path):
     response = client.patch("/api/operator/offers/offer-id/routes", json={"connectionIds": []})
 
     assert response.status_code == 403
+
+
+def _approve_offer_price(client, headers, offer, *, input_rate="1", output_rate="2"):
+    pending = client.patch(f"/api/operator/offers/{offer['id']}/price", headers=headers, json={
+        "inputUsdPerMillion": input_rate,
+        "outputUsdPerMillion": output_rate,
+        "source": "operator-reviewed test price",
+    })
+    assert pending.status_code == 201
+    approved = client.post(f"/api/operator/offers/{offer['id']}/prices/{pending.json()['id']}/approve", headers=headers)
+    assert approved.status_code == 204
+
+
+def test_operator_maps_alias_to_existing_same_brand_offer_and_mapping_survives_sync(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=True) as router:
+        discovery = router.get("https://93.184.216.34/v1/models").mock(side_effect=[
+            httpx.Response(200, json={"data": [{"id": "chat-alias"}]}),
+            httpx.Response(200, json={"data": [{"id": "canonical-v1"}]}),
+            httpx.Response(200, json={"data": [{"id": "chat-alias"}]}),
+        ])
+        alias_connection = _create_provider(client, headers, name="Acme alias", brand_slug="acme")
+        canonical_connection = _create_provider(client, headers, name="Acme primary", brand_slug="acme")
+        raw_offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "chat-alias")
+        _approve_offer_price(client, headers, raw_offer)
+        assert client.patch(f"/api/operator/offers/{raw_offer['id']}/availability", headers=headers, json={"enabled": True}).status_code == 200
+        canonical_offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "canonical-v1")
+        _approve_offer_price(client, headers, canonical_offer)
+        mapped = client.patch(
+            f"/api/operator/connections/{alias_connection.json()['id']}/models/mapping",
+            headers=headers,
+            json={"upstreamModelId": "chat-alias", "offerId": canonical_offer["id"]},
+        )
+        synced = client.post(f"/api/operator/providers/{alias_connection.json()['id']}/sync", headers=headers)
+
+    assert discovery.call_count == 3
+    assert alias_connection.status_code == canonical_connection.status_code == 201
+    assert mapped.status_code == 200
+    assert synced.status_code == 200
+    with repository.connect() as connection:
+        discovery_row = connection.execute(
+            "SELECT canonical_model_id,mapping_source FROM connection_models WHERE connection_id=? AND upstream_model_id='chat-alias'",
+            (alias_connection.json()["id"],),
+        ).fetchone()
+        alias_route = connection.execute(
+            "SELECT offer_id,upstream_model_id FROM offer_routes WHERE connection_id=?",
+            (alias_connection.json()["id"],),
+        ).fetchone()
+        preserved_raw_offer = connection.execute(
+            "SELECT active FROM catalog_offers WHERE brand_id=(SELECT brand_id FROM provider_connections WHERE id=?) AND canonical_model_id='chat-alias'",
+            (alias_connection.json()["id"],),
+        ).fetchone()
+    assert tuple(discovery_row) == ("canonical-v1", "manual")
+    assert tuple(alias_route) == (canonical_offer["id"], "chat-alias")
+    assert preserved_raw_offer is not None and preserved_raw_offer["active"] == 1
+    raw_offer_view = next(item for item in client.get("/api/operator/offers").json() if item["id"] == raw_offer["id"])
+    assert raw_offer_view["available"] is False and raw_offer_view["routes"] == []
+    enabled = client.patch(f"/api/operator/offers/{canonical_offer['id']}/availability", headers=headers, json={"enabled": True})
+    assert enabled.status_code == 200
+    client.cookies.clear()
+    _login(client, repository, "alias-mapping-developer")
+    assert [model["id"] for model in client.get("/api/models").json()] == ["acme::canonical-v1"]
+
+
+def test_operator_cannot_map_discovered_model_to_another_brand(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            side_effect=[
+                httpx.Response(200, json={"data": [{"id": "alias-model"}]}),
+                httpx.Response(200, json={"data": [{"id": "canonical-model"}]}),
+            ]
+        )
+        source = _create_provider(client, headers, name="Source", brand_slug="brand-one")
+        target = _create_provider(client, headers, name="Target", brand_slug="brand-two")
+    offer = next(item for item in client.get("/api/operator/offers").json() if item["brandSlug"] == "brand-two")
+
+    response = client.patch(
+        f"/api/operator/connections/{source.json()['id']}/models/mapping", headers=headers,
+        json={"upstreamModelId": "alias-model", "offerId": offer["id"]},
+    )
+
+    assert response.status_code == 422
+
+
+def test_manual_model_mapping_requires_operator_role_and_csrf(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    _login(client, repository, "mapping-developer")
+    path = "/api/operator/connections/connection-id/models/mapping"
+    assert client.patch(path, json={"upstreamModelId": "raw-id", "offerId": "offer-id"}).status_code == 403
+    client.cookies.clear()
+    _login(client, repository, "mapping-operator", role="operator")
+    assert client.patch(path, json={"upstreamModelId": "raw-id", "offerId": "offer-id"}).status_code == 403
+
+
+def test_stale_route_requires_reconfirmation_after_rediscovery(tmp_path):
+    client, repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=True) as router:
+        discovery = router.get("https://93.184.216.34/v1/models").mock(side_effect=[
+            httpx.Response(200, json={"data": [{"id": "model-a"}]}),
+            httpx.Response(200, json={"data": []}),
+            httpx.Response(200, json={"data": [{"id": "model-a"}]}),
+        ])
+        created = _create_provider(client, headers, brand_slug="acme")
+        offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "model-a")
+        _approve_offer_price(client, headers, offer)
+        assert client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True}).status_code == 200
+        missing = client.post(f"/api/operator/providers/{created.json()['id']}/sync", headers=headers)
+        stale_offer = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+        with repository.connect() as connection:
+            route_id = connection.execute("SELECT id FROM offer_routes WHERE offer_id=?", (offer["id"],)).fetchone()["id"]
+        returned = client.post(f"/api/operator/providers/{created.json()['id']}/sync", headers=headers)
+        rediscovered_offer = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+
+    assert discovery.call_count == 3
+    assert missing.status_code == returned.status_code == 200
+    assert stale_offer["available"] is False
+    assert stale_offer["routes"][0]["stale"] is True and stale_offer["routes"][0]["reviewRequired"] is True
+    assert rediscovered_offer["available"] is False
+    assert rediscovered_offer["routes"][0]["stale"] is False
+    assert rediscovered_offer["routes"][0]["reviewRequired"] is True
+    reconfirmed = client.patch(f"/api/operator/routes/{route_id}/availability", headers=headers, json={"enabled": True})
+    assert reconfirmed.status_code == 200
+    final_offer = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+    assert final_offer["routes"][0]["reviewRequired"] is False
+    assert final_offer["available"] is True
+
+
+def test_operator_offer_response_lists_manageable_route_ids_without_credentials(tmp_path):
+    client, _repository, _legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=False) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "vendor/raw-model-v2"}]})
+        )
+        created = _create_provider(client, headers, brand_slug="acme", connection_label="Private EU key")
+    offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "vendor/raw-model-v2")
+
+    assert len(offer["routes"]) == 1
+    route = offer["routes"][0]
+    assert route["id"]
+    assert route["connectionId"] == created.json()["id"]
+    assert route["connectionLabel"] == "Private EU key"
+    assert route["upstreamModelId"] == "vendor/raw-model-v2"
+    assert route["order"] == 0
+    assert route["enabled"] is True and route["active"] is True
+    assert route["connectionEnabled"] is True
+    assert route["stale"] is False and route["reviewRequired"] is False
+    assert route["priceStatus"] == "unconfirmed"
+    disabled = client.patch(f"/api/operator/routes/{route['id']}/availability", headers=headers, json={"enabled": False})
+    assert disabled.status_code == 200
+    updated_offer = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+    assert len(updated_offer["routes"]) == 1
+    assert updated_offer["routes"][0]["enabled"] is False
+    response = client.get("/api/operator/offers")
+    assert "provider-secret-never-return" not in response.text
+    assert "encrypted_api_key" not in response.text

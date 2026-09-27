@@ -54,7 +54,7 @@ def test_local_auth_migration_preserves_hca_identity_invite_history_and_is_idemp
     assert "max_uses" in invite_columns
     assert "uses_count" in invite_columns
     assert "revoked_at" in invite_columns
-    assert migrations[-1][0] == 6
+    assert migrations[-1][0] == 7
     assert user_before == ("legacy-user", "ident!hca-subject", "legacy@example.test", 1, "Legacy HCA", "developer", "2026-01-04", "2026-02-05")
     assert invite_before == ("legacy-invite", "hashed-token", "legacy-operator", "legacy@example.test", "2027-01-01", "2026-01-05", "legacy-user", "2026-01-04")
 
