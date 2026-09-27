@@ -4,7 +4,7 @@ from argon2 import PasswordHasher, Type, extract_parameters
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 
 
-MIN_PASSWORD_LENGTH = 12
+MIN_PASSWORD_LENGTH = 8
 MAX_PASSWORD_BYTES = 1024
 _hasher = PasswordHasher(time_cost=2, memory_cost=19_456, parallelism=1, hash_len=32, salt_len=16, type=Type.ID)
 _dummy_hash = _hasher.hash("local-auth timing equalizer")

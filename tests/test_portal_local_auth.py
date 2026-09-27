@@ -42,6 +42,13 @@ def test_password_hash_uses_argon2id_and_verifies_password():
     assert not verify_password("wrong password", encoded)
 
 
+def test_password_policy_accepts_eight_character_passwords():
+    encoded = hash_password("eight888")
+
+    assert encoded.startswith("$argon2id$")
+    assert verify_password("eight888", encoded)
+
+
 def test_password_verification_rejects_empty_or_malformed_hashes():
     assert not verify_password("local-auth timing equalizer", "")
     assert not verify_password("correct horse battery staple", "not-an-argon2-hash")
@@ -71,7 +78,7 @@ def test_argon2_rejected_hash_performs_dummy_work_after_parameter_parse(monkeypa
 
 
 def test_password_policy_rejects_short_and_oversized_passwords():
-    for password in ("short", "x" * 1025):
+    for password in ("1234567", "x" * 1025):
         try:
             hash_password(password)
         except PasswordPolicyError:
