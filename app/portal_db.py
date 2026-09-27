@@ -23,7 +23,7 @@ from typing import Any
 
 from app.catalog import DiscoveredModel, PriceSuggestion
 from app.periods import period_window
-from app.routing import public_model_id, resolve_offer_routes
+from app.routing import public_model_id as format_public_model_id, resolve_offer_routes
 
 
 def _now() -> datetime:
@@ -99,6 +99,22 @@ class OfferRoute:
 
 
 @dataclass(frozen=True)
+class ResolvedOffer:
+    id: str
+    public_model_id: str
+    brand_id: str
+    brand_slug: str
+    provider_name: str
+    canonical_model_id: str
+    capabilities: tuple[str, ...]
+    price_version_id: str
+    input_rate: str
+    output_rate: str
+    cached_input_rate: str | None
+    routes: tuple[OfferRoute, ...]
+
+
+@dataclass(frozen=True)
 class PriceVersion:
     id: str
     offer_id: str
@@ -135,6 +151,10 @@ class BudgetReservation:
     connection_id: str | None = None
 
 
+class BudgetModelPolicyChanged(ValueError):
+    """The selected model no longer satisfies the key policy at reservation time."""
+
+
 @dataclass(frozen=True)
 class UsageFields:
     model_id: str | None = None
@@ -143,7 +163,10 @@ class UsageFields:
     total_tokens: int | None = None
     cached_tokens: int | None = None
     status: str = "success"
+    stream: bool = False
+    error_category: str | None = None
     latency_ms: int | None = None
+    client_ip: str | None = None
     price_version_id: str | None = None
     price_snapshot: dict[str, Any] | None = None
     request_id: str | None = None
@@ -334,6 +357,15 @@ class PortalDatabase:
                 if version not in applied:
                     migration(conn)
                     conn.execute("INSERT INTO portal_schema_migrations(version,applied_at) VALUES(?,?)", (version, _iso()))
+            # These nullable reservation snapshot columns are an additive extension
+            # to schema 8 and also repair already-initialized schema-8 databases.
+            self._ensure_gateway_route_snapshot_columns(conn)
+
+    @staticmethod
+    def _ensure_gateway_route_snapshot_columns(conn: sqlite3.Connection) -> None:
+        PortalDatabase._add_columns(conn, "portal_budget_reservations_v2", {
+            "public_model_id": "TEXT", "route_snapshot_json": "TEXT",
+        })
 
     @staticmethod
     def _migrate_ordered_offer_routes(conn: sqlite3.Connection) -> None:
@@ -1171,7 +1203,7 @@ class PortalDatabase:
                 pass
         return settled
 
-    def reserve_request_budget(self, owner_user_id: str, key_id: str, offer_id: str, connection_id: str, estimated_nano_usd: int, now: datetime, global_limit_nano_usd: int | None) -> BudgetReservation | None:
+    def reserve_request_budget(self, owner_user_id: str, key_id: str, offer_id: str, connection_id: str, estimated_nano_usd: int, now: datetime, global_limit_nano_usd: int | None, *, public_model_id: str | None = None) -> BudgetReservation | None:
         if isinstance(estimated_nano_usd, bool) or not isinstance(estimated_nano_usd, int) or estimated_nano_usd < 0:
             raise ValueError("Estimate must be a non-negative integer number of nano-USD")
         if now.tzinfo is None or now.utcoffset() is None:
@@ -1180,14 +1212,38 @@ class PortalDatabase:
         reservation_id = uuid.uuid4().hex
         with self.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            key = conn.execute("SELECT k.owner_user_id,k.spend_limit_usd,k.spend_period,u.status FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id WHERE k.id=? AND k.owner_user_id=? AND k.revoked_at IS NULL AND k.archived_at IS NULL", (key_id, owner_user_id)).fetchone()
+            key = conn.execute("SELECT k.owner_user_id,k.spend_limit_usd,k.spend_period,k.allowed_models_mode,k.allowed_models_json,u.status FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id WHERE k.id=? AND k.owner_user_id=? AND k.revoked_at IS NULL AND k.archived_at IS NULL", (key_id, owner_user_id)).fetchone()
             connection = conn.execute("SELECT c.id FROM provider_connections c JOIN provider_brands b ON b.id=c.brand_id WHERE c.id=? AND c.enabled=1 AND c.mapping_status='mapped' AND b.identity_status='mapped'", (connection_id,)).fetchone()
             if not key or key["status"] != "active" or not connection:
                 return None
-            price = conn.execute("SELECT price.id,price.input_rate,price.output_rate,price.cached_input_rate,price.rate_unit,offer.canonical_model_id FROM price_versions price JOIN catalog_offers offer ON offer.id=price.offer_id WHERE price.offer_id=? AND price.is_active=1 AND offer.approved=1 AND offer.active=1", (offer_id,)).fetchone()
-            route = conn.execute("SELECT 1 FROM offer_routes WHERE offer_id=? AND connection_id=? AND active=1", (offer_id, connection_id)).fetchone()
+            price = conn.execute("SELECT price.id,price.input_rate,price.output_rate,price.cached_input_rate,price.rate_unit,offer.canonical_model_id,brand.slug,brand.migration_ref FROM price_versions price JOIN catalog_offers offer ON offer.id=price.offer_id JOIN provider_brands brand ON brand.id=offer.brand_id WHERE price.offer_id=? AND price.is_active=1 AND offer.approved=1 AND offer.active=1", (offer_id,)).fetchone()
+            route = conn.execute("""SELECT route.id route_id,route.upstream_model_id,offer.brand_id,
+                    offer.canonical_model_id,brand.name provider_name
+                FROM offer_routes route JOIN catalog_offers offer ON offer.id=route.offer_id
+                JOIN provider_brands brand ON brand.id=offer.brand_id
+                WHERE route.offer_id=? AND route.connection_id=? AND route.active=1""", (offer_id, connection_id)).fetchone()
             if not price or not route:
                 return None
+            if public_model_id is not None:
+                current_ids = {
+                    format_public_model_id(scope, price["canonical_model_id"])
+                    for scope in (price["slug"], price["migration_ref"]) if scope
+                }
+                selected_ids = set(json.loads(key["allowed_models_json"] or "[]"))
+                if public_model_id not in current_ids or (
+                    key["allowed_models_mode"] == "selected" and not current_ids.intersection(selected_ids)
+                ):
+                    raise BudgetModelPolicyChanged("The selected offer no longer satisfies the key model policy")
+            route_snapshot = {
+                "connection_id": connection_id,
+                "offer_id": offer_id,
+                "offer_route_id": route["route_id"],
+                "upstream_model_id": route["upstream_model_id"],
+                "brand_id": route["brand_id"],
+                "provider_name": route["provider_name"],
+                "canonical_model_id": route["canonical_model_id"],
+                "public_model_id": public_model_id,
+            }
             price_snapshot = json.dumps({"input_rate": price["input_rate"], "output_rate": price["output_rate"], "cached_input_rate": price["cached_input_rate"], "rate_unit": price["rate_unit"]}, sort_keys=True)
             user_allowance = conn.execute("SELECT amount_nano_usd,period FROM user_allowances WHERE user_id=? AND active=1", (owner_user_id,)).fetchone()
             if user_allowance:
@@ -1248,7 +1304,13 @@ class PortalDatabase:
                 reserved_nano = sum(row["amount_nano_usd"] for row in reserved)
                 if used_nano + reserved_nano + estimated_nano_usd > cap:
                     return None
-            conn.execute("INSERT INTO portal_budget_reservations_v2(id,owner_user_id,key_id,amount_nano_usd,created_at,status,offer_id,connection_id,price_version_id,price_snapshot_json) VALUES(?,?,?,?,?,'active',?,?,?,?)", (reservation_id, owner_user_id, key_id, estimated_nano_usd, _iso(now), offer_id, connection_id, price["id"], price_snapshot))
+            conn.execute("""INSERT INTO portal_budget_reservations_v2(
+                    id,owner_user_id,key_id,amount_nano_usd,created_at,status,offer_id,
+                    connection_id,price_version_id,price_snapshot_json,public_model_id,route_snapshot_json
+                ) VALUES(?,?,?,?,?,'active',?,?,?,?,?,?)""",
+                (reservation_id, owner_user_id, key_id, estimated_nano_usd, _iso(now), offer_id,
+                 connection_id, price["id"], price_snapshot, public_model_id,
+                 json.dumps(route_snapshot, sort_keys=True)))
         return BudgetReservation(reservation_id, estimated_nano_usd, "active", owner_user_id, key_id, connection_id)
 
     def release_request_budget(self, reservation_id: str, *, delivery_known_absent: bool) -> bool:
@@ -1258,7 +1320,17 @@ class PortalDatabase:
             result = conn.execute("UPDATE portal_budget_reservations_v2 SET status='released' WHERE id=? AND status='active'", (reservation_id,))
             return result.rowcount == 1
 
-    def settle_request_budget(self, reservation_id: str, charged_nano_usd: int, usage_fields: UsageFields | dict[str, Any] | None) -> None:
+    def settle_request_budget(
+        self,
+        reservation_id: str,
+        charged_nano_usd: int,
+        usage_fields: UsageFields | dict[str, Any] | None,
+        *,
+        connection_id: str | None = None,
+        offer_id: str | None = None,
+        upstream_model_id: str | None = None,
+        price_version_id: str | None = None,
+    ) -> None:
         if isinstance(charged_nano_usd, bool) or not isinstance(charged_nano_usd, int) or charged_nano_usd < 0:
             raise ValueError("Charge must be a non-negative integer number of nano-USD")
         fields = usage_fields if isinstance(usage_fields, UsageFields) else UsageFields(**usage_fields) if usage_fields else UsageFields(status="interrupted")
@@ -1267,9 +1339,31 @@ class PortalDatabase:
             reservation = conn.execute("SELECT * FROM portal_budget_reservations_v2 WHERE id=?", (reservation_id,)).fetchone()
             if not reservation or reservation["status"] != "active":
                 raise ValueError("Budget reservation is not active")
+            expected = (connection_id, offer_id, price_version_id)
+            stored = (reservation["connection_id"], reservation["offer_id"], reservation["price_version_id"])
+            if any(value is not None for value in expected) and expected != stored:
+                raise ValueError("Budget reservation route snapshot does not match settlement")
             key = conn.execute("SELECT k.label,u.display_name,u.email FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id WHERE k.id=? AND k.owner_user_id=?", (reservation["key_id"], reservation["owner_user_id"])).fetchone()
             if not key:
                 raise LookupError("Reservation owner key no longer exists")
+            route = conn.execute("""SELECT route.id route_id,offer.brand_id,offer.canonical_model_id,
+                    brand.name provider_name,route.upstream_model_id
+                FROM offer_routes route JOIN catalog_offers offer ON offer.id=route.offer_id
+                JOIN provider_brands brand ON brand.id=offer.brand_id
+                WHERE route.offer_id=? AND route.connection_id=?
+                    AND (? IS NULL OR route.upstream_model_id=?)
+                ORDER BY route.sort_order,route.id LIMIT 1""",
+                (reservation["offer_id"], reservation["connection_id"], upstream_model_id, upstream_model_id)).fetchone() if reservation["offer_id"] and reservation["connection_id"] else None
+            saved_route = json.loads(reservation["route_snapshot_json"]) if reservation["route_snapshot_json"] else None
+            if saved_route:
+                route = {
+                    "route_id": saved_route["offer_route_id"], "brand_id": saved_route["brand_id"],
+                    "canonical_model_id": saved_route["canonical_model_id"],
+                    "provider_name": saved_route["provider_name"],
+                    "upstream_model_id": saved_route["upstream_model_id"],
+                }
+            if upstream_model_id is not None and (not route or route["upstream_model_id"] != upstream_model_id):
+                raise ValueError("Usage route does not match the reserved upstream model")
             event_id = uuid.uuid4().hex
             snapshot = json.loads(reservation["price_snapshot_json"]) if reservation["price_snapshot_json"] else None
             if snapshot and fields.input_tokens is not None and fields.output_tokens is not None and snapshot.get("input_rate") is not None and snapshot.get("output_rate") is not None:
@@ -1278,10 +1372,50 @@ class PortalDatabase:
                 charged_nano_usd = rate_cost_nano_usd(max(fields.input_tokens - cached, 0), cached, fields.output_tokens, Decimal(snapshot["input_rate"]), Decimal(snapshot["output_rate"]), Decimal(snapshot["cached_input_rate"]) if snapshot.get("cached_input_rate") is not None else None)
             price_version_id = reservation["price_version_id"]
             charge_usd = charged_nano_usd / 1_000_000_000
-            conn.execute("""INSERT INTO portal_usage_events(id,owner_user_id,owner_name_snapshot,owner_email_snapshot,key_id,key_label_snapshot,provider_id,model_id,occurred_at,status,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,estimated_cost_usd,origin,amount_nano_usd,offer_route_id,price_version_id,canonical_model_id,price_snapshot_v2_json,price_snapshot_json,request_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (event_id, reservation["owner_user_id"], key["display_name"], key["email"], reservation["key_id"], key["label"], reservation["connection_id"], fields.model_id or "unknown", reservation["created_at"], fields.status, fields.latency_ms, fields.input_tokens, fields.output_tokens, fields.total_tokens, fields.cached_tokens, charge_usd, "gateway", charged_nano_usd, None, price_version_id, fields.model_id, json.dumps(snapshot) if snapshot else None, json.dumps(snapshot) if snapshot else None, fields.request_id))
+            route_snapshot = (saved_route or {"connection_id": reservation["connection_id"], "offer_id": reservation["offer_id"],
+                               "offer_route_id": route["route_id"], "upstream_model_id": route["upstream_model_id"]}
+                              if route else None)
+            canonical_model_id = route["canonical_model_id"] if route else fields.model_id
+            conn.execute("""INSERT INTO portal_usage_events(
+                    id,owner_user_id,owner_name_snapshot,owner_email_snapshot,key_id,key_label_snapshot,
+                    provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,
+                    output_tokens,total_tokens,cached_tokens,stream,estimated_cost_usd,origin,amount_nano_usd,
+                    brand_id,canonical_model_id,offer_route_id,price_version_id,brand_snapshot,model_snapshot,
+                    route_snapshot_json,price_snapshot_v2_json,price_snapshot_json,client_ip,request_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (event_id, reservation["owner_user_id"], key["display_name"], key["email"], reservation["key_id"],
+                 key["label"], reservation["connection_id"], route["provider_name"] if route else None,
+                 canonical_model_id or "unknown", reservation["created_at"], fields.status, fields.error_category, fields.latency_ms,
+                 fields.input_tokens, fields.output_tokens, fields.total_tokens, fields.cached_tokens, int(fields.stream),
+                 charge_usd, "gateway", charged_nano_usd, route["brand_id"] if route else None,
+                 canonical_model_id, route["route_id"] if route else None, price_version_id,
+                 route["provider_name"] if route else None, canonical_model_id,
+                 json.dumps(route_snapshot, sort_keys=True) if route_snapshot else None,
+                 json.dumps(snapshot, sort_keys=True) if snapshot else None,
+                 json.dumps(snapshot, sort_keys=True) if snapshot else None, fields.client_ip, fields.request_id))
             conn.execute("UPDATE portal_budget_reservations_v2 SET status='settled',settlement_event_id=? WHERE id=? AND status='active'", (event_id, reservation_id))
+
+    def record_route_usage(
+        self,
+        reservation_id: str,
+        *,
+        connection_id: str,
+        offer_id: str,
+        upstream_model_id: str,
+        price_version_id: str,
+        charged_nano_usd: int,
+        usage_fields: UsageFields | dict[str, Any] | None,
+    ) -> int:
+        self.settle_request_budget(
+            reservation_id, charged_nano_usd, usage_fields,
+            connection_id=connection_id, offer_id=offer_id,
+            upstream_model_id=upstream_model_id, price_version_id=price_version_id,
+        )
+        with self.connect() as conn:
+            row = conn.execute("SELECT settlement_event_id FROM portal_budget_reservations_v2 WHERE id=?", (reservation_id,)).fetchone()
+        if not row or not row["settlement_event_id"]:
+            raise ValueError("Route usage settlement did not produce a usage event")
+        return 1
 
     def list_users(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1901,7 +2035,7 @@ class PortalDatabase:
                                    and resolve_offer_routes(*loaded)]
         legacy = [dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in rows]
         normalized = [dict(row) | {"capabilities": json.loads(row["capabilities_json"] or "[]"),
-                                   "public_model_id": public_model_id(row["provider_id"], row["model_id"])} for row in normalized_rows]
+                                   "public_model_id": format_public_model_id(row["provider_id"], row["model_id"])} for row in normalized_rows]
         legacy_keys = {(model["provider_id"], model["model_id"]) for model in legacy}
         normalized = [model for model in normalized if (model["migration_ref"], model["model_id"]) not in legacy_keys]
         public_ids = {model["public_model_id"] for model in legacy}
@@ -1914,6 +2048,68 @@ class PortalDatabase:
         if not exact and "::" not in model_id:
             exact = [item for item in eligible if item["model_id"] == model_id]
         return exact[0] if len(exact) == 1 else None
+
+    def get_offer_for_request(self, public_model_id: str, key_id: str) -> ResolvedOffer | None:
+        """Resolve an active, priced offer and its eligible routes under a key's model policy."""
+        if not isinstance(public_model_id, str) or not isinstance(key_id, str):
+            return None
+        brand_slug, separator, canonical_model_id = public_model_id.partition("::")
+        if not separator or not brand_slug or not canonical_model_id:
+            return None
+        model_hint = self.get_model(public_model_id)
+        provider_hint = model_hint.get("provider_id") if model_hint else None
+        with self.connect() as conn:
+            key = conn.execute("""SELECT key.allowed_models_mode,key.allowed_models_json,user.status
+                FROM portal_keys key JOIN portal_users user ON user.id=key.owner_user_id
+                WHERE key.id=? AND key.revoked_at IS NULL AND key.archived_at IS NULL""", (key_id,)).fetchone()
+            if not key or key["status"] != "active":
+                return None
+            allowed_models = json.loads(key["allowed_models_json"] or "[]")
+            if key["allowed_models_mode"] == "selected" and public_model_id not in allowed_models:
+                return None
+            row = conn.execute("""SELECT offer.id,offer.brand_id,offer.canonical_model_id,
+                    offer.capabilities_json,brand.slug brand_slug,brand.name provider_name,
+                    price.id price_version_id,price.input_rate,price.output_rate,price.cached_input_rate
+                FROM catalog_offers offer
+                JOIN provider_brands brand ON brand.id=offer.brand_id
+                JOIN price_versions price ON price.offer_id=offer.id AND price.is_active=1
+                WHERE (brand.slug=? OR brand.migration_ref=? OR EXISTS (
+                    SELECT 1 FROM provider_connections connection
+                    WHERE connection.brand_id=brand.id AND connection.legacy_profile_id=?))
+                    AND offer.canonical_model_id=? AND offer.approved=1 AND offer.active=1""",
+                (brand_slug, brand_slug, provider_hint, canonical_model_id)).fetchone()
+            if not row and provider_hint:
+                row = conn.execute("""SELECT offer.id,offer.brand_id,offer.canonical_model_id,
+                        offer.capabilities_json,brand.slug brand_slug,brand.name provider_name,
+                        price.id price_version_id,price.input_rate,price.output_rate,price.cached_input_rate
+                    FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
+                    JOIN price_versions price ON price.offer_id=offer.id AND price.is_active=1
+                    WHERE brand.id=(SELECT connection.brand_id FROM provider_connections connection
+                        WHERE connection.legacy_profile_id=? LIMIT 1)
+                        AND offer.canonical_model_id=? AND offer.approved=1 AND offer.active=1""",
+                    (provider_hint, canonical_model_id)).fetchone()
+            if not row and provider_hint:
+                row = conn.execute("""SELECT offer.id,offer.brand_id,offer.canonical_model_id,
+                        offer.capabilities_json,brand.slug brand_slug,brand.name provider_name,
+                        price.id price_version_id,price.input_rate,price.output_rate,price.cached_input_rate
+                    FROM catalog_offers offer JOIN provider_brands brand ON brand.id=offer.brand_id
+                    JOIN price_versions price ON price.offer_id=offer.id AND price.is_active=1
+                    WHERE offer.id=? AND offer.approved=1 AND offer.active=1""",
+                    (f"legacy-offer:{provider_hint}:{canonical_model_id}",)).fetchone()
+            if not row:
+                return None
+            loaded = self._load_offer_routes(conn, row["id"])
+            if not loaded:
+                return None
+            routes = resolve_offer_routes(*loaded)
+            if not routes:
+                return None
+            return ResolvedOffer(
+                row["id"], public_model_id, row["brand_id"], row["brand_slug"],
+                row["provider_name"], row["canonical_model_id"],
+                tuple(json.loads(row["capabilities_json"] or "[]")), row["price_version_id"],
+                row["input_rate"], row["output_rate"], row["cached_input_rate"], tuple(routes),
+            )
 
     def set_model_active(self, model_id: str, *, active: bool, provider_id: str | None = None) -> int:
         with self.connect() as conn:
@@ -1969,6 +2165,17 @@ class PortalDatabase:
         with self.connect() as conn:
             conn.execute("INSERT INTO portal_runtime_settings(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at", (key, json.dumps(value), _iso()))
 
+    def _eligible_public_offer_id(self, conn: sqlite3.Connection, selected_id: str) -> bool:
+        provider_scope, separator, canonical_model_id = selected_id.partition("::")
+        if not separator or not provider_scope or not canonical_model_id:
+            return False
+        row = conn.execute("""SELECT offer.id FROM catalog_offers offer
+            JOIN provider_brands brand ON brand.id=offer.brand_id
+            WHERE (brand.slug=? OR brand.migration_ref=?) AND offer.canonical_model_id=?""",
+            (provider_scope, provider_scope, canonical_model_id)).fetchone()
+        loaded = self._load_offer_routes(conn, row["id"]) if row else None
+        return bool(loaded and resolve_offer_routes(*loaded))
+
     def create_user_key(
         self,
         owner_user_id: str,
@@ -2015,6 +2222,9 @@ class PortalDatabase:
             if models:
                 normalized_models: set[str] = set()
                 for selected_id in models:
+                    if self._eligible_public_offer_id(conn, selected_id):
+                        normalized_models.add(selected_id)
+                        continue
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
                         row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1) AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)", (provider_id, upstream_id)).fetchone()
@@ -2057,18 +2267,12 @@ class PortalDatabase:
             if record["owner_status"] != "active" or record["revoked_at"] or record["archived_at"]:
                 return None
             models = json.loads(record["allowed_models_json"])
-            if record["allowed_models_mode"] == "all_approved":
-                effective_models = [f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
-                    WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)
-                    AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)
-                    ORDER BY model_id""")]
-            else:
-                approved = {f"{item['provider_id']}::{item['model_id']}" for item in conn.execute("""SELECT provider_id,model_id FROM portal_catalog_models
-                    WHERE active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL
-                    AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1)
-                    AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)""")}
-                effective_models = [model for model in models if model in approved]
+            allowed_mode = record["allowed_models_mode"]
+        eligible = self.list_models(approved_only=True)
+        effective_models = [
+            item["public_model_id"] for item in eligible
+            if allowed_mode == "all_approved" or item["public_model_id"] in models
+        ]
         return {
             "key_id": record["id"], "provider_key_id": record["id"], "owner_id": record["owner_user_id"],
             "owner_status": record["owner_status"], "owner_name": record["owner_name"], "owner_email": record["owner_email"],
@@ -2148,6 +2352,9 @@ class PortalDatabase:
             if models:
                 normalized_models: set[str] = set()
                 for selected_id in models:
+                    if self._eligible_public_offer_id(conn, selected_id):
+                        normalized_models.add(selected_id)
+                        continue
                     provider_id, separator, upstream_id = selected_id.partition("::")
                     if separator:
                         row = conn.execute("SELECT 1 FROM portal_catalog_models WHERE provider_id=? AND model_id=? AND active=1 AND approved=1 AND input_price_per_million IS NOT NULL AND output_price_per_million IS NOT NULL AND EXISTS (SELECT 1 FROM provider_brands b JOIN provider_connections c ON c.brand_id=b.id WHERE b.migration_ref=portal_catalog_models.provider_id AND b.identity_status='mapped' AND c.legacy_profile_id=portal_catalog_models.provider_id AND c.mapping_status='mapped' AND c.enabled=1) AND EXISTS (SELECT 1 FROM portal_eligible_legacy_models eligible WHERE eligible.provider_id=portal_catalog_models.provider_id AND eligible.model_id=portal_catalog_models.model_id)", (provider_id, upstream_id)).fetchone()

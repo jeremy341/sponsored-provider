@@ -13,6 +13,15 @@ import httpx
 from .errors import ProviderError
 
 
+class UpstreamConnectFailure(ProviderError):
+    """Connection establishment failed before request bytes could be delivered."""
+
+    delivery_known_absent = True
+
+    def __init__(self):
+        super().__init__("The upstream model is unavailable.", "upstream_unavailable", 503)
+
+
 def validate_public_https_base_url(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ProviderError("A public HTTPS upstream URL is required.", "invalid_upstream", 400)
@@ -118,6 +127,8 @@ class OpenAICompatibleClient:
                 return value, int((time.perf_counter() - started) * 1000)
             except httpx.HTTPStatusError as exc:
                 raise ProviderError("The upstream model request failed.", "upstream_error", exc.response.status_code) from exc
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                raise UpstreamConnectFailure() from exc
             except (httpx.HTTPError, ValueError) as exc:
                 raise ProviderError("The upstream model is unavailable.", "upstream_unavailable", 503) from exc
 
@@ -127,7 +138,10 @@ class OpenAICompatibleClient:
         response = None
         try:
             request = client.build_request("POST", target, json=payload, headers=headers, extensions=extensions)
-            response = await client.send(request, stream=True)
+            try:
+                response = await client.send(request, stream=True)
+            except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+                raise UpstreamConnectFailure() from exc
             if response.status_code >= 400:
                 raise ProviderError("The upstream model request failed.", "upstream_error", response.status_code)
             async for line in response.aiter_lines():
