@@ -62,7 +62,7 @@ describe("Task 8 operator interface", () => {
   it("renders_empty_provider_state", async () => {
     render(<ProviderListPage portalApi={api({ listProviders: vi.fn().mockResolvedValue([]), listOperatorOffers: vi.fn().mockResolvedValue([]) })} />);
     expect(await screen.findByText(/No provider connections/i)).toBeInTheDocument();
-    expect(screen.getAllByRole("button", { name: /Add connection/i })).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: /Add connection/i })).toHaveLength(1);
   });
 
   it("shows_sync_error_without_erasing_existing_models", async () => {
@@ -272,6 +272,18 @@ describe("Task 8 operator interface", () => {
     render(<ProviderListPage portalApi={api({ listProviders: vi.fn().mockResolvedValue([legacyA, legacyB]), listOperatorOffers: vi.fn().mockResolvedValue([]) })} />);
     expect(await screen.findByRole("button", { name: /Legacy upstream A/ })).toHaveTextContent(/1 connection/);
     expect(screen.getByRole("button", { name: /Legacy upstream B/ })).toHaveTextContent(/1 connection/);
+  });
+
+  it("shows the operator empty state without calling the API in preview mode", async () => {
+    window.history.replaceState({}, "", "/operator/providers?preview=operator");
+    const listProviders = vi.fn();
+    const listOperatorOffers = vi.fn();
+    render(<ProviderListPage portalApi={api({ listProviders, listOperatorOffers })} />);
+    expect(await screen.findByText("No provider connections")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(listProviders).not.toHaveBeenCalled();
+    expect(listOperatorOffers).not.toHaveBeenCalled();
+    window.history.replaceState({}, "", "/");
   });
 
   it("appends operator usage pages and shows input and output token counts separately", async () => {

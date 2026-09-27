@@ -9,6 +9,7 @@ import {
   Users, Wallet, X,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
+import { getLayoutPreviewRole } from "../lib/preview";
 import { AuthPage } from "./AuthPage";
 import { ProviderListPage } from "./operator/providers/ProviderListPage";
 import { OperatorUsagePage as OperatorUsageSurface } from "./operator/usage/OperatorUsagePage";
@@ -41,14 +42,6 @@ interface LoadResult<T> {
 
 function isPortalRole(value: string): value is PortalRole {
   return value === "developer" || value === "operator";
-}
-
-function getLayoutPreviewRole(): PortalRole | null {
-  if (!import.meta.env.DEV) return null;
-
-  const requestedRole = new URLSearchParams(window.location.search).get("preview");
-
-  return requestedRole && isPortalRole(requestedRole) ? requestedRole : null;
 }
 
 const developerNav = [

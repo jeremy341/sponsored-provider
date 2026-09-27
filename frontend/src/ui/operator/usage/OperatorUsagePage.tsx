@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Activity, Search } from "lucide-react";
 import type { OperatorActivityRecord, OperatorUsageFilter, Page, PortalApi, ProviderConnectionRecord } from "../../../contracts/api";
 import { formatUsd } from "../../../lib/money";
+import { getLayoutPreviewRole } from "../../../lib/preview";
 
 export function OperatorUsagePage({ portalApi }: { portalApi: PortalApi }) {
   const [providers, setProviders] = useState<ProviderConnectionRecord[]>([]);
@@ -9,9 +10,23 @@ export function OperatorUsagePage({ portalApi }: { portalApi: PortalApi }) {
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [filters, setFilters] = useState<OperatorUsageFilter>({ limit: 50 });
   const [loading, setLoading] = useState(true); const [error, setError] = useState("");
-  useEffect(() => { void portalApi.listProviders().then(setProviders).catch(() => setProviders([])); }, [portalApi]);
+  useEffect(() => {
+
+    if (getLayoutPreviewRole() === "operator") { setProviders([]); return; }
+
+    void portalApi.listProviders().then(setProviders).catch(() => setProviders([]));
+  }, [portalApi]);
   useEffect(() => {
     let current = true; setLoading(true); setError("");
+
+    if (getLayoutPreviewRole() === "operator") {
+      setRows([]);
+      setNextCursor(null);
+      setLoading(false);
+
+      return () => { current = false; };
+    }
+
     portalApi.listOperatorActivity(filters).then((page: Page<OperatorActivityRecord>) => { if (current) { setRows((existing) => filters.cursor ? [...existing, ...page.items] : page.items); setNextCursor(page.nextCursor); } })
       .catch(() => { if (current) setError("Usage could not be loaded with these filters. Adjust them or retry."); })
       .finally(() => { if (current) setLoading(false); });

@@ -72,6 +72,16 @@ describe("Task 9 developer views", () => {
     expect(screen.queryByText(/cached input/i)).not.toBeInTheDocument();
   });
 
+  it("shows an honest empty catalog in preview mode without API errors", async () => {
+    window.history.replaceState({}, "", "/developer/models?preview=developer");
+    const listModels = vi.fn();
+    render(<ModelCatalogPage portalApi={api({ listModels })} />);
+    expect(await screen.findByText("No published models yet")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(listModels).not.toHaveBeenCalled();
+    window.history.replaceState({}, "", "/");
+  });
+
   it("does not display a cached-input rate unless pricing is verified", async () => {
     render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} />);
     await userEvent.click(await screen.findByRole("button", { name: /View details for Acme AI \/ Model X/i }));

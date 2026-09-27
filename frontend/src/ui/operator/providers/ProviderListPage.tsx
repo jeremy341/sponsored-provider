@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, Network, RefreshCw } from "lucide-react";
 import type { CatalogOfferRecord, PortalApi, ProviderConnectionRecord } from "../../../contracts/api";
 import { formatUsd } from "../../../lib/money";
+import { getLayoutPreviewRole } from "../../../lib/preview";
 import { MoneyRunway } from "../MoneyRunway";
 import { ConnectionBudgetEditor } from "./ConnectionBudgetEditor";
 import { ConnectionDialog } from "./ConnectionDialog";
@@ -18,6 +19,16 @@ export function ProviderListPage({ portalApi }: { portalApi: PortalApi }) {
   const [openBrands, setOpenBrands] = useState<Set<string>>(new Set());
 
   const refresh = () => {
+    if (getLayoutPreviewRole() === "operator") {
+      setProviders([]);
+      setOffers([]);
+      setSelected(null);
+      setError(null);
+      setLoading(false);
+
+      return;
+    }
+
     setLoading(true); setError(null);
     Promise.all([portalApi.listProviders(), portalApi.listOperatorOffers()]).then(([connections, catalog]) => { setProviders(connections); setOffers(catalog); setSelected((current) => current ? catalog.find((item) => item.id === current.id) ?? null : null); setOpenBrands(new Set(connections.map((item) => item.brandSlug ?? `unmapped:${item.id}`))); })
       .catch(() => setError("Provider data could not be loaded. Retry to refresh the current catalog."))
@@ -62,7 +73,7 @@ export function ProviderListPage({ portalApi }: { portalApi: PortalApi }) {
     <header className="page-header"><div><h1>Providers &amp; models</h1><p>Manage upstream connections, published offers, prices, and route priority.</p></div><div className="page-header-action"><ConnectionDialog portalApi={portalApi} onCreated={(summary) => { setNotice(summary); refresh(); }} /></div></header>
     {notice && <div className={`inline-notice ${notice.toLowerCase().includes("failed") ? "notice-error" : "notice-info"}`} role={notice.toLowerCase().includes("failed") ? "alert" : "status"}><Network size={16} /><span>{notice}</span></div>}
     {error && <div className="inline-notice notice-error" role="alert"><span>{error}</span><button className="button button-small" type="button" onClick={refresh}>Retry</button></div>}
-    {loading ? <div className="loading-line" role="status"><span className="sr-only">Loading providers</span></div> : !groups.length ? <div className="empty-state"><span className="empty-mark"><Network size={19} /></span><div><h3>No provider connections</h3><p>Add an OpenAI compatible HTTPS endpoint and its credential. Discovered models remain private until their mapping and prices are reviewed.</p><div className="empty-action"><ConnectionDialog portalApi={portalApi} onCreated={(summary) => { setNotice(summary); refresh(); }} /></div></div></div> : <div className="provider-brand-list">{groups.map((group) => {
+    {loading ? <div className="loading-line" role="status"><span className="sr-only">Loading providers</span></div> : !groups.length ? <div className="empty-state"><span className="empty-mark"><Network size={19} /></span><div><h3>No provider connections</h3><p>Add an OpenAI compatible HTTPS endpoint and its credential using the button above. Discovered models remain private until their mapping and prices are reviewed.</p></div></div> : <div className="provider-brand-list">{groups.map((group) => {
       const brandOffers = offersByBrand(group.slug);
 
       return <section className="provider-brand-group" key={group.slug}><button type="button" className="provider-brand-heading" aria-expanded={openBrands.has(group.slug)} onClick={() => setOpenBrands((current) => { const next = new Set(current);
