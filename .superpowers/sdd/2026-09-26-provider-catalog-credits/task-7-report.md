@@ -29,3 +29,22 @@ Regression tests and pytest temp-directory support are committed separately from
 ## Scope
 
 Production commit: `5cb29a6` (`feat: route openai requests through provider offers`). No Nest/data wipe, deploy, restart, or push occurred.
+
+## Review fix round 1
+
+The independent review identified two safety gaps and one legacy-contract concern. Added regressions and fixed:
+
+- Input preflight now serializes the full chat request, not only `messages`, so tool definitions/response schemas contribute to the conservative byte/token estimate.
+- The budget reservation transaction reruns the route resolver while holding its write transaction and requires the same route ID; a route that became stale, review-required, disabled, mismatched, or otherwise ineligible between resolution and reservation cannot be dispatched.
+- A pre-existing legacy spend-cap guard and its `key_budget_exhausted` response were preserved. The new `budget_estimate_unavailable` behavior remains on portal keys; see the Task 7 compatibility ruling in the SDD ledger.
+- Added a gateway-level selected-connection-cap rejection test. Updated the shared budget test fixture to represent real mapped connections with exact profile and discovery rows, rather than bypassing Task 7 route eligibility.
+
+RED: `py -3.11 -m pytest tests/test_portal_gateway.py -q -p no:cacheprovider -k "tool_schemas or reservation_rechecks or connection_budget or spend_capped_legacy"` — 3 failed (tool-schema estimate, route-state race, legacy error contract), 1 passed (connection-cap dispatch guard), 12 deselected, 1 warning.
+
+GREEN:
+
+- Review regressions: 4 passed, 12 deselected.
+- Focused gateway/provider suite: 40 passed, 1 warning.
+- Task 6 budget repository suite after fixture alignment: 44 passed, 1 warning.
+- Full Python suite: 206 passed, 1 warning.
+- The warning is the existing Starlette/httpx `TestClient` deprecation.

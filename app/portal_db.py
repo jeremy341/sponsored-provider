@@ -1203,7 +1203,7 @@ class PortalDatabase:
                 pass
         return settled
 
-    def reserve_request_budget(self, owner_user_id: str, key_id: str, offer_id: str, connection_id: str, estimated_nano_usd: int, now: datetime, global_limit_nano_usd: int | None, *, public_model_id: str | None = None) -> BudgetReservation | None:
+    def reserve_request_budget(self, owner_user_id: str, key_id: str, offer_id: str, connection_id: str, estimated_nano_usd: int, now: datetime, global_limit_nano_usd: int | None, *, public_model_id: str | None = None, offer_route_id: str | None = None) -> BudgetReservation | None:
         if isinstance(estimated_nano_usd, bool) or not isinstance(estimated_nano_usd, int) or estimated_nano_usd < 0:
             raise ValueError("Estimate must be a non-negative integer number of nano-USD")
         if now.tzinfo is None or now.utcoffset() is None:
@@ -1217,12 +1217,20 @@ class PortalDatabase:
             if not key or key["status"] != "active" or not connection:
                 return None
             price = conn.execute("SELECT price.id,price.input_rate,price.output_rate,price.cached_input_rate,price.rate_unit,offer.canonical_model_id,brand.slug,brand.migration_ref FROM price_versions price JOIN catalog_offers offer ON offer.id=price.offer_id JOIN provider_brands brand ON brand.id=offer.brand_id WHERE price.offer_id=? AND price.is_active=1 AND offer.approved=1 AND offer.active=1", (offer_id,)).fetchone()
+            loaded = self._load_offer_routes(conn, offer_id)
+            eligible_routes = resolve_offer_routes(*loaded) if loaded else []
+            selected_route = next((item for item in eligible_routes
+                                   if item.connection_id == connection_id
+                                   and (offer_route_id is None or item.id == offer_route_id)), None)
+            if not price or not selected_route:
+                return None
             route = conn.execute("""SELECT route.id route_id,route.upstream_model_id,offer.brand_id,
                     offer.canonical_model_id,brand.name provider_name
                 FROM offer_routes route JOIN catalog_offers offer ON offer.id=route.offer_id
                 JOIN provider_brands brand ON brand.id=offer.brand_id
-                WHERE route.offer_id=? AND route.connection_id=? AND route.active=1""", (offer_id, connection_id)).fetchone()
-            if not price or not route:
+                WHERE route.id=? AND route.offer_id=? AND route.connection_id=?""",
+                (selected_route.id, offer_id, connection_id)).fetchone()
+            if not route:
                 return None
             if public_model_id is not None:
                 current_ids = {

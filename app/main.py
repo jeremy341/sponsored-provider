@@ -234,7 +234,10 @@ async def _portal_chat_completion(
     if output_limit is None:
         output_limit = payload.get("max_tokens")
     try:
-        input_text = json.dumps(payload["messages"], ensure_ascii=False, separators=(",", ":"))
+        # Tool schemas, response formats, and all other request input fields can
+        # consume context too; estimating only messages under-reserves when a
+        # client sends large function definitions.
+        input_text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         estimate_nano = estimate_request_budget(
             input_text=input_text,
             output_limit=output_limit,
@@ -259,7 +262,7 @@ async def _portal_chat_completion(
         return portal_db.reserve_request_budget(
             key["owner_id"], key["key_id"], offer.id, route.connection_id,
             estimate_nano, datetime.now(timezone.utc), global_limit_nano,
-            public_model_id=offer.public_model_id,
+            public_model_id=offer.public_model_id, offer_route_id=route.id,
         )
 
     def reject_budget():
