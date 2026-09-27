@@ -7,7 +7,7 @@ import { AllowanceEditor } from "./people/AllowanceEditor";
 import { OperatorUsagePage } from "./usage/OperatorUsagePage";
 import { formatUsd, ratioPercent } from "../../lib/money";
 import { ApiError, api as portalApi } from "../../lib/api";
-import type { CatalogOfferRecord, PersonRecord, PortalApi, ProviderConnectionRecord } from "../../contracts/api";
+import type { CatalogOfferRecord, OperatorActivityRecord, PersonRecord, PortalApi, ProviderConnectionRecord } from "../../contracts/api";
 
 const connection: ProviderConnectionRecord = {
   id: "conn-1", brandId: "brand-1", brandSlug: "acme", brandName: "Acme AI", connectionLabel: "EU primary",
@@ -225,6 +225,7 @@ describe("Task 8 operator interface", () => {
     const client = api({ updateConnectionBudget: save });
     render(<ConnectionBudgetEditor connection={connection} portalApi={client} onSaved={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /Edit cap for EU primary/i }));
+    expect(screen.getByRole("option", { name: "Lifetime" })).toBeInTheDocument();
     await userEvent.clear(screen.getByLabelText(/Connection cap USD/i));
     await userEvent.type(screen.getByLabelText(/Connection cap USD/i), "45.125000001");
     await userEvent.selectOptions(screen.getByLabelText(/Cap period/i), "monthly");
@@ -263,5 +264,31 @@ describe("Task 8 operator interface", () => {
     render(<ProviderListPage portalApi={api()} />);
     await openBrand();
     expect(screen.getByText("EU primary")).toBeInTheDocument();
+  });
+
+  it("keeps unmapped legacy connections in separate non-brand groups", async () => {
+    const legacyA = { ...connection, id: "legacy-a", brandId: null, brandSlug: null, brandName: "Legacy upstream A", connectionLabel: "Profile A", mappingStatus: "unmapped" };
+    const legacyB = { ...connection, id: "legacy-b", brandId: null, brandSlug: null, brandName: "Legacy upstream B", connectionLabel: "Profile B", mappingStatus: "unmapped" };
+    render(<ProviderListPage portalApi={api({ listProviders: vi.fn().mockResolvedValue([legacyA, legacyB]), listOperatorOffers: vi.fn().mockResolvedValue([]) })} />);
+    expect(await screen.findByRole("button", { name: /Legacy upstream A/ })).toHaveTextContent(/1 connection/);
+    expect(screen.getByRole("button", { name: /Legacy upstream B/ })).toHaveTextContent(/1 connection/);
+  });
+
+  it("appends operator usage pages and shows input and output token counts separately", async () => {
+    const first: OperatorActivityRecord = {
+      id: "event-a", occurredAt: "2026-09-27T08:00:00Z", modelId: "acme::model-a", providerName: "Acme AI", keyLabel: "Key A",
+      inputTokens: 12, outputTokens: 5, totalTokens: 17, estimatedCostUsd: "0.000001", costSource: "gateway_estimate",
+      requestId: "req-a", tokenCompleteness: "complete", status: "success", errorCategory: null, latencyMs: 24, cachedTokens: null,
+    };
+
+    const second: OperatorActivityRecord = { ...first, id: "event-b", requestId: "req-b", modelId: "acme::model-b" };
+    const listOperatorActivity = vi.fn().mockResolvedValueOnce({ items: [first], nextCursor: "cursor-a" }).mockResolvedValueOnce({ items: [second], nextCursor: null });
+    render(<OperatorUsagePage portalApi={api({ listOperatorActivity })} />);
+    expect(await screen.findByText("req-a")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("5")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Load more/i }));
+    expect(await screen.findByText("req-b")).toBeInTheDocument();
+    expect(screen.getByText("req-a")).toBeInTheDocument();
   });
 });

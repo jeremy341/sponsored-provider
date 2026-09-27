@@ -5,6 +5,7 @@ import type {
   CreateKeyResult,
   CreateInviteResult,
   CreateProviderInput,
+  DeveloperActivityFilter,
   CreateProviderResponse,
   SyncProviderResponse,
   DeveloperDashboard,
@@ -138,7 +139,12 @@ export const api: PortalApi = {
   revokeKey: (keyId) => requestVoid(`/api/developer/keys/${encodeURIComponent(keyId)}/revoke`, { method: "POST" }),
   archiveKey: (keyId) => requestVoid(`/api/developer/keys/${encodeURIComponent(keyId)}/archive`, { method: "POST" }),
   listModels: () => request<ModelRecord[]>("/api/models"),
-  listActivity: (cursor) => request<Page<ActivityEvent>>(`/api/activity${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`),
+  listActivity: (filters: DeveloperActivityFilter = {}) => {
+    const params = new URLSearchParams();
+    Object.entries(filters).forEach(([key, value]) => { if (value != null && value !== "") params.set(key, String(value)); });
+
+    return request<Page<ActivityEvent>>(`/api/activity${params.size ? `?${params}` : ""}`);
+  },
   listOperatorActivity: (filters: OperatorUsageFilter = {}) => {
     const params = new URLSearchParams();
     Object.entries(filters).forEach(([key, value]) => { if (value != null && value !== "") params.set(key, String(value)); });
