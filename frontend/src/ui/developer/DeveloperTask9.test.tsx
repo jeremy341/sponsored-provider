@@ -24,10 +24,11 @@ function api(overrides: Partial<PortalApi> = {}): PortalApi {
   const mock = {
     listModels: vi.fn().mockResolvedValue([model]),
     listActivity: vi.fn().mockResolvedValue({ items: [event], nextCursor: null }),
+    listKeys: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 
-  // SAFETY: these component tests invoke only listModels and listActivity; both are supplied above.
+  // SAFETY: these component tests invoke only listModels, listActivity, and listKeys; all are supplied above.
   return mock as PortalApi;
 }
 

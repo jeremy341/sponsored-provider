@@ -2696,16 +2696,50 @@ class PortalDatabase:
         with self.connect() as conn:
             conn.execute("UPDATE portal_budget_reservations SET status='released' WHERE id=? AND status='active'", (reservation_id,))
 
-    def list_usage(self, owner_user_id: str, *, limit: int = 100, before: str | None = None, key_id: str | None = None) -> list[dict[str, Any]]:
+    def list_usage(
+        self,
+        owner_user_id: str,
+        *,
+        limit: int = 100,
+        before: str | None = None,
+        key_id: str | None = None,
+        model: str | None = None,
+        from_date: str | None = None,
+        to_date_exclusive: str | None = None,
+        outcome: str | None = None,
+    ) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 200))
         query = "SELECT id,key_id,key_label_snapshot,provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,estimated_cost_usd,amount_nano_usd,price_version_id,client_ip,request_id FROM portal_usage_events WHERE owner_user_id=?"
         args: list[Any] = [owner_user_id]
         if key_id:
             query += " AND key_id=?"
             args.append(key_id)
+        if model:
+            query += " AND instr(lower(model_id),lower(?))>0"
+            args.append(model)
+        if from_date:
+            query += " AND julianday(occurred_at)>=julianday(?)"
+            args.append(from_date)
+        if to_date_exclusive:
+            query += " AND julianday(occurred_at)<julianday(?)"
+            args.append(to_date_exclusive)
+        if outcome == "success":
+            query += " AND status IN ('ok','success')"
+        elif outcome == "error":
+            query += " AND status NOT IN ('ok','success','rejected','interrupted')"
+        elif outcome:
+            query += " AND status=?"
+            args.append(outcome)
         if before:
-            query += " AND occurred_at<?"
-            args.append(before)
+            if "|" in before:
+                cursor_time, cursor_id = before.rsplit("|", 1)
+                if not cursor_time or not cursor_id:
+                    raise ValueError("Invalid activity cursor")
+                query += " AND (occurred_at<? OR (occurred_at=? AND id<?))"
+                args.extend((cursor_time, cursor_time, cursor_id))
+            else:
+                query += " AND occurred_at<?"
+                args.append(before)
         query += " ORDER BY occurred_at DESC,id DESC LIMIT ?"
         args.append(limit)
         with self.connect() as conn:
@@ -2812,6 +2846,22 @@ class PortalDatabase:
             row = conn.execute("SELECT COUNT(*) request_count,SUM(CASE WHEN status IN ('ok','success') THEN 1 ELSE 0 END) successful_requests,SUM(CASE WHEN status='rejected' THEN 1 ELSE 0 END) rejected_requests,SUM(input_tokens) input_tokens,SUM(output_tokens) output_tokens,SUM(total_tokens) total_tokens,SUM(estimated_cost_usd) estimated_cost_usd,AVG(latency_ms) avg_latency_ms FROM portal_usage_events WHERE owner_user_id=?", (owner_user_id,)).fetchone()
         return dict(row)
 
+    def usage_cost_nano_usd(self, owner_user_id: str | None = None) -> int | None:
+        query = "SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events"
+        args: list[Any] = []
+
+        if owner_user_id is not None:
+            query += " WHERE owner_user_id=?"
+            args.append(owner_user_id)
+
+        with self.connect() as conn:
+            rows = conn.execute(query, args).fetchall()
+
+        if not any(row["amount_nano_usd"] is not None or row["estimated_cost_usd"] is not None for row in rows):
+            return None
+
+        return self._sum_nano_rows(rows)
+
     def user_period_spend(self, owner_user_id: str, period: str | None) -> float:
         window = period_window(period if period in {"daily", "weekly", "monthly", "lifetime"} else "lifetime", _now())
         start = window.start_utc.isoformat()
@@ -2854,10 +2904,27 @@ class PortalDatabase:
             where += " AND owner_user_id=?"
             args.append(owner_user_id)
         with self.connect() as conn:
-            rows = conn.execute(f"""SELECT substr(occurred_at,1,10) day,COUNT(*) requests,
-                SUM(total_tokens) total_tokens,SUM(estimated_cost_usd) estimated_spend_usd
-                FROM portal_usage_events WHERE {where} GROUP BY substr(occurred_at,1,10) ORDER BY day""", args).fetchall()
-        return [dict(row) for row in rows]
+            rows = conn.execute(f"SELECT substr(occurred_at,1,10) day,total_tokens,amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE {where} ORDER BY day", args).fetchall()
+
+        grouped: dict[str, dict[str, Any]] = {}
+
+        for row in rows:
+            point = grouped.setdefault(row["day"], {"day": row["day"], "requests": 0, "total_tokens": 0, "has_tokens": False, "has_cost": False, "cost_nano_usd": 0})
+            point["requests"] += 1
+
+            if row["total_tokens"] is not None:
+                point["total_tokens"] += row["total_tokens"]
+                point["has_tokens"] = True
+
+            if row["amount_nano_usd"] is not None or row["estimated_cost_usd"] is not None:
+                point["cost_nano_usd"] += self._sum_nano_rows([row])
+                point["has_cost"] = True
+
+        return [{
+            "day": point["day"], "requests": point["requests"],
+            "total_tokens": point["total_tokens"] if point["has_tokens"] else None,
+            "estimated_spend_usd": self._format_nano_usd(point["cost_nano_usd"]) if point["has_cost"] else None,
+        } for point in grouped.values()]
 
     def usage_by_model(self, owner_user_id: str | None = None, *, limit: int = 8) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 50))
@@ -2867,10 +2934,29 @@ class PortalDatabase:
             where = " WHERE owner_user_id=?"
             args.append(owner_user_id)
         with self.connect() as conn:
-            rows = conn.execute(f"""SELECT model_id,MAX(provider_name_snapshot) provider_name,
-                COUNT(*) requests,SUM(total_tokens) total_tokens,SUM(estimated_cost_usd) estimated_spend_usd
-                FROM portal_usage_events{where} GROUP BY model_id ORDER BY requests DESC,estimated_spend_usd DESC LIMIT ?""", [*args, limit]).fetchall()
-        return [dict(row) for row in rows]
+            rows = conn.execute(f"SELECT model_id,provider_name_snapshot,total_tokens,amount_nano_usd,estimated_cost_usd FROM portal_usage_events{where}", args).fetchall()
+
+        grouped: dict[str, dict[str, Any]] = {}
+
+        for row in rows:
+            model = grouped.setdefault(row["model_id"], {"model_id": row["model_id"], "provider_name": row["provider_name_snapshot"], "requests": 0, "total_tokens": 0, "has_tokens": False, "has_cost": False, "cost_nano_usd": 0})
+            model["requests"] += 1
+            if row["provider_name_snapshot"]:
+                model["provider_name"] = row["provider_name_snapshot"]
+            if row["total_tokens"] is not None:
+                model["total_tokens"] += row["total_tokens"]
+                model["has_tokens"] = True
+            if row["amount_nano_usd"] is not None or row["estimated_cost_usd"] is not None:
+                model["cost_nano_usd"] += self._sum_nano_rows([row])
+                model["has_cost"] = True
+
+        result = [{
+            "model_id": model["model_id"], "provider_name": model["provider_name"], "requests": model["requests"],
+            "total_tokens": model["total_tokens"] if model["has_tokens"] else None,
+            "estimated_spend_usd": self._format_nano_usd(model["cost_nano_usd"]) if model["has_cost"] else None,
+        } for model in grouped.values()]
+
+        return sorted(result, key=lambda model: (-model["requests"], -(Decimal(model["estimated_spend_usd"]) if model["estimated_spend_usd"] is not None else Decimal(0))))[:limit]
 
     def list_people(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

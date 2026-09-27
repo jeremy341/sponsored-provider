@@ -19,7 +19,7 @@ export function ProviderListPage({ portalApi }: { portalApi: PortalApi }) {
 
   const refresh = () => {
     setLoading(true); setError(null);
-    Promise.all([portalApi.listProviders(), portalApi.listOperatorOffers()]).then(([connections, catalog]) => { setProviders(connections); setOffers(catalog); setSelected((current) => current ? catalog.find((item) => item.id === current.id) ?? null : null); setOpenBrands(new Set(connections.map((item) => item.brandSlug))); })
+    Promise.all([portalApi.listProviders(), portalApi.listOperatorOffers()]).then(([connections, catalog]) => { setProviders(connections); setOffers(catalog); setSelected((current) => current ? catalog.find((item) => item.id === current.id) ?? null : null); setOpenBrands(new Set(connections.map((item) => item.brandSlug ?? `unmapped:${item.id}`))); })
       .catch(() => setError("Provider data could not be loaded. Retry to refresh the current catalog."))
       .finally(() => setLoading(false));
   };
@@ -28,7 +28,13 @@ export function ProviderListPage({ portalApi }: { portalApi: PortalApi }) {
 
   const groups = useMemo(() => {
     const map = new Map<string, { name: string; connections: ProviderConnectionRecord[] }>();
-    providers.forEach((connection) => { const group = map.get(connection.brandSlug) ?? { name: connection.brandName, connections: [] }; group.connections.push(connection); map.set(connection.brandSlug, group); });
+    providers.forEach((connection) => {
+      const groupKey = connection.brandSlug ?? `unmapped:${connection.id}`;
+      const name = connection.brandSlug ? connection.brandName : `${connection.brandName} · mapping required`;
+      const group = map.get(groupKey) ?? { name, connections: [] };
+      group.connections.push(connection);
+      map.set(groupKey, group);
+    });
 
     return [...map.entries()].map(([slug, group]) => ({ slug, ...group }));
   }, [providers]);

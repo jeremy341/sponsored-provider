@@ -9,7 +9,7 @@ export interface UsageSummary {
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
-  estimatedSpendUsd: number | null;
+  estimatedSpendUsd: string | null;
   allowanceUsedUsd: number | null;
   allowanceLimitUsd: number | null;
   p95LatencyMs: number | null;
@@ -22,7 +22,7 @@ export interface UsagePoint {
   day: string;
   requests: number;
   total_tokens: number | null;
-  estimated_spend_usd: number | null;
+  estimated_spend_usd: string | null;
 }
 
 export interface ModelUsageRecord {
@@ -30,7 +30,7 @@ export interface ModelUsageRecord {
   providerName: string;
   requests: number;
   totalTokens: number | null;
-  estimatedSpendUsd: number | null;
+  estimatedSpendUsd: string | null;
 }
 
 export interface ActivityEvent {
@@ -124,8 +124,8 @@ export interface ProviderBudgetRecord {
 
 export interface ProviderConnectionRecord {
   id: string;
-  brandId: string;
-  brandSlug: string;
+  brandId: string | null;
+  brandSlug: string | null;
   brandName: string;
   connectionLabel: string;
   providerKind: string;
@@ -193,6 +193,16 @@ export interface OperatorUsageFilter {
   limit?: number;
   brandSlug?: string;
   connectionId?: string;
+  model?: string;
+  from?: string;
+  to?: string;
+  outcome?: string;
+}
+
+export interface DeveloperActivityFilter {
+  cursor?: string;
+  limit?: number;
+  keyId?: string;
   model?: string;
   from?: string;
   to?: string;
@@ -340,7 +350,7 @@ export interface PortalApi {
   revokeKey(keyId: string): Promise<void>;
   archiveKey(keyId: string): Promise<void>;
   listModels(): Promise<ModelRecord[]>;
-  listActivity(cursor?: string): Promise<Page<ActivityEvent>>;
+  listActivity(filters?: DeveloperActivityFilter): Promise<Page<ActivityEvent>>;
   listOperatorActivity(filters?: OperatorUsageFilter): Promise<Page<OperatorActivityRecord>>;
   listPeople(): Promise<PersonRecord[]>;
   listProviders(): Promise<ProviderConnectionRecord[]>;

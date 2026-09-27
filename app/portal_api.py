@@ -115,8 +115,6 @@ def _key_record(key: dict[str, Any]) -> dict[str, Any]:
     if spend_limit_nano is None and key.get("spend_limit_usd") is not None:
         spend_limit_nano = PortalDatabase._cap_nano_usd(key["spend_limit_usd"])
     spend_limit_display = PortalDatabase._format_nano_usd(spend_limit_nano)
-    if spend_limit_nano == 0 and key.get("spend_limit_usd") is not None:
-        spend_limit_display = format(Decimal(str(key["spend_limit_usd"])).normalize(), "f")
     spend_used_nano = key.get("spend_used_nano_usd")
     if spend_used_nano is None and key.get("spend_used_usd") is not None:
         spend_used_nano = PortalDatabase._charge_nano_usd(key["spend_used_usd"])
@@ -196,6 +194,25 @@ def _period_start(period: str | None, now: datetime) -> datetime | None:
     if period == "monthly":
         return now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     return None
+
+
+def _activity_date_bound(value: str | None, *, upper: bool) -> str | None:
+    if value is None:
+        return None
+
+    berlin = ZoneInfo("Europe/Berlin")
+
+    if len(value) == 10:
+        parsed = datetime.fromisoformat(value) + (timedelta(days=1) if upper else timedelta())
+        parsed = parsed.replace(tzinfo=berlin)
+    else:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=berlin)
+        if upper:
+            parsed += timedelta(microseconds=1)
+
+    return parsed.astimezone(timezone.utc).isoformat()
 
 
 def _public_https_base_url(value: str) -> str:
@@ -529,6 +546,8 @@ def create_portal_router(service: PortalService) -> APIRouter:
         period = {"day": "daily", "week": "weekly", "month": "monthly", "lifetime": "lifetime", None: None}.get(data.get("spendPeriod"), "invalid")
         rpm = data.get("rpmLimit")
         try:
+            if spend_cap is not None and repo._cap_nano_usd(spend_cap) == 0:
+                raise ValueError("Spend cap must be at least 0.000000001 USD")
             key = repo.create_user_key(user["id"], label, allowed_models_mode=mode, allowed_models=models, spend_limit_usd=spend_cap, spend_period=period, rpm_limit=rpm)
         except (ValueError, PermissionError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -591,11 +610,14 @@ def create_portal_router(service: PortalService) -> APIRouter:
         models = access.get("modelIds", []) if mode == "selected" else []
         period = {"day": "daily", "week": "weekly", "month": "monthly", "lifetime": "lifetime", None: None}.get(data.get("spendPeriod"), "invalid")
         try:
+            spend_cap = data.get("spendCapUsd")
+            if spend_cap is not None and repo._cap_nano_usd(spend_cap) == 0:
+                raise ValueError("Spend cap must be at least 0.000000001 USD")
             updated = repo.update_user_key_policy(
                 user["id"], key_id,
                 allowed_models_mode=mode,
                 allowed_models=models,
-                spend_limit_usd=data.get("spendCapUsd"),
+                spend_limit_usd=spend_cap,
                 spend_period=period,
                 rpm_limit=data.get("rpmLimit"),
             )
@@ -611,14 +633,30 @@ def create_portal_router(service: PortalService) -> APIRouter:
         session=Depends(developer),
         cursor: str | None = Query(default=None, max_length=100),
         limit: int = Query(default=50, ge=1, le=200),
-        key_id: str | None = Query(default=None, max_length=64),
+        key_id: str | None = Query(default=None, alias="keyId", max_length=64),
+        model: str | None = Query(default=None, max_length=200),
+        from_date: str | None = Query(default=None, alias="from", max_length=40),
+        to_date: str | None = Query(default=None, alias="to", max_length=40),
+        outcome: str | None = Query(default=None, max_length=20),
     ):
         user, _csrf_hash = session
-        # Cursor is the opaque last-seen timestamp; scope is always the signed-in owner.
-        rows = repo.list_usage(user["id"], limit=limit + 1, before=cursor, key_id=key_id)
+        if outcome not in {None, "success", "error", "rejected", "interrupted"}:
+            raise HTTPException(status_code=422, detail="Unsupported activity outcome")
+
+        try:
+            from_utc = _activity_date_bound(from_date, upper=False)
+            to_utc = _activity_date_bound(to_date, upper=True)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(status_code=422, detail="Activity dates must be ISO calendar dates or timestamps") from exc
+
+        rows = repo.list_usage(
+            user["id"], limit=limit + 1, before=cursor, key_id=key_id,
+            model=model, from_date=from_utc, to_date_exclusive=to_utc, outcome=outcome,
+        )
         has_more = len(rows) > limit
         items = rows[:limit]
-        return {"items": [_activity_record(item) for item in items], "nextCursor": items[-1]["occurred_at"] if has_more and items else None}
+        next_cursor = f"{items[-1]['occurred_at']}|{items[-1]['id']}" if has_more and items else None
+        return {"items": [_activity_record(item) for item in items], "nextCursor": next_cursor}
 
     def _dashboard_usage(owner_id: str | None) -> dict[str, Any]:
         if owner_id:
@@ -628,7 +666,8 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raw = repo.operator_usage_summary()
             user = None
         requests = int(raw["request_count"] or 0)
-        known_cost = raw["estimated_cost_usd"]
+        known_cost_nano = repo.usage_cost_nano_usd(owner_id)
+        known_cost = repo._format_nano_usd(known_cost_nano)
         latency = repo.latency_percentile(owner_id)
         return {
             "requests": requests,

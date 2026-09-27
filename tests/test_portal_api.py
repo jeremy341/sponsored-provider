@@ -5,6 +5,7 @@ import pytest
 from cryptography.fernet import Fernet
 import respx
 from datetime import datetime, timezone
+from urllib.parse import quote
 
 from app.config import Settings
 from app.catalog import DiscoveredModel, ModelsDevCatalog
@@ -781,6 +782,62 @@ def test_key_spend_caps_round_trip_as_nano_safe_decimal_strings(tmp_path):
     with repository.connect() as connection:
         row = connection.execute("SELECT cap_nano_usd FROM provider_budgets WHERE key_id=?", (key["id"],)).fetchone()
     assert row["cap_nano_usd"] == 987_654_321
+
+    below_nano = client.post("/api/developer/keys", headers=headers, json={
+        "label": "Below enforcement resolution", "modelAccess": {"mode": "all_approved"},
+        "spendCapUsd": "0.0000000001", "spendPeriod": "week", "rpmLimit": None,
+    })
+    assert below_nano.status_code == 422
+
+
+def test_legacy_subnano_key_cap_display_matches_its_enforced_nano_limit(tmp_path):
+    client, repository = _app(tmp_path)
+    user, _ = _login(client, repository, "subnano-key-display")
+    repository.create_user_key(user["id"], "Legacy subnano", allowed_models_mode="all_approved", spend_limit_usd="0.0000000001", spend_period="weekly")
+
+    record = client.get("/api/developer/keys").json()[0]
+
+    assert record["spendCapUsd"] == "0"
+
+
+def test_developer_dashboard_and_breakdowns_keep_subcent_usd_as_decimal_strings(tmp_path):
+    client, repository = _app(tmp_path)
+    user, _ = _login(client, repository, "precise-dashboard")
+    key = repository.create_user_key(user["id"], "Cost display", allowed_models_mode="all_approved")
+    repository.record_gateway_usage(
+        repository.find_gateway_key(key["api_key"]), model="acme::model-a", provider_name="Acme AI",
+        input_tokens=11, output_tokens=4, total_tokens=15, latency_ms=40, status="success",
+        estimated_cost_usd=0.000123456,
+    )
+
+    dashboard = client.get("/api/developer/dashboard").json()
+
+    assert dashboard["usage"]["estimatedSpendUsd"] == "0.000123456"
+    assert dashboard["topModels"][0]["estimatedSpendUsd"] == "0.000123456"
+    assert dashboard["series"][-1]["estimated_spend_usd"] == "0.000123456"
+
+
+def test_developer_activity_filters_before_pagination_with_stable_tie_cursor(tmp_path):
+    client, repository = _app(tmp_path)
+    owner, _ = _login(client, repository, "activity-filter-owner")
+    outsider = repository.upsert_user(subject="activity-filter-outsider", email="outsider@example.test", name="Outsider")
+    key_a = repository.create_user_key(owner["id"], "Key A", allowed_models_mode="all_approved")
+    key_b = repository.create_user_key(owner["id"], "Key B", allowed_models_mode="all_approved")
+    outsider_key = repository.create_user_key(outsider["id"], "Other key", allowed_models_mode="all_approved")
+    occurred = "2026-09-27T10:00:00+00:00"
+
+    first_id = repository.record_usage(owner["id"], key_a["id"], model="acme::target-one", input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=10, status="success", estimated_cost_usd=0.01, occurred_at=occurred)
+    second_id = repository.record_usage(owner["id"], key_a["id"], model="acme::target-two", input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=10, status="success", estimated_cost_usd=0.01, occurred_at=occurred)
+    repository.record_usage(owner["id"], key_b["id"], model="acme::target-three", input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=10, status="success", estimated_cost_usd=0.01, occurred_at=occurred)
+    repository.record_usage(owner["id"], key_a["id"], model="acme::target-rejected", input_tokens=None, output_tokens=None, total_tokens=None, latency_ms=10, status="rejected", estimated_cost_usd=None, occurred_at=occurred)
+    repository.record_usage(outsider["id"], outsider_key["id"], model="acme::target-other-user", input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=10, status="success", estimated_cost_usd=0.01, occurred_at=occurred)
+
+    query = "?model=target&outcome=success&keyId={}&from=2026-09-27&to=2026-09-27&limit=1".format(key_a["id"])
+    first = client.get(f"/api/activity{query}").json()
+    second = client.get(f"/api/activity{query}&cursor={quote(first['nextCursor'], safe='')}").json()
+
+    assert [item["id"] for item in first["items"] + second["items"]] == sorted([first_id, second_id], reverse=True)
+    assert first["nextCursor"] == f"{occurred}|{first['items'][0]['id']}"
 
 
 def test_user_allowance_reservations_are_shared_across_all_keys(tmp_path):
