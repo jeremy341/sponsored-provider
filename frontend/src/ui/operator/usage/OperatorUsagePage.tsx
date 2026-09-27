@@ -12,7 +12,11 @@ export function OperatorUsagePage({ portalApi }: { portalApi: PortalApi }) {
   const [loading, setLoading] = useState(true); const [error, setError] = useState("");
   useEffect(() => {
 
-    if (getLayoutPreviewRole() === "operator") { setProviders([]); return; }
+    if (getLayoutPreviewRole() === "operator") {
+      setProviders([]);
+
+      return;
+    }
 
     void portalApi.listProviders().then(setProviders).catch(() => setProviders([]));
   }, [portalApi]);

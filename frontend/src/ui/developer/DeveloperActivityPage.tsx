@@ -14,7 +14,11 @@ export function DeveloperActivityPage({ portalApi }: { portalApi: PortalApi }) {
 
   useEffect(() => {
 
-    if (getLayoutPreviewRole() === "developer") { setKeys([]); return; }
+    if (getLayoutPreviewRole() === "developer") {
+      setKeys([]);
+
+      return;
+    }
 
     void portalApi.listKeys().then(setKeys).catch(() => setKeys([]));
   }, [portalApi]);
