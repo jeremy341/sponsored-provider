@@ -10,6 +10,7 @@ import math
 import re
 import socket
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlparse, urlsplit
 
@@ -24,6 +25,48 @@ from app.database import Database
 from app.config import Settings
 from app.openai_compatible import OpenAICompatibleClient
 from app.password_auth import PasswordPolicyError, hash_password, normalize_username, verify_password_or_dummy
+from app.money import rate_cost_nano_usd
+
+
+class BudgetEstimateUnavailable(ValueError):
+    pass
+
+
+def estimate_request_budget(
+    *,
+    input_text: str,
+    output_limit: int | None,
+    verified_model_max: int | None,
+    hard_output_limit: int | None,
+    input_rate: str | Decimal,
+    output_rate: str | Decimal,
+    cached_rate: str | Decimal | None = None,
+    is_vision: bool = False,
+    offer_estimation_policy: dict[str, int] | None = None,
+) -> int:
+    ceilings = [value for value in (output_limit, verified_model_max, hard_output_limit) if value is not None]
+    if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in ceilings) or not ceilings:
+        raise BudgetEstimateUnavailable("budget_estimate_unavailable: a finite output-token ceiling is required")
+    output_tokens = min(ceilings)
+    if is_vision:
+        policy_input = offer_estimation_policy.get("max_input_tokens") if offer_estimation_policy else None
+        if isinstance(policy_input, bool) or not isinstance(policy_input, int) or policy_input < 0:
+            raise BudgetEstimateUnavailable("budget_estimate_unavailable: vision requires an explicit offer estimation policy")
+        input_tokens = policy_input
+        policy_output = offer_estimation_policy.get("max_output_tokens")
+        if policy_output is not None:
+            if isinstance(policy_output, bool) or not isinstance(policy_output, int) or policy_output <= 0:
+                raise BudgetEstimateUnavailable("budget_estimate_unavailable: offer output policy must be finite")
+            output_tokens = min(output_tokens, policy_output)
+    else:
+        if not isinstance(input_text, str):
+            raise BudgetEstimateUnavailable("budget_estimate_unavailable: text input cannot be bounded")
+        # A byte can require a token under byte-fallback tokenizers; four extra tokens cover framing.
+        input_tokens = len(input_text.encode("utf-8")) + 4
+    try:
+        return rate_cost_nano_usd(input_tokens, 0, output_tokens, Decimal(str(input_rate)), Decimal(str(output_rate)), Decimal(str(cached_rate)) if cached_rate is not None else None)
+    except (ValueError, ArithmeticError) as exc:
+        raise BudgetEstimateUnavailable(f"budget_estimate_unavailable: approved rates cannot produce a finite estimate ({exc})") from exc
 
 
 class PortalService:
@@ -569,7 +612,12 @@ def create_portal_router(service: PortalService) -> APIRouter:
             "topModels": [_model_usage_record(item) for item in repo.usage_by_model(user["id"], limit=8)],
             "keys": [_key_record(item) for item in keys],
             "recentActivity": [_activity_record(item) for item in activity],
-            "allowance": {"usedUsd": summary["allowanceUsedUsd"], "limitUsd": summary["allowanceLimitUsd"], "period": user["allowance_period"], "resetAt": repo.period_reset_at(user["allowance_period"])},
+            "allowance": {
+                "usedUsd": summary["allowanceUsedUsd"], "limitUsd": summary["allowanceLimitUsd"],
+                "usedNanoUsd": repo.user_period_spend_nano_usd(user["id"], user["allowance_period"]),
+                "limitNanoUsd": repo.user_allowance_nano_usd(user["id"]),
+                "period": user["allowance_period"], "resetAt": repo.period_reset_at(user["allowance_period"]),
+            },
         }
 
     @router.get("/api/operator/dashboard")
@@ -603,10 +651,18 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raise HTTPException(status_code=404, detail="Developer not found")
         data = await request.json()
         try:
-            repo.set_user_policy(user_id, allowance_usd=data.get("allowanceUsd"), allowance_period={"day": "daily", "week": "weekly", None: None}.get(data.get("allowancePeriod"), "invalid"), rpm_limit=data.get("rpmLimit"))
+            allowance_period = {"day": "daily", "week": "weekly", "daily": "daily", "weekly": "weekly", None: None}.get(data.get("allowancePeriod"), "invalid")
+            amount = data.get("allowanceNanoUsd")
+            if amount is None and data.get("allowanceUsd") is not None:
+                amount = repo._cap_nano_usd(data["allowanceUsd"])
+            rpm_limit = data.get("rpmLimit")
+            if rpm_limit is not None and (isinstance(rpm_limit, bool) or not isinstance(rpm_limit, int) or rpm_limit < 1):
+                raise ValueError("RPM must be positive or unlimited")
+            repo.assign_user_allowance(user_id, amount, allowance_period, actor["id"])
+            repo.set_user_policy(user_id, allowance_usd=amount / 1_000_000_000 if amount is not None else None, allowance_period=allowance_period, rpm_limit=rpm_limit)
         except (TypeError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        repo.audit(actor["id"], "person.policy_updated", "user", user_id, {"allowance_usd": data.get("allowanceUsd"), "allowance_period": data.get("allowancePeriod"), "rpm_limit": data.get("rpmLimit")})
+        repo.audit(actor["id"], "person.policy_updated", "user", user_id, {"allowance_nano_usd": amount, "allowance_period": allowance_period, "rpm_limit": data.get("rpmLimit")})
         return {"ok": True}
 
     @router.post("/api/operator/people/{user_id}/disable", status_code=204)
@@ -752,6 +808,28 @@ def create_portal_router(service: PortalService) -> APIRouter:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"ok": True, "connectionId": connection_id, "upstreamModelId": data["upstreamModelId"],
                 "offerId": data["offerId"], "mappingSource": "manual"}
+
+    @router.post("/api/operator/connections/{connection_id}/budget")
+    async def set_connection_budget(
+        connection_id: str,
+        request: Request,
+        session=Depends(operator),
+        csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"),
+        csrf_header: str | None = Header(default=None, alias="X-CSRF-Token"),
+    ):
+        require_csrf(session, csrf_cookie, csrf_header)
+        actor, _csrf_hash = session
+        data = await request.json()
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=422, detail="Budget object is required")
+        try:
+            repo.set_connection_budget(connection_id, data.get("limitNanoUsd"), data.get("period"), data.get("reserveNanoUsd", 0), actor["id"])
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"ok": True, "connectionId": connection_id, "limitNanoUsd": data.get("limitNanoUsd"),
+                "period": data.get("period"), "reserveNanoUsd": data.get("reserveNanoUsd", 0)}
 
     @router.post("/api/operator/providers", status_code=201)
     async def create_provider(request: Request, session=Depends(operator), csrf_cookie: str | None = Cookie(default=None, alias="portal_csrf"), csrf_header: str | None = Header(default=None, alias="X-CSRF-Token")):

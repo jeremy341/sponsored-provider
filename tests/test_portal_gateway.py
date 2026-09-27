@@ -16,8 +16,8 @@ from app.portal_db import PortalDatabase
 
 
 @respx.mock
-def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usage():
-    database_path = str(Path.cwd() / f".test-portal-gateway-{uuid4().hex}.db")
+def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usage(tmp_path):
+    database_path = str(tmp_path / f"portal-gateway-{uuid4().hex}.db")
     settings = Settings(
         database_path=database_path,
         provider_key_pepper="portal-gateway-test-pepper",

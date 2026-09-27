@@ -1,11 +1,209 @@
 import sqlite3
 from decimal import Decimal
+from datetime import datetime, timezone
 
 import pytest
 from cryptography.fernet import Fernet
 
 from app.database import Database
 from app.portal_db import PortalDatabase
+
+
+def _budget_setup(tmp_path):
+    repository = PortalDatabase(str(tmp_path / "budget.db"), key_pepper="p" * 40)
+    owner = repository.upsert_user(subject="budget-member", email="budget@example.test", name="Budget member", role="operator")
+    key_a = repository.create_user_key(owner["id"], "A", allowed_models_mode="all_approved")
+    key_b = repository.create_user_key(owner["id"], "B", allowed_models_mode="all_approved")
+    with repository.connect() as connection:
+        connection.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at,identity_status,slug) VALUES('brand-a','A',NULL,'2026-01-01T00:00:00+00:00','mapped','brand-a')")
+        connection.execute("INSERT INTO provider_brands(id,name,migration_ref,created_at,identity_status,slug) VALUES('brand-b','B',NULL,'2026-01-01T00:00:00+00:00','mapped','brand-b')")
+        connection.execute("INSERT INTO provider_connections(id,brand_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,label) VALUES('conn-a','brand-a','https://a.example','openai_compatible','secret',1,'2026-01-01T00:00:00+00:00','mapped','A')")
+        connection.execute("INSERT INTO provider_connections(id,brand_id,base_url,provider_kind,secret_ref,enabled,created_at,mapping_status,label) VALUES('conn-b','brand-b','https://b.example','openai_compatible','secret',1,'2026-01-01T00:00:00+00:00','mapped','B')")
+        connection.execute("INSERT INTO catalog_offers(id,brand_id,canonical_model_id,display_name,approved,active,updated_at) VALUES('offer-a','brand-a','model-a','Model A',1,1,'2026-01-01T00:00:00+00:00')")
+        connection.execute("INSERT INTO catalog_offers(id,brand_id,canonical_model_id,display_name,approved,active,updated_at) VALUES('offer-b','brand-b','model-b','Model B',1,1,'2026-01-01T00:00:00+00:00')")
+        connection.execute("INSERT INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active) VALUES('route-a','offer-a','conn-a','model-a',1)")
+        connection.execute("INSERT INTO offer_routes(id,offer_id,connection_id,upstream_model_id,active) VALUES('route-b','offer-b','conn-b','model-b',1)")
+        connection.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,source,is_active,effective_at) VALUES('price-approved','offer-a','0.001','0.002','operator',1,'2026-01-01T00:00:00+00:00')")
+        connection.execute("INSERT INTO price_versions(id,offer_id,input_rate,output_rate,source,is_active,effective_at) VALUES('price-b','offer-b','0.001','0.002','operator',1,'2026-01-01T00:00:00+00:00')")
+    return repository, owner, key_a, key_b
+
+
+def test_user_allowance_is_shared_across_keys_and_connections(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    now = datetime(2026, 9, 27, 10, tzinfo=timezone.utc)
+    repository.assign_user_allowance(owner["id"], 100, "weekly", "operator")
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 60, now, None)
+    assert reservation is not None
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-b", "conn-b", 41, now, None) is None
+
+
+def test_allowance_resets_at_berlin_boundary_and_expires_old_credit(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    before = datetime(2026, 9, 27, 21, 59, tzinfo=timezone.utc)
+    after = datetime(2026, 9, 27, 22, 1, tzinfo=timezone.utc)
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 100, before, None)
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 100, after, None)
+
+
+def test_usage_with_offset_timestamp_is_compared_by_instant_at_berlin_reset(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    repository.record_usage(owner["id"], first["id"], model="prior-day", input_tokens=1, output_tokens=1,
+                            total_tokens=2, latency_ms=1, status="ok", estimated_cost_usd=0.00000006,
+                            amount_nano_usd=60, occurred_at="2026-09-27T23:30:00+02:00")
+    reservation = repository.reserve_request_budget(owner["id"], second["id"], "offer-b", "conn-b", 100,
+                                                    datetime(2026, 9, 27, 22, 1, tzinfo=timezone.utc), None)
+    assert reservation is not None
+
+
+def test_current_period_includes_legacy_usage_after_key_archive(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    repository.import_legacy_key_snapshots(owner["id"], [{"id": 99, "label": "Old archived key"}])
+    repository.import_legacy_usage(owner["id"], [{"id": 101, "provider_key_id": 99, "timestamp": "2026-09-27T09:00:00+00:00", "model": "legacy", "estimated_cost_usd": 0.00000006, "upstream_profile_id": "conn-a"}])
+    repository.archive_user_key(owner["id"], "legacy-key-99")
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-a", "conn-a", 41, datetime(2026, 9, 27, 10, tzinfo=timezone.utc), None) is None
+
+
+def test_unpriced_prior_delivery_fails_closed_under_user_allowance(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    repository.record_usage(owner["id"], first["id"], model="unknown-cost", input_tokens=None, output_tokens=None,
+                            total_tokens=None, latency_ms=None, status="error", estimated_cost_usd=None,
+                            occurred_at=datetime.now(timezone.utc).isoformat())
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-b", "conn-b", 1,
+                                             datetime.now(timezone.utc), None) is None
+
+
+def test_provider_cap_includes_connection_usage_from_current_period(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    repository.set_connection_budget("conn-a", 100, "daily", 0, "operator")
+    repository.record_usage(owner["id"], first["id"], model="model-a", input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=1, status="ok", estimated_cost_usd=0, amount_nano_usd=60, provider_id="conn-a")
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 41, datetime.now(timezone.utc), None) is None
+
+
+def test_provider_cap_is_scoped_to_selected_connection_and_period(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    repository.set_connection_budget("conn-a", 100, "daily", 0, "operator")
+    repository.record_usage(owner["id"], first["id"], model="model-a", input_tokens=1, output_tokens=1, total_tokens=2, latency_ms=1, status="ok", estimated_cost_usd=0, amount_nano_usd=100, provider_id="conn-a", occurred_at="2026-09-26T10:00:00+00:00")
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-b", "conn-b", 100, datetime(2026, 9, 27, 10, tzinfo=timezone.utc), None)
+
+
+def test_disabled_connection_cannot_receive_a_new_budget_reservation(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    with repository.connect() as connection:
+        connection.execute("UPDATE provider_connections SET enabled=0 WHERE id='conn-a'")
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 10,
+                                             datetime.now(timezone.utc), None) is None
+
+
+def test_reserve_is_subtracted_from_provider_available_headroom(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.set_connection_budget("conn-a", 100, "daily", 0, "operator")
+    now = datetime.now(timezone.utc)
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 60, now, None)
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-a", "conn-a", 41, now, None) is None
+
+
+def test_key_cap_only_tightens_user_allowance(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.set_user_policy(owner["id"], allowance_usd=0.0000001, allowance_period="daily", rpm_limit=None)
+    with repository.connect() as connection:
+        connection.execute("INSERT INTO provider_budgets(id,key_id,cap_nano_usd,period,created_at) VALUES('key-cap',?,40,'daily','2026-01-01')", (first["id"],))
+    now = datetime.now(timezone.utc)
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 41, now, None) is None
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-b", "conn-b", 101, now, None) is None
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-a", "conn-a", 100, now, None)
+
+
+def test_all_budget_scopes_reserve_atomically(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    repository.set_connection_budget("conn-a", 100, "daily", 0, "operator")
+    with repository.connect() as connection:
+        connection.execute("INSERT INTO provider_budgets(id,key_id,cap_nano_usd,period,created_at) VALUES('key-cap',?,100,'daily','2026-01-01')", (first["id"],))
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 60, datetime.now(timezone.utc), 50) is None
+    with repository.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM portal_budget_reservations_v2 WHERE status='active'").fetchone()[0] == 0
+
+
+def test_concurrent_last_credit_requests_allow_only_one(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    now = datetime.now(timezone.utc)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda key: repository.reserve_request_budget(owner["id"], key["id"], "offer-a", "conn-a", 60, now, None), (first, second)))
+    assert sum(result is not None for result in results) == 1
+
+
+def test_released_reservation_does_not_count_as_spent(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    now = datetime.now(timezone.utc)
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 100, now, None)
+    with pytest.raises(ValueError, match="known absent"):
+        repository.release_request_budget(reservation.id, delivery_known_absent=False)
+    assert repository.release_request_budget(reservation.id, delivery_known_absent=True)
+    assert repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 100, now, None)
+
+
+def test_settlement_uses_actual_reported_tokens_and_approved_price_snapshot(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 100, datetime.now(timezone.utc), None)
+    repository.settle_request_budget(reservation.id, 100, {"input_tokens": 3, "output_tokens": 2})
+    event = repository.list_usage(owner["id"])[0]
+    assert (event["input_tokens"], event["output_tokens"], event["amount_nano_usd"], event["price_version_id"]) == (3, 2, 7, "price-approved")
+
+
+def test_missing_usage_settles_estimate_without_claiming_zero(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 100, datetime.now(timezone.utc), None)
+    repository.settle_request_budget(reservation.id, 100, None)
+    event = repository.list_usage(owner["id"])[0]
+    assert event["amount_nano_usd"] == 100
+    assert event["input_tokens"] is None and event["output_tokens"] is None and event["total_tokens"] is None
+
+
+@pytest.mark.parametrize("outcome,delivered", [
+    ("connect_failure", False),
+    ("upstream_error", True),
+    ("provider_timeout", True),
+    ("client_disconnect", True),
+    ("partial_stream", True),
+])
+def test_request_exit_settles_conservatively_unless_delivery_is_known_absent(tmp_path, outcome, delivered):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 60, datetime.now(timezone.utc), None)
+    if delivered:
+        repository.settle_request_budget(reservation.id, reservation.amount_nano_usd, {"status": outcome})
+        assert repository.list_usage(owner["id"])[0]["amount_nano_usd"] == 60
+    else:
+        assert repository.release_request_budget(reservation.id, delivery_known_absent=True)
+        assert repository.list_usage(owner["id"]) == []
+
+
+def test_budget_reservation_can_only_be_settled_once(tmp_path):
+    repository, owner, first, _ = _budget_setup(tmp_path)
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 60, datetime.now(timezone.utc), None)
+    repository.settle_request_budget(reservation.id, 60, None)
+    with pytest.raises(ValueError, match="not active"):
+        repository.settle_request_budget(reservation.id, 60, None)
+    assert len(repository.list_usage(owner["id"])) == 1
+
+
+def test_expired_reservation_is_conservatively_settled(tmp_path):
+    repository, owner, first, second = _budget_setup(tmp_path)
+    repository.assign_user_allowance(owner["id"], 100, "daily", "operator")
+    reserved_at = datetime(2026, 9, 27, 10, tzinfo=timezone.utc)
+    reservation = repository.reserve_request_budget(owner["id"], first["id"], "offer-a", "conn-a", 60, reserved_at, None)
+    assert reservation is not None
+    now = datetime(2026, 9, 27, 10, 11, tzinfo=timezone.utc)
+    assert repository.reserve_request_budget(owner["id"], second["id"], "offer-b", "conn-b", 41, now, None) is None
+    event = repository.list_usage(owner["id"])[0]
+    assert event["amount_nano_usd"] == 60
+    assert event["total_tokens"] is None
 
 
 def test_local_auth_migration_preserves_hca_identity_invite_history_and_is_idempotent(tmp_path):
@@ -54,7 +252,7 @@ def test_local_auth_migration_preserves_hca_identity_invite_history_and_is_idemp
     assert "max_uses" in invite_columns
     assert "uses_count" in invite_columns
     assert "revoked_at" in invite_columns
-    assert migrations[-1][0] == 7
+    assert migrations[-1][0] == 8
     assert user_before == ("legacy-user", "ident!hca-subject", "legacy@example.test", 1, "Legacy HCA", "developer", "2026-01-04", "2026-02-05")
     assert invite_before == ("legacy-invite", "hashed-token", "legacy-operator", "legacy@example.test", "2027-01-01", "2026-01-05", "legacy-user", "2026-01-04")
 
@@ -416,7 +614,7 @@ def test_migration_converts_caps_without_changing_usd_values(tmp_path):
         cap = connection.execute("SELECT cap_nano_usd FROM provider_budgets WHERE key_id=?", (key["id"],)).fetchone()
 
     assert user_before["allowance_usd"] == 0.123456789
-    assert user_before["allowance_timezone"] == "UTC"
+    assert user_before["allowance_timezone"] == "Europe/Berlin"
     assert key_before["spend_limit_usd"] == 0.000000001
     assert tuple(allowance) == (123456789, "weekly", "Europe/Berlin")
     assert cap["cap_nano_usd"] == 1
