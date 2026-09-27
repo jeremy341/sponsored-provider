@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from app.catalog import DiscoveredModel, PriceSuggestion
+from app.periods import period_window
 from app.routing import public_model_id, resolve_offer_routes
 
 
@@ -131,6 +132,21 @@ class BudgetReservation:
     status: str
     owner_user_id: str | None = None
     key_id: str | None = None
+    connection_id: str | None = None
+
+
+@dataclass(frozen=True)
+class UsageFields:
+    model_id: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cached_tokens: int | None = None
+    status: str = "success"
+    latency_ms: int | None = None
+    price_version_id: str | None = None
+    price_snapshot: dict[str, Any] | None = None
+    request_id: str | None = None
 
 
 class PortalDatabase:
@@ -312,6 +328,7 @@ class PortalDatabase:
                 (5, self._migrate_provider_discovery_and_prices),
                 (6, self._migrate_ordered_offer_routes),
                 (7, self._migrate_manual_mappings_and_route_review),
+                (8, self._migrate_shared_credit_budgets),
             )
             for version, migration in migrations:
                 if version not in applied:
@@ -468,6 +485,24 @@ class PortalDatabase:
                 AND route.active=1 AND offer.approved=1 AND offer.active=1
                 AND EXISTS (SELECT 1 FROM price_versions price WHERE price.offer_id=offer.id AND price.is_active=1);
         """)
+
+    @staticmethod
+    def _migrate_shared_credit_budgets(conn: sqlite3.Connection) -> None:
+        PortalDatabase._add_columns(conn, "provider_budgets", {
+            "connection_id": "TEXT",
+            "reserve_nano_usd": "INTEGER NOT NULL DEFAULT 0",
+        })
+        PortalDatabase._add_columns(conn, "portal_budget_reservations_v2", {
+            "offer_id": "TEXT",
+            "connection_id": "TEXT",
+            "settlement_event_id": "TEXT",
+            "price_version_id": "TEXT",
+            "price_snapshot_json": "TEXT",
+        })
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS provider_budgets_connection_unique ON provider_budgets(connection_id) WHERE connection_id IS NOT NULL")
+        conn.execute("CREATE INDEX IF NOT EXISTS portal_budget_v2_owner_status ON portal_budget_reservations_v2(owner_user_id,status,created_at)")
+        conn.execute("UPDATE portal_users SET allowance_timezone='Europe/Berlin' WHERE allowance_usd IS NOT NULL")
+        conn.execute("UPDATE user_allowances SET timezone='Europe/Berlin' WHERE active=1")
 
     @staticmethod
     def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -1068,6 +1103,185 @@ class PortalDatabase:
     def get_user_by_subject(self, subject: str) -> dict[str, Any] | None:
         with self.connect() as conn:
             return self._dict(conn.execute("SELECT * FROM portal_users WHERE oidc_subject=?", (subject,)).fetchone())
+
+    def assign_user_allowance(self, user_id: str, amount_nano_usd: int | None, period: str | None, actor_id: str) -> None:
+        if amount_nano_usd is not None and (isinstance(amount_nano_usd, bool) or not isinstance(amount_nano_usd, int) or amount_nano_usd < 0):
+            raise ValueError("Allowance must be a non-negative integer number of nano-USD")
+        if period not in (None, "daily", "weekly") or (amount_nano_usd is None) != (period is None):
+            raise ValueError("Allowance amount and daily or weekly period must be set together")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            user = conn.execute("SELECT id FROM portal_users WHERE id=?", (user_id,)).fetchone()
+            if not user:
+                raise LookupError("User not found")
+            conn.execute("UPDATE user_allowances SET active=0 WHERE user_id=? AND active=1", (user_id,))
+            if amount_nano_usd is not None:
+                conn.execute("INSERT INTO user_allowances(id,user_id,amount_nano_usd,period,timezone,active,created_at) VALUES(?,?,?,?, 'Europe/Berlin',1,?)",
+                             (uuid.uuid4().hex, user_id, amount_nano_usd, period, _iso()))
+            usd = amount_nano_usd / 1_000_000_000 if amount_nano_usd is not None else None
+            conn.execute("UPDATE portal_users SET allowance_usd=?,allowance_period=?,allowance_timezone='Europe/Berlin' WHERE id=?", (usd, period, user_id))
+            conn.execute("INSERT INTO portal_audit_events(id,actor_user_id,action,target_type,target_id,details_json,occurred_at) VALUES(?,?,?,?,?,?,?)",
+                         (uuid.uuid4().hex, actor_id, "person.allowance_assigned", "user", user_id, json.dumps({"amount_nano_usd": amount_nano_usd, "period": period}), _iso()))
+
+    def set_connection_budget(self, connection_id: str, limit_nano_usd: int | None, period: str | None, reserve_nano_usd: int, actor_id: str) -> None:
+        if limit_nano_usd is not None and (isinstance(limit_nano_usd, bool) or not isinstance(limit_nano_usd, int) or limit_nano_usd < 0):
+            raise ValueError("Connection limit must be a non-negative integer number of nano-USD")
+        if isinstance(reserve_nano_usd, bool) or not isinstance(reserve_nano_usd, int) or reserve_nano_usd < 0:
+            raise ValueError("Reserve must be a non-negative integer number of nano-USD")
+        if period not in (None, "daily", "weekly", "monthly", "lifetime") or (limit_nano_usd is None) != (period is None):
+            raise ValueError("A connection limit requires a supported period")
+        if limit_nano_usd is not None and reserve_nano_usd > limit_nano_usd:
+            raise ValueError("Reserve cannot exceed the connection limit")
+        if limit_nano_usd is None and reserve_nano_usd:
+            raise ValueError("A reserve requires a finite connection limit")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not conn.execute("SELECT 1 FROM provider_connections WHERE id=?", (connection_id,)).fetchone():
+                raise LookupError("Provider connection not found")
+            existing = conn.execute("SELECT id FROM provider_budgets WHERE connection_id=?", (connection_id,)).fetchone()
+            if existing:
+                conn.execute("UPDATE provider_budgets SET cap_nano_usd=?,period=?,reserve_nano_usd=? WHERE id=?", (limit_nano_usd, period, reserve_nano_usd, existing["id"]))
+            elif limit_nano_usd is not None or reserve_nano_usd:
+                conn.execute("INSERT INTO provider_budgets(id,connection_id,cap_nano_usd,period,reserve_nano_usd,created_at) VALUES(?,?,?,?,?,?)", (uuid.uuid4().hex, connection_id, limit_nano_usd, period, reserve_nano_usd, _iso()))
+            conn.execute("INSERT INTO portal_audit_events(id,actor_user_id,action,target_type,target_id,details_json,occurred_at) VALUES(?,?,?,?,?,?,?)",
+                         (uuid.uuid4().hex, actor_id, "connection.budget_updated", "connection", connection_id, json.dumps({"limit_nano_usd": limit_nano_usd, "period": period, "reserve_nano_usd": reserve_nano_usd}), _iso()))
+
+    @staticmethod
+    def _sum_nano_rows(rows: list[sqlite3.Row]) -> int:
+        total = 0
+        for row in rows:
+            amount = row["amount_nano_usd"]
+            if amount is None:
+                amount = PortalDatabase._charge_nano_usd(row["estimated_cost_usd"])
+            total += amount or 0
+        return total
+
+    def expire_request_budget_reservations(self, now: datetime, *, older_than_seconds: int = 600) -> int:
+        if now.tzinfo is None or now.utcoffset() is None or older_than_seconds < 1:
+            raise ValueError("An aware time and positive expiry interval are required")
+        cutoff = _iso(now - timedelta(seconds=older_than_seconds))
+        with self.connect() as conn:
+            expired = conn.execute("SELECT id,amount_nano_usd FROM portal_budget_reservations_v2 WHERE status='active' AND julianday(created_at)<=julianday(?) ORDER BY created_at", (cutoff,)).fetchall()
+        settled = 0
+        for row in expired:
+            try:
+                self.settle_request_budget(row["id"], row["amount_nano_usd"], None)
+                settled += 1
+            except ValueError:
+                pass
+        return settled
+
+    def reserve_request_budget(self, owner_user_id: str, key_id: str, offer_id: str, connection_id: str, estimated_nano_usd: int, now: datetime, global_limit_nano_usd: int | None) -> BudgetReservation | None:
+        if isinstance(estimated_nano_usd, bool) or not isinstance(estimated_nano_usd, int) or estimated_nano_usd < 0:
+            raise ValueError("Estimate must be a non-negative integer number of nano-USD")
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("now must be timezone-aware")
+        self.expire_request_budget_reservations(now)
+        reservation_id = uuid.uuid4().hex
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            key = conn.execute("SELECT k.owner_user_id,k.spend_limit_usd,k.spend_period,u.status FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id WHERE k.id=? AND k.owner_user_id=? AND k.revoked_at IS NULL AND k.archived_at IS NULL", (key_id, owner_user_id)).fetchone()
+            connection = conn.execute("SELECT c.id FROM provider_connections c JOIN provider_brands b ON b.id=c.brand_id WHERE c.id=? AND c.enabled=1 AND c.mapping_status='mapped' AND b.identity_status='mapped'", (connection_id,)).fetchone()
+            if not key or key["status"] != "active" or not connection:
+                return None
+            price = conn.execute("SELECT price.id,price.input_rate,price.output_rate,price.cached_input_rate,price.rate_unit,offer.canonical_model_id FROM price_versions price JOIN catalog_offers offer ON offer.id=price.offer_id WHERE price.offer_id=? AND price.is_active=1 AND offer.approved=1 AND offer.active=1", (offer_id,)).fetchone()
+            route = conn.execute("SELECT 1 FROM offer_routes WHERE offer_id=? AND connection_id=? AND active=1", (offer_id, connection_id)).fetchone()
+            if not price or not route:
+                return None
+            price_snapshot = json.dumps({"input_rate": price["input_rate"], "output_rate": price["output_rate"], "cached_input_rate": price["cached_input_rate"], "rate_unit": price["rate_unit"]}, sort_keys=True)
+            user_allowance = conn.execute("SELECT amount_nano_usd,period FROM user_allowances WHERE user_id=? AND active=1", (owner_user_id,)).fetchone()
+            if user_allowance:
+                allowance = (user_allowance["amount_nano_usd"], user_allowance["period"])
+            else:
+                user = conn.execute("SELECT allowance_usd,allowance_period FROM portal_users WHERE id=?", (owner_user_id,)).fetchone()
+                allowance = (self._cap_nano_usd(user["allowance_usd"]), user["allowance_period"]) if user["allowance_usd"] is not None else None
+            key_budget = conn.execute("SELECT cap_nano_usd,period FROM provider_budgets WHERE key_id=?", (key_id,)).fetchone()
+            if not key_budget and key["spend_limit_usd"] is not None:
+                key_budget = {"cap_nano_usd": self._cap_nano_usd(key["spend_limit_usd"]), "period": key["spend_period"]}
+            connection_budget = conn.execute("SELECT cap_nano_usd,period,reserve_nano_usd FROM provider_budgets WHERE connection_id=?", (connection_id,)).fetchone()
+            scopes: list[tuple[str, int, str | None, list[str]]] = []
+            if allowance:
+                scopes.append(("user", allowance[0], allowance[1], [owner_user_id]))
+            if key_budget and key_budget["cap_nano_usd"] is not None:
+                scopes.append(("key", key_budget["cap_nano_usd"], key_budget["period"], [owner_user_id, key_id]))
+            if connection_budget and connection_budget["cap_nano_usd"] is not None:
+                scopes.append(("connection", connection_budget["cap_nano_usd"] - connection_budget["reserve_nano_usd"], connection_budget["period"], [connection_id]))
+            if global_limit_nano_usd is not None:
+                scopes.append(("global", global_limit_nano_usd, "lifetime", []))
+            for kind, cap, period, identifiers in scopes:
+                if cap < 0:
+                    return None
+                window = period_window(period or "lifetime", now)
+                start = window.start_utc.isoformat()
+                where = "julianday(occurred_at)>=julianday(?)"
+                event_args: list[Any] = [start]
+                reserved_where = "julianday(created_at)>=julianday(?) AND status='active'"
+                reserved_args: list[Any] = [start]
+                if window.end_utc:
+                    where += " AND julianday(occurred_at)<julianday(?)"
+                    event_args.append(window.end_utc.isoformat())
+                    reserved_where += " AND julianday(created_at)<julianday(?)"
+                    reserved_args.append(window.end_utc.isoformat())
+                if kind in ("user", "key"):
+                    where += " AND owner_user_id=?"
+                    event_args.append(identifiers[0])
+                    reserved_where += " AND owner_user_id=?"
+                    reserved_args.append(identifiers[0])
+                if kind == "key":
+                    where += " AND key_id=?"
+                    event_args.append(identifiers[1])
+                    reserved_where += " AND key_id=?"
+                    reserved_args.append(identifiers[1])
+                if kind == "connection":
+                    aliases = conn.execute("SELECT legacy_profile_id FROM provider_connections WHERE id=?", (connection_id,)).fetchone()
+                    providers = [connection_id] + ([aliases[0]] if aliases and aliases[0] else [])
+                    where += " AND provider_id IN (" + ",".join("?" for _ in providers) + ")"
+                    event_args.extend(providers)
+                    reserved_where += " AND connection_id=?"
+                    reserved_args.append(connection_id)
+                events = conn.execute(f"SELECT amount_nano_usd,estimated_cost_usd,status FROM portal_usage_events WHERE {where}", event_args).fetchall()
+                reserved = conn.execute(f"SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE {reserved_where}", reserved_args).fetchall()
+                known_no_delivery = {"rejected", "blocked", "connect_failed", "model_not_found"}
+                if any(row["amount_nano_usd"] is None and row["estimated_cost_usd"] is None and row["status"] not in known_no_delivery for row in events):
+                    return None
+                used_nano = self._sum_nano_rows(events)
+                reserved_nano = sum(row["amount_nano_usd"] for row in reserved)
+                if used_nano + reserved_nano + estimated_nano_usd > cap:
+                    return None
+            conn.execute("INSERT INTO portal_budget_reservations_v2(id,owner_user_id,key_id,amount_nano_usd,created_at,status,offer_id,connection_id,price_version_id,price_snapshot_json) VALUES(?,?,?,?,?,'active',?,?,?,?)", (reservation_id, owner_user_id, key_id, estimated_nano_usd, _iso(now), offer_id, connection_id, price["id"], price_snapshot))
+        return BudgetReservation(reservation_id, estimated_nano_usd, "active", owner_user_id, key_id, connection_id)
+
+    def release_request_budget(self, reservation_id: str, *, delivery_known_absent: bool) -> bool:
+        if delivery_known_absent is not True:
+            raise ValueError("A reservation can be released only when upstream delivery is known absent")
+        with self.connect() as conn:
+            result = conn.execute("UPDATE portal_budget_reservations_v2 SET status='released' WHERE id=? AND status='active'", (reservation_id,))
+            return result.rowcount == 1
+
+    def settle_request_budget(self, reservation_id: str, charged_nano_usd: int, usage_fields: UsageFields | dict[str, Any] | None) -> None:
+        if isinstance(charged_nano_usd, bool) or not isinstance(charged_nano_usd, int) or charged_nano_usd < 0:
+            raise ValueError("Charge must be a non-negative integer number of nano-USD")
+        fields = usage_fields if isinstance(usage_fields, UsageFields) else UsageFields(**usage_fields) if usage_fields else UsageFields(status="interrupted")
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            reservation = conn.execute("SELECT * FROM portal_budget_reservations_v2 WHERE id=?", (reservation_id,)).fetchone()
+            if not reservation or reservation["status"] != "active":
+                raise ValueError("Budget reservation is not active")
+            key = conn.execute("SELECT k.label,u.display_name,u.email FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id WHERE k.id=? AND k.owner_user_id=?", (reservation["key_id"], reservation["owner_user_id"])).fetchone()
+            if not key:
+                raise LookupError("Reservation owner key no longer exists")
+            event_id = uuid.uuid4().hex
+            snapshot = json.loads(reservation["price_snapshot_json"]) if reservation["price_snapshot_json"] else None
+            if snapshot and fields.input_tokens is not None and fields.output_tokens is not None and snapshot.get("input_rate") is not None and snapshot.get("output_rate") is not None:
+                from app.money import rate_cost_nano_usd
+                cached = fields.cached_tokens or 0
+                charged_nano_usd = rate_cost_nano_usd(max(fields.input_tokens - cached, 0), cached, fields.output_tokens, Decimal(snapshot["input_rate"]), Decimal(snapshot["output_rate"]), Decimal(snapshot["cached_input_rate"]) if snapshot.get("cached_input_rate") is not None else None)
+            price_version_id = reservation["price_version_id"]
+            charge_usd = charged_nano_usd / 1_000_000_000
+            conn.execute("""INSERT INTO portal_usage_events(id,owner_user_id,owner_name_snapshot,owner_email_snapshot,key_id,key_label_snapshot,provider_id,model_id,occurred_at,status,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,estimated_cost_usd,origin,amount_nano_usd,offer_route_id,price_version_id,canonical_model_id,price_snapshot_v2_json,price_snapshot_json,request_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (event_id, reservation["owner_user_id"], key["display_name"], key["email"], reservation["key_id"], key["label"], reservation["connection_id"], fields.model_id or "unknown", reservation["created_at"], fields.status, fields.latency_ms, fields.input_tokens, fields.output_tokens, fields.total_tokens, fields.cached_tokens, charge_usd, "gateway", charged_nano_usd, None, price_version_id, fields.model_id, json.dumps(snapshot) if snapshot else None, json.dumps(snapshot) if snapshot else None, fields.request_id))
+            conn.execute("UPDATE portal_budget_reservations_v2 SET status='settled',settlement_event_id=? WHERE id=? AND status='active'", (event_id, reservation_id))
 
     def list_users(self) -> list[dict[str, Any]]:
         with self.connect() as conn:
@@ -1883,8 +2097,8 @@ class PortalDatabase:
         usage_args: list[Any] = [owner_user_id, key_id]
         reservation_args: list[Any] = [owner_user_id, key_id]
         if start:
-            usage_query += " AND occurred_at>=?"
-            reservation_query += " AND created_at>=?"
+            usage_query += " AND julianday(occurred_at)>=julianday(?)"
+            reservation_query += " AND julianday(created_at)>=julianday(?)"
             usage_args.append(start)
             reservation_args.append(start)
         with self.connect() as conn:
@@ -2137,9 +2351,9 @@ class PortalDatabase:
                     reserve_where += " AND key_id=?"
                     reserve_args.append(scoped_key_id)
                 if start:
-                    usage_where += " AND occurred_at>=?"
+                    usage_where += " AND julianday(occurred_at)>=julianday(?)"
                     usage_args.append(start)
-                    reserve_where += " AND created_at>=?"
+                    reserve_where += " AND julianday(created_at)>=julianday(?)"
                     reserve_args.append(start)
                 used = conn.execute(f"SELECT COALESCE(SUM(estimated_cost_usd),0) FROM portal_usage_events WHERE {usage_where}", usage_args).fetchone()[0]
                 reserved = conn.execute(f"SELECT COALESCE(SUM(estimated_cost_usd),0) FROM portal_budget_reservations WHERE {reserve_where}", reserve_args).fetchone()[0]
@@ -2160,23 +2374,18 @@ class PortalDatabase:
             start = datetime.min.replace(tzinfo=timezone.utc)
         else:
             return None
-        return _iso(start)
+        return period_window({"day": "daily", "week": "weekly", "month": "monthly"}.get(period, period), now).start_utc.isoformat()
 
     @staticmethod
     def period_reset_at(period: str | None, now: datetime | None = None) -> str | None:
-        now = now or _now()
-        if period in {"daily", "day"}:
-            start = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        elif period in {"weekly", "week"}:
-            start = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=7 - now.weekday())
-        elif period in {"monthly", "month"}:
-            if now.month == 12:
-                start = now.replace(year=now.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
-            else:
-                start = now.replace(month=now.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
-        else:
+        if not period or period in {"lifetime", "life"}:
             return None
-        return _iso(start)
+        aliases = {"day": "daily", "week": "weekly", "month": "monthly"}
+        try:
+            reset = period_window(aliases.get(period, period), now or _now()).reset_at_utc
+        except ValueError:
+            return None
+        return reset.isoformat() if reset else None
 
     def key_usage_summary(self, owner_user_id: str, key_id: str) -> dict[str, Any]:
         with self.connect() as conn:
@@ -2209,7 +2418,7 @@ class PortalDatabase:
 
     def list_usage(self, owner_user_id: str, *, limit: int = 100, before: str | None = None, key_id: str | None = None) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 200))
-        query = "SELECT id,key_id,key_label_snapshot,provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,estimated_cost_usd,client_ip,request_id FROM portal_usage_events WHERE owner_user_id=?"
+        query = "SELECT id,key_id,key_label_snapshot,provider_id,provider_name_snapshot,model_id,occurred_at,status,error_category,latency_ms,input_tokens,output_tokens,total_tokens,cached_tokens,estimated_cost_usd,amount_nano_usd,price_version_id,client_ip,request_id FROM portal_usage_events WHERE owner_user_id=?"
         args: list[Any] = [owner_user_id]
         if key_id:
             query += " AND key_id=?"
@@ -2242,20 +2451,13 @@ class PortalDatabase:
         return dict(row)
 
     def user_period_spend(self, owner_user_id: str, period: str | None) -> float:
-        start = self._period_start(period, _now())
-        query = "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM portal_usage_events WHERE owner_user_id=?"
-        reserve_query = "SELECT COALESCE(SUM(estimated_cost_usd),0) FROM portal_budget_reservations WHERE owner_user_id=? AND status='active'"
-        args: list[Any] = [owner_user_id]
-        reserve_args: list[Any] = [owner_user_id]
-        if start:
-            query += " AND occurred_at>=?"
-            reserve_query += " AND created_at>=?"
-            args.append(start)
-            reserve_args.append(start)
+        window = period_window(period if period in {"daily", "weekly", "monthly", "lifetime"} else "lifetime", _now())
+        start = window.start_utc.isoformat()
         with self.connect() as conn:
-            used = conn.execute(query, args).fetchone()[0]
-            reserved = conn.execute(reserve_query, reserve_args).fetchone()[0]
-        return float(used or 0) + float(reserved or 0)
+            events = conn.execute("SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE owner_user_id=? AND julianday(occurred_at)>=julianday(?)", (owner_user_id, start)).fetchall()
+            reserved = conn.execute("SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE owner_user_id=? AND status='active' AND julianday(created_at)>=julianday(?)", (owner_user_id, start)).fetchall()
+        used_nano = self._sum_nano_rows(events) + sum(row["amount_nano_usd"] for row in reserved)
+        return used_nano / 1_000_000_000
 
     def operator_usage_summary(self) -> dict[str, Any]:
         with self.connect() as conn:
@@ -2324,10 +2526,27 @@ class PortalDatabase:
                 "id": row["id"], "displayName": row["display_name"], "email": row["email"],
                 "status": "disabled" if row["status"] != "active" else "active",
                 "allowanceUsd": row["allowance_usd"], "allowancePeriod": {"daily": "day", "weekly": "week"}.get(row["allowance_period"]),
+                "allowanceNanoUsd": self.user_allowance_nano_usd(row["id"]),
+                "allowanceResetAt": self.period_reset_at(row["allowance_period"]),
                 "rpmLimit": row["rpm_limit"], "usedUsd": current_used, "keyCount": row["key_count"] or 0,
                 "requestCount": row["request_count"] or 0, "lastActiveAt": row["last_active_at"],
             })
         return people
+
+    def user_allowance_nano_usd(self, owner_user_id: str) -> int | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT amount_nano_usd FROM user_allowances WHERE user_id=? AND active=1", (owner_user_id,)).fetchone()
+            if row:
+                return row["amount_nano_usd"]
+            legacy = conn.execute("SELECT allowance_usd FROM portal_users WHERE id=?", (owner_user_id,)).fetchone()
+        return self._cap_nano_usd(legacy["allowance_usd"]) if legacy and legacy["allowance_usd"] is not None else None
+
+    def user_period_spend_nano_usd(self, owner_user_id: str, period: str | None) -> int:
+        window = period_window(period if period in {"daily", "weekly", "monthly", "lifetime"} else "lifetime", _now())
+        with self.connect() as conn:
+            events = conn.execute("SELECT amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE owner_user_id=? AND julianday(occurred_at)>=julianday(?)", (owner_user_id, window.start_utc.isoformat())).fetchall()
+            reserved = conn.execute("SELECT amount_nano_usd FROM portal_budget_reservations_v2 WHERE owner_user_id=? AND status='active' AND julianday(created_at)>=julianday(?)", (owner_user_id, window.start_utc.isoformat())).fetchall()
+        return self._sum_nano_rows(events) + sum(row["amount_nano_usd"] for row in reserved)
 
     def list_providers(self) -> list[dict[str, Any]]:
         with self.connect() as conn:

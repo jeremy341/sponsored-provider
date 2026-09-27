@@ -11,6 +11,7 @@ from app.catalog import DiscoveredModel, ModelsDevCatalog
 from app.database import Database
 from app.portal_api import PortalService, create_portal_router
 from app.portal_db import PortalDatabase
+import app.portal_api as portal_api
 
 
 class FixedIdentity:
@@ -526,8 +527,13 @@ def test_session_and_dashboard_endpoints_match_portal_contract(tmp_path):
     assert session.json()["user"]["displayName"] == "member-a"
     assert session.json()["role"] == "developer"
     assert session.json()["csrfToken"] == client.cookies.get("portal_csrf")
-    assert client.get("/api/developer/dashboard").status_code == 200
-    assert set(client.get("/api/developer/dashboard").json()) == {"usage", "series", "topModels", "keys", "recentActivity", "allowance"}
+    actor = repository.upsert_user(subject="allowance-operator", email="operator@example.test", name="Operator", role="operator")
+    repository.assign_user_allowance(user["id"], 250_000_000, "weekly", actor["id"])
+    dashboard = client.get("/api/developer/dashboard")
+    assert dashboard.status_code == 200
+    assert set(dashboard.json()) == {"usage", "series", "topModels", "keys", "recentActivity", "allowance"}
+    assert dashboard.json()["allowance"]["limitNanoUsd"] == 250_000_000
+    assert dashboard.json()["allowance"]["resetAt"]
     assert client.get("/api/operator/dashboard").status_code == 403
 
     client.cookies.clear()
@@ -907,6 +913,51 @@ def test_route_order_update_is_audited_and_route_availability_is_separate(tmp_pa
         assert connection.execute("SELECT active FROM catalog_offers WHERE id=?", (offer["id"],)).fetchone()["active"] == 1
         assert connection.execute("SELECT active FROM offer_routes WHERE id=?", (route_id,)).fetchone()["active"] == 0
     assert next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])["available"] is True
+
+
+def test_operator_can_set_connection_budget_and_people_exposes_credit_reset(tmp_path):
+    client, repository, _legacy, operator, headers = _operator_app(tmp_path)
+    user = repository.upsert_user(subject="budget-person", email="budget-person@example.test", name="Budget person")
+    repository.assign_user_allowance(user["id"], 250_000_000, "weekly", operator["id"])
+    profile = _legacy.create_upstream("Credits provider", "openai_compatible", "https://93.184.216.34/v1", "secret")
+    connection_id = repository.register_connection(profile["id"], "credits", "Credits provider", "Primary").id
+    response = client.post(f"/api/operator/connections/{connection_id}/budget", headers=headers, json={
+        "limitNanoUsd": 500_000_000, "period": "monthly", "reserveNanoUsd": 25_000_000,
+    })
+    assert response.status_code == 200, response.text
+    with repository.connect() as connection:
+        budget = connection.execute("SELECT cap_nano_usd,period,reserve_nano_usd FROM provider_budgets WHERE connection_id=?", (connection_id,)).fetchone()
+    assert tuple(budget) == (500_000_000, "monthly", 25_000_000)
+    people = client.get("/api/operator/people").json()
+    person = next(item for item in people if item["id"] == user["id"])
+    assert person["allowanceNanoUsd"] == 250_000_000
+    assert person["allowancePeriod"] == "week"
+    assert person["allowanceResetAt"]
+
+
+def test_preflight_rejects_missing_finite_output_ceiling():
+    with pytest.raises(ValueError, match="budget_estimate_unavailable"):
+        portal_api.estimate_request_budget(input_text="hello", output_limit=None, verified_model_max=None, hard_output_limit=None,
+                                           input_rate="1", output_rate="1")
+
+
+def test_preflight_rejects_vision_without_explicit_offer_estimation_policy():
+    with pytest.raises(ValueError, match="vision"):
+        portal_api.estimate_request_budget(input_text="describe this", output_limit=100, verified_model_max=None,
+                                           hard_output_limit=None, input_rate="1", output_rate="1", is_vision=True)
+
+
+def test_preflight_uses_verified_finite_output_limit():
+    estimate = portal_api.estimate_request_budget(input_text="hello", output_limit=None, verified_model_max=10,
+                                                 hard_output_limit=20, input_rate="1", output_rate="1")
+    assert estimate == 19_000
+
+
+def test_preflight_accepts_vision_only_with_explicit_offer_bounds():
+    estimate = portal_api.estimate_request_budget(input_text="", output_limit=50, verified_model_max=None,
+                                                 hard_output_limit=None, input_rate="0.001", output_rate="0.002",
+                                                 is_vision=True, offer_estimation_policy={"max_input_tokens": 100, "max_output_tokens": 30})
+    assert estimate == 160
 
 
 def test_route_mutations_require_operator_role(tmp_path):
