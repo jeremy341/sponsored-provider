@@ -10,8 +10,8 @@ from app.main import app
 
 
 @pytest.fixture
-def client():
-    db_path = str(Path.cwd() / f".test-provider-{uuid4().hex}.db")
+def client(tmp_path):
+    db_path = str(tmp_path / f".test-provider-{uuid4().hex}.db")
     settings = Settings(database_path=db_path, provider_key_pepper="test-pepper", provider_secret_key=Fernet.generate_key().decode(), admin_token="admin", allowed_models="qwen-test", alibaba_api_key="test-upstream", input_price_per_million=1, output_price_per_million=1)
     app.dependency_overrides[get_settings] = lambda: settings
     with TestClient(app) as test_client:
