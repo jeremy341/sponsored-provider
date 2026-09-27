@@ -1,3 +1,5 @@
+import { formatUsd as formatExactUsd } from "./money";
+
 export function money(value: number | null | undefined): string {
   return value == null
     ? "Not reported"
@@ -19,6 +21,6 @@ export function dateTime(value: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? "Unknown" : new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date);
 }
 
-export function pricePerMillion(value: number | null): string {
-  return value == null ? "Pricing not configured" : `${money(value)} / 1M tokens`;
+export function pricePerMillion(value: string | number | null): string {
+  return value == null ? "Pricing not configured" : `${formatExactUsd(String(value))} / 1M tokens`;
 }

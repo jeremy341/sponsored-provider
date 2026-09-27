@@ -1,16 +1,24 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tabs from "@radix-ui/react-tabs";
 import {
-  Activity, ArrowDownToLine, ArrowRight, BadgeCheck, Ban, Boxes, ChartNoAxesColumn,
+  Activity, ArrowRight, BadgeCheck, Ban, Boxes, ChartNoAxesColumn,
   ChevronDown, CircleHelp, Clock3, Code2, Copy, ExternalLink, Gauge, KeyRound, LayoutDashboard,
   LockKeyhole, LogOut, Menu, Network, Plus, Search, Shield, ShieldAlert, SlidersHorizontal,
   Users, Wallet, X,
 } from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { AuthPage } from "./AuthPage";
-import { count, dateTime, money, pricePerMillion, tokens } from "../lib/format";
+import { ProviderListPage } from "./operator/providers/ProviderListPage";
+import { OperatorUsagePage as OperatorUsageSurface } from "./operator/usage/OperatorUsagePage";
+import { AllowanceDialog } from "./operator/people/AllowanceEditor";
+import { formatUsd } from "../lib/money";
+import { AllowanceSummary } from "./developer/AllowanceSummary";
+import { ModelCatalogPage as ModelCatalogSurface } from "./developer/ModelCatalogPage";
+import { DeveloperActivityPage as DeveloperActivitySurface } from "./developer/DeveloperActivityPage";
+import { ModelAccessPicker } from "./developer/ModelAccessPicker";
+import { count, dateTime, money, tokens } from "../lib/format";
 import type {
   ActivityEvent, ApiKeyRecord, CreateKeyInput, CreateKeyResult, InviteRecord, ModelRecord, ModelUsageRecord, UsagePoint,
   PersonRecord, ProviderRecord, UsageSummary,
@@ -190,7 +198,7 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
         <Route path="/operator" element={<OperatorOverview />} />
         <Route path="/operator/people" element={<PeoplePage />} />
         <Route path="/operator/providers" element={<ProvidersPage />} />
-        <Route path="/operator/usage" element={<OperatorUsagePage />} />
+        <Route path="/operator/usage" element={<OperatorUsageSurface portalApi={api} />} />
         <Route path="/operator/guardrails" element={<GuardrailsPage />} />
         <Route path="*" element={<NotFound />} />
       </Routes>
@@ -204,8 +212,8 @@ function PageHeader({ title, description, action }: { title: string; description
   return <header className="page-header"><div><h1>{title}</h1><p>{description}</p></div>{action && <div className="page-header-action">{action}</div>}</header>;
 }
 
-function StatStrip({ usage, allowance }: { usage: UsageSummary | null; allowance?: { usedUsd: number | null; limitUsd: number | null; period: string | null; resetAt: string | null } | null }) {
-  if (!usage && !allowance) return <EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact />;
+function StatStrip({ usage }: { usage: UsageSummary | null }) {
+  if (!usage) return <EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact />;
 
   const rows = [
     ["Requests", count(usage?.requests)],
@@ -213,7 +221,6 @@ function StatStrip({ usage, allowance }: { usage: UsageSummary | null; allowance
     ["Reported input / output", `${tokens(usage?.inputTokens)} / ${tokens(usage?.outputTokens)}`],
     ["Reported total tokens", tokens(usage?.totalTokens)],
     ["Estimated spend", usage?.estimatedSpendUsd == null ? "Not reported" : money(usage.estimatedSpendUsd)],
-    ["Allowance remaining", allowance?.limitUsd == null || allowance.usedUsd == null ? "Not reported" : money(Math.max(0, allowance.limitUsd - allowance.usedUsd))],
   ];
 
   return <div className="stat-strip" aria-label="Usage summary">{rows.map(([label, value], index) => <div className={`stat-cell${index === 0 ? " stat-cell-primary" : ""}`} key={label}><span>{label}</span><strong>{value}</strong></div>)}</div>;
@@ -307,15 +314,14 @@ function DeveloperHome() {
   return <>
     <PageHeader title="Home" description="Your keys, allowance, and recent activity in one place." action={<span className="period-chip"><Clock3 size={14} /> Current allowance period</span>} />
     <DataNotice error={data.error} onRetry={data.reload} />
-    {data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} allowance={dash?.allowance} />}
+    {data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} />}
     <div className="content-grid home-grid">
       <MetricPanel usage={dash?.usage ?? null} series={dash?.series ?? []} />
       <section className="section-block"><div className="section-heading"><div><h2>API keys</h2><p>Only keys issued to your account.</p></div><NavLink className="text-link" to="/developer/keys">Manage <ArrowRight size={15} /></NavLink></div>
         {data.loading ? <LoadingLine /> : dash?.keys.length ? <KeyTable keys={dash.keys.slice(0, 4)} /> : <EmptyState title="No keys yet" body="Create a key to use approved models through the OpenAI-compatible endpoint." action={<NavLink className="button button-secondary" to="/developer/keys">Create an API key <ArrowRight size={15} /></NavLink>} compact />}
       </section>
       <ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} developer />
-      <section className="section-block allowance-panel"><div className="section-heading"><div><h2>Your allowance</h2><p>Shared across your active keys.</p></div><Wallet size={18} /></div>
-        <AllowanceRunway allowance={dash?.allowance ?? null} /></section>
+      <AllowanceSummary allowance={dash?.allowance ?? null} />
       <DeveloperInviteCard />
     </div>
     <ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
@@ -368,7 +374,7 @@ function AllowanceRunway({ allowance }: { allowance: { usedUsd: number | null; l
 function KeyTable({ keys, onEdit, onRevoke, onArchive }: { keys: ApiKeyRecord[]; onEdit?: (key: ApiKeyRecord) => void; onRevoke?: (key: ApiKeyRecord) => void; onArchive?: (key: ApiKeyRecord) => void }) {
   const canManage = Boolean(onEdit || onRevoke || onArchive);
 
-  return <div className="table-scroll"><table><thead><tr><th>Key</th><th>Models</th><th>Spend used / cap</th><th>RPM</th><th>Status</th>{canManage && <th>Actions</th>}</tr></thead><tbody>{keys.map((key) => <tr key={key.id}><td><strong>{key.label}</strong><small className="mono">{key.prefix}••••</small></td><td>{key.modelAccess.mode === "all_approved" ? "All approved" : `${key.modelAccess.modelIds.length} selected`}</td><td>{money(key.spendUsedUsd)} used{key.spendCapUsd == null ? " · no key cap" : ` / ${money(key.spendCapUsd)} ${key.spendPeriod}`}<small>{key.spendResetAt ? `Resets ${dateTime(key.spendResetAt)}` : key.spendCapUsd == null ? "No key reset" : "No reset scheduled"}</small></td><td>{key.rpmLimit == null ? "Inherited" : count(key.rpmLimit)}</td><td><StatusLabel status={key.status} /></td>{canManage && <td><div className="row-actions">{onEdit && key.status === "active" && <button type="button" className="button button-quiet button-small" onClick={() => onEdit(key)}>Edit</button>}{onRevoke && key.status === "active" && <button type="button" className="button button-quiet button-small" onClick={() => onRevoke(key)}>Revoke</button>}{onArchive && key.status !== "archived" && <button type="button" className="button button-quiet button-small" onClick={() => onArchive(key)}>Archive</button>}</div></td>}</tr>)}</tbody></table></div>;
+  return <div className="table-scroll"><table><thead><tr><th>Key</th><th>Models</th><th>Spend used / cap</th><th>RPM</th><th>Status</th>{canManage && <th>Actions</th>}</tr></thead><tbody>{keys.map((key) => <tr key={key.id}><td><strong>{key.label}</strong><small className="mono">{key.prefix}••••</small></td><td>{key.modelAccess.mode === "all_approved" ? "All approved" : `${key.modelAccess.modelIds.length} selected`}</td><td>{formatUsd(key.spendUsedUsd)} used{key.spendCapUsd == null ? " · no key cap" : ` / ${formatUsd(key.spendCapUsd)} ${key.spendPeriod}`}<small>{key.spendResetAt ? `Resets ${dateTime(key.spendResetAt)}` : key.spendCapUsd == null ? "No key reset" : "No reset scheduled"}</small></td><td>{key.rpmLimit == null ? "Inherited" : count(key.rpmLimit)}</td><td><StatusLabel status={key.status} /></td>{canManage && <td><div className="row-actions">{onEdit && key.status === "active" && <button type="button" className="button button-quiet button-small" onClick={() => onEdit(key)}>Edit</button>}{onRevoke && key.status === "active" && <button type="button" className="button button-quiet button-small" onClick={() => onRevoke(key)}>Revoke</button>}{onArchive && key.status !== "archived" && <button type="button" className="button button-quiet button-small" onClick={() => onArchive(key)}>Archive</button>}</div></td>}</tr>)}</tbody></table></div>;
 }
 
 function StatusLabel({ status }: { status: string }) {
@@ -423,7 +429,6 @@ function EditKeyDialog({ keyRecord, onClose, onSaved }: { keyRecord: ApiKeyRecor
   const models = useLoad(api.listModels, [Boolean(keyRecord)]);
   const [mode, setMode] = useState<"all_approved" | "selected">("all_approved");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [modelSearch, setModelSearch] = useState("");
   const [spendCap, setSpendCap] = useState("");
   const [spendPeriod, setSpendPeriod] = useState<CreateKeyInput["spendPeriod"]>("week");
   const [rpm, setRpm] = useState("");
@@ -433,7 +438,6 @@ function EditKeyDialog({ keyRecord, onClose, onSaved }: { keyRecord: ApiKeyRecor
   useEffect(() => {
     setMode(keyRecord?.modelAccess.mode ?? "all_approved");
     setSelectedModels(keyRecord?.modelAccess.mode === "selected" ? [...keyRecord.modelAccess.modelIds] : []);
-    setModelSearch("");
     setSpendCap(keyRecord?.spendCapUsd == null ? "" : String(keyRecord.spendCapUsd));
     setSpendPeriod(keyRecord?.spendPeriod ?? "week");
     setRpm(keyRecord?.rpmLimit == null ? "" : String(keyRecord.rpmLimit));
@@ -441,7 +445,6 @@ function EditKeyDialog({ keyRecord, onClose, onSaved }: { keyRecord: ApiKeyRecor
   }, [keyRecord]);
 
   const approvedModels = (models.value ?? []).filter((model) => model.approved && model.available && model.pricingVerified);
-  const visibleModels = approvedModels.filter((model) => `${model.id} ${model.upstreamModelId ?? ""} ${model.providerName}`.toLowerCase().includes(modelSearch.toLowerCase()));
 
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -462,7 +465,7 @@ function EditKeyDialog({ keyRecord, onClose, onSaved }: { keyRecord: ApiKeyRecor
       await api.updateKeyPolicy(keyRecord.id, {
         label: keyRecord.label,
         modelAccess: mode === "all_approved" ? { mode } : { mode, modelIds: selectedModels },
-        spendCapUsd: spendCap.trim() ? Number(spendCap) : null,
+        spendCapUsd: spendCap.trim() ? spendCap.trim() : null,
         spendPeriod: period,
         rpmLimit: rpm.trim() ? Number(rpm) : null,
       });
@@ -475,15 +478,14 @@ function EditKeyDialog({ keyRecord, onClose, onSaved }: { keyRecord: ApiKeyRecor
     }
   }
 
-  return <Dialog.Root open={Boolean(keyRecord)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="edit-key-description"><div className="dialog-title-row"><div><Dialog.Title>Edit key policy</Dialog.Title><Dialog.Description id="edit-key-description">{keyRecord?.label} · values can only tighten the account-level allowance.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div><form onSubmit={save} className="dialog-form"><fieldset className="field-group"><legend>Model access</legend><div className="segmented-options" role="radiogroup" aria-label="Model access policy"><label className={mode === "all_approved" ? "selected" : ""}><input type="radio" name="edit-model-mode" checked={mode === "all_approved"} onChange={() => setMode("all_approved")} /><span>All approved</span></label><label className={mode === "selected" ? "selected" : ""}><input type="radio" name="edit-model-mode" checked={mode === "selected"} onChange={() => setMode("selected")} /><span>Selected models</span></label></div>{mode === "selected" && <div className="model-checklist" aria-label="Approved models"><label className="search-field"><Search size={15} /><span className="sr-only">Search approved models</span><input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Search models or providers" /></label>{models.loading ? <LoadingLine /> : visibleModels.length ? visibleModels.map((model) => <label className="model-check-row" key={`${model.providerName}:${model.id}`}><input type="checkbox" checked={selectedModels.includes(model.id)} onChange={(event) => setSelectedModels((current) => event.target.checked ? [...current, model.id] : current.filter((id) => id !== model.id))} /><span><strong>{model.id}</strong><small>{model.providerName} · {model.capabilities.join(" · ")}</small></span></label>) : <EmptyState title="No matching approved models" body="Clear the search or ask the operator to approve more models." compact />}</div>}</fieldset><div className="form-two-col"><label><span className="field-label">Spend cap (USD)</span><input type="number" min="0.01" step="0.01" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit allowance" /></label><label><span className="field-label">Reset period</span><select value={spendPeriod ?? "week"} disabled={!spendCap} onChange={(event) => { const period = event.target.value; setSpendPeriod(period === "day" || period === "week" || period === "month" || period === "lifetime" ? period : "week"); }}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></label></div><label><span className="field-label">Requests per minute</span><input type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Inherit user limit" /></label>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save policy"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root open={Boolean(keyRecord)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="edit-key-description"><div className="dialog-title-row"><div><Dialog.Title>Edit key policy</Dialog.Title><Dialog.Description id="edit-key-description">{keyRecord?.label} · values can only tighten the account-level allowance.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div><form onSubmit={save} className="dialog-form"><ModelAccessPicker models={approvedModels} loading={models.loading} error={models.error} onRetry={models.reload} mode={mode} selectedModelIds={selectedModels} onModeChange={setMode} onSelectedChange={setSelectedModels} /><div className="form-two-col"><label><span className="field-label">Spend cap (USD)</span><input type="number" inputMode="decimal" min="0" step="any" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit allowance" /></label><label><span className="field-label">Reset period</span><select value={spendPeriod ?? "week"} disabled={!spendCap} onChange={(event) => { const period = event.target.value; setSpendPeriod(period === "day" || period === "week" || period === "month" || period === "lifetime" ? period : "week"); }}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></label></div><label><span className="field-label">Requests per minute</span><input type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Inherit user limit" /></label>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save policy"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
-function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; created: CreateKeyResult | null; onCreated: (result: CreateKeyResult | null) => void; onSaved: () => void }) {
+export function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; created: CreateKeyResult | null; onCreated: (result: CreateKeyResult | null) => void; onSaved: () => void }) {
   const models = useLoad(api.listModels, [open]);
   const [label, setLabel] = useState("");
   const [mode, setMode] = useState<"all_approved" | "selected">("all_approved");
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [modelSearch, setModelSearch] = useState("");
   const [spendCap, setSpendCap] = useState("");
   const [spendPeriod, setSpendPeriod] = useState("week");
   const [rpm, setRpm] = useState("");
@@ -493,19 +495,12 @@ function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { 
 
   useEffect(() => {
     if (open) {
-      setLabel(""); setMode("all_approved"); setSelectedModels([]); setModelSearch(""); setSpendCap(""); setRpm(""); setError(null); setCopied(false);
+      setLabel(""); setMode("all_approved"); setSelectedModels([]); setSpendCap(""); setRpm(""); setError(null); setCopied(false);
       onCreated(null);
     }
   }, [open, onCreated]);
 
   const approvedModels = (models.value ?? []).filter((model) => model.approved && model.available && model.pricingVerified);
-  const filteredModels = approvedModels.filter((model) => `${model.id} ${model.upstreamModelId ?? ""} ${model.providerName}`.toLowerCase().includes(modelSearch.toLowerCase()));
-
-  const groupedModels = useMemo(() => filteredModels.reduce<Record<string, ModelRecord[]>>((groups, model) => {
-    (groups[model.providerName] ??= []).push(model);
-
-    return groups;
-  }, {}), [filteredModels]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -523,7 +518,7 @@ function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { 
     const payload: CreateKeyInput = {
       label: label.trim(),
       modelAccess: mode === "all_approved" ? { mode } : { mode, modelIds: selectedModels },
-      spendCapUsd: spendCap.trim() ? Number(spendCap) : null,
+      spendCapUsd: spendCap.trim() ? spendCap.trim() : null,
       spendPeriod: period,
       rpmLimit: rpm.trim() ? Number(rpm) : null,
     };
@@ -548,10 +543,8 @@ function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { 
       <div className="dialog-title-row"><div><Dialog.Title>{created ? "Your key is ready" : "Create API key"}</Dialog.Title><Dialog.Description id="create-key-description">{created ? "Copy this secret now. It will not be shown again." : "The server enforces your account allowance and approved model policy."}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div>
       {created ? <div className="created-key-state"><div className="inline-notice notice-success"><BadgeCheck size={17} /><span>Key created. The secret is visible only in this dialog.</span></div><label className="field-label" htmlFor="created-secret">API key</label><div className="secret-field"><input id="created-secret" className="mono" readOnly value={created.secret} autoComplete="off" /><button type="button" className="button button-secondary" onClick={copySecret}><Copy size={15} />{copied ? "Copied" : "Copy"}</button></div><p className="field-help">Close this dialog when you’ve stored it securely. Never commit it to a repository.</p><div className="dialog-actions"><Dialog.Close asChild><button className="button button-primary">Done</button></Dialog.Close></div></div> : <form onSubmit={submit} className="dialog-form">
         <label className="field-label" htmlFor="key-label">Key name</label><input id="key-label" required maxLength={64} autoFocus value={label} onChange={(event) => setLabel(event.target.value)} placeholder="e.g. OpenCode laptop" />
-        <fieldset className="field-group"><legend>Model access</legend><div className="segmented-options" role="radiogroup" aria-label="Model access policy"><label className={mode === "all_approved" ? "selected" : ""}><input type="radio" name="model-mode" value="all_approved" checked={mode === "all_approved"} onChange={() => setMode("all_approved")} /><span>All approved models</span></label><label className={mode === "selected" ? "selected" : ""}><input type="radio" name="model-mode" value="selected" checked={mode === "selected"} onChange={() => setMode("selected")} /><span>Select models</span></label></div><p className="field-help">All-approved keys inherit models only after the operator approves and prices them.</p>
-          {mode === "selected" && <div className="model-checklist" aria-label="Approved models">{models.loading ? <LoadingLine /> : models.error ? <DataNotice error={models.error} onRetry={models.reload} /> : approvedModels.length === 0 ? <EmptyState title="No selectable models" body="Approved, priced models will appear here when the catalog API is connected." compact /> : <><label className="search-field"><Search size={15} /><span className="sr-only">Search approved models</span><input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Search models or providers" /></label>{Object.entries(groupedModels).length === 0 ? <EmptyState title="No matching models" body="Clear the search to see all approved models." compact /> : Object.entries(groupedModels).map(([providerName, entries]) => <fieldset key={providerName} className="provider-model-group"><legend>{providerName}</legend>{entries.map((model) => <label className="model-check-row" key={`${providerName}:${model.id}`}><input type="checkbox" checked={selectedModels.includes(model.id)} onChange={(event) => setSelectedModels((old) => event.target.checked ? [...old, model.id] : old.filter((id) => id !== model.id))} /><span><strong>{model.upstreamModelId ?? model.id}</strong><small>{model.providerName} · {model.capabilities.join(" · ")} · {pricePerMillion(model.inputUsdPerMillion)} input</small></span></label>)}</fieldset>)}</>}</div>}
-        </fieldset>
-        <div className="form-two-col"><div><label className="field-label" htmlFor="spend-cap">Optional spend cap (USD)</label><input id="spend-cap" type="number" min="0.01" step="0.01" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit account allowance" /><p className="field-help">A key cap can only tighten your account allowance.</p></div><div><label className="field-label" htmlFor="spend-period">Cap reset</label><select id="spend-period" value={spendPeriod} onChange={(event) => setSpendPeriod(event.target.value)} disabled={!spendCap}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></div></div>
+        <ModelAccessPicker models={approvedModels} loading={models.loading} error={models.error} onRetry={models.reload} mode={mode} selectedModelIds={selectedModels} onModeChange={setMode} onSelectedChange={setSelectedModels} />
+        <div className="form-two-col"><div><label className="field-label" htmlFor="spend-cap">Optional spend cap (USD)</label><input id="spend-cap" type="number" inputMode="decimal" min="0" step="any" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit account allowance" /><p className="field-help">A key cap can only tighten your account allowance.</p></div><div><label className="field-label" htmlFor="spend-period">Cap reset</label><select id="spend-period" value={spendPeriod} onChange={(event) => setSpendPeriod(event.target.value)} disabled={!spendCap}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></div></div>
         <div><label className="field-label" htmlFor="key-rpm">Optional requests per minute</label><input id="key-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Inherit account limit" /><p className="field-help">A per-key RPM can only be lower than your user-wide limit.</p></div>
         {error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}
         <div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Creating…" : "Create key"}</button></div>
@@ -561,60 +554,11 @@ function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { 
 }
 
 function ModelsPage() {
-  const models = useLoad(api.listModels);
-  const [search, setSearch] = useState("");
-  const [provider, setProvider] = useState("all");
-  const [copiedModel, setCopiedModel] = useState<string | null>(null);
-  const catalog = models.value ?? [];
-  const providers = Array.from(new Set(catalog.map((model) => model.providerName))).sort();
-  const filtered = catalog.filter((model) => `${model.id} ${model.providerName}`.toLowerCase().includes(search.toLowerCase()) && (provider === "all" || model.providerName === provider));
-
-  async function copyModelId(modelId: string) {
-    try {
-      await navigator.clipboard.writeText(modelId);
-      setCopiedModel(modelId);
-    } catch {
-      setCopiedModel(null);
-    }
-  }
-
-  return <><PageHeader title="Models" description="Browse the models currently approved for your account." /><DataNotice error={models.error} onRetry={models.reload} /><section className="section-block table-section"><div className="toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Search models</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search approved models" /></label><label className="select-filter"><span className="sr-only">Filter by provider</span><select value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">All providers</option>{providers.map((item) => <option key={item}>{item}</option>)}</select><ChevronDown size={14} /></label><span className="count-label">{models.value ? `${filtered.length} models` : "— models"}</span></div>
-      {models.loading ? <LoadingLine /> : filtered.length ? <div className="table-scroll"><table><thead><tr><th>Model</th><th>Provider</th><th>Capability</th><th>Input / 1M</th><th>Output / 1M</th><th>Catalog sync</th><th></th></tr></thead><tbody>{filtered.map((model) => <tr key={`${model.providerName}:${model.id}`}><td><strong className="mono">{model.id}</strong>{!model.pricingVerified && <small>Pricing needs verification</small>}</td><td>{model.providerName}</td><td>{model.capabilities.join(", ")}</td><td>{pricePerMillion(model.inputUsdPerMillion)}</td><td>{pricePerMillion(model.outputUsdPerMillion)}</td><td>{dateTime(model.syncedAt)}</td><td><button type="button" className="button button-quiet button-small" onClick={() => { void copyModelId(model.id); }}>{copiedModel === model.id ? "Copied" : "Copy ID"}</button></td></tr>)}</tbody></table></div> : <EmptyState title={catalog.length ? "No models match" : "Model catalog unavailable"} body={catalog.length ? "Try another model name or provider filter." : "Only real, operator-approved catalog entries will be listed here."} />}</section></>;
+  return <ModelCatalogSurface portalApi={api} />;
 }
 
 function ActivityPage() {
-  const [cursor, setCursor] = useState<string | undefined>(undefined);
-  const [rows, setRows] = useState<ActivityEvent[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [model, setModel] = useState("");
-  const [status, setStatus] = useState("all");
-  useEffect(() => {
-    let active = true;
-    setLoading(true); setError(null);
-
-    async function loadActivity() {
-      try {
-        const page = await api.listActivity(cursor);
-
-        if (active) { setRows((current) => cursor ? [...current, ...page.items] : page.items); setNextCursor(page.nextCursor); }
-      } catch {
-        if (active) setError("The activity API could not load these records. Retry or contact the operator.");
-      } finally {
-        if (active) setLoading(false);
-      }
-    }
-
-    void loadActivity();
-
-    return () => { active = false; };
-  }, [cursor]);
-  const filtered = rows.filter((row) => (!model || row.modelId.toLowerCase().includes(model.toLowerCase())) && (status === "all" || row.status === status));
-
-  return <><PageHeader title="Activity" description="Review your recent requests. Prompts and completions are never stored here." /><DataNotice error={error} onRetry={() => { setCursor(undefined); setRows([]); }} /><ActivityFilters model={model} onModelChange={setModel} status={status} onStatusChange={setStatus} />
-    {loading && rows.length === 0 ? <LoadingLine /> : filtered.length ? <><ActivityTable rows={filtered} developer /><div className="load-more-row"><span className="muted-copy">Showing {count(filtered.length)} requests loaded</span>{nextCursor && <button className="button button-secondary" disabled={loading} onClick={() => setCursor(nextCursor)}>{loading ? "Loading…" : "Load more"}<ArrowDownToLine size={15} /></button>}</div></> : !error && <EmptyState title={rows.length ? "No matching requests" : "No requests recorded"} body={rows.length ? "Adjust your filters to see more activity." : "Requests made with your active keys will appear here, with token counts and latency when reported by the provider."} />}
-  </>;
+  return <DeveloperActivitySurface portalApi={api} />;
 }
 
 function ActivityFilters({ model, onModelChange, status, onStatusChange }: { model: string; onModelChange: (value: string) => void; status: string; onStatusChange: (value: string) => void }) {
@@ -622,7 +566,7 @@ function ActivityFilters({ model, onModelChange, status, onStatusChange }: { mod
 }
 
 function ActivityTable({ rows, developer }: { rows: ActivityEvent[]; developer: boolean }) {
-  return <div className="table-scroll activity-table-wrap"><table><thead><tr><th>Time</th><th>Model</th><th>Tokens in / out</th><th>Cost</th><th>Result</th><th>Latency</th><th>{developer ? "Source IP" : "Client IP"}</th></tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{dateTime(row.occurredAt)}</td><td><strong className="mono">{row.modelId}</strong><small>{row.keyLabel}</small></td><td>{row.inputTokens == null && row.outputTokens == null ? "Usage not reported" : `${count(row.inputTokens)} / ${count(row.outputTokens)}`}<small>{row.totalTokens == null ? "Total not reported" : `${count(row.totalTokens)} total`}{row.cachedTokens != null ? ` · ${count(row.cachedTokens)} cached` : ""}</small></td><td>{row.estimatedCostUsd == null ? "Not reported" : money(row.estimatedCostUsd)}<small>{row.costSource === "gateway_estimate" ? "Gateway estimate" : row.costSource === "provider_reported" ? "Provider-reported" : "Cost unknown"}</small></td><td><StatusLabel status={row.status} />{row.errorCategory && <small>{row.errorCategory}</small>}</td><td>{row.latencyMs == null ? "Not reported" : `${count(row.latencyMs)} ms`}</td><td className="mono">{row.requestIp ?? "Not recorded"}</td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll activity-table-wrap"><table><thead><tr><th>Time</th><th>Model</th><th>Tokens in / out</th><th>Cost</th><th>Result</th><th>Latency</th>{!developer && <th>Client IP</th>}</tr></thead><tbody>{rows.map((row) => <tr key={row.id}><td>{dateTime(row.occurredAt)}</td><td><strong className="mono">{row.modelId}</strong><small>{row.keyLabel}</small></td><td>{row.inputTokens == null && row.outputTokens == null ? "Usage not reported" : `${count(row.inputTokens)} / ${count(row.outputTokens)}`}<small>{row.totalTokens == null ? "Total not reported" : `${count(row.totalTokens)} total`}{row.cachedTokens != null ? ` · ${count(row.cachedTokens)} cached` : ""}</small></td><td>{row.estimatedCostUsd == null ? "Not reported" : formatUsd(row.estimatedCostUsd)}<small>{row.costSource === "gateway_estimate" ? "Gateway estimate" : row.costSource === "provider_reported" ? "Provider-reported" : "Cost unknown"}</small></td><td><StatusLabel status={row.status} />{row.errorCategory && <small>{row.errorCategory}</small>}</td><td>{row.latencyMs == null ? "Not reported" : `${count(row.latencyMs)} ms`}</td>{!developer && <td className="mono">{row.requestIp ?? "Not recorded"}</td>}</tr>)}</tbody></table></div>;
 }
 
 function ActivitySection({ rows, loading, error, developer = false }: { rows: ActivityEvent[]; loading: boolean; error: string | null; developer?: boolean }) {
@@ -672,7 +616,7 @@ function PeoplePage() {
     }
   }
 
-  return <><PageHeader title="People & keys" description="Manage invitations, account allowances, and user-owned keys." action={<button className="button button-primary" onClick={() => { setCreatedInvite(null); setInviteOpen(true); }}><Plus size={16} /> Invite person</button>} /><DataNotice error={people.error ?? peopleActionError} onRetry={people.reload} /><section className="section-block table-section"><div className="toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Search people</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people" /></label><span className="count-label">{people.value ? `${filtered.length} people` : "— people"}</span></div>{people.loading ? <LoadingLine /> : filtered.length ? <PeopleTable people={filtered} onEditPolicy={setPolicyPerson} onToggle={togglePerson} /> : <EmptyState title="No people returned" body="Create an invitation, then assign an allowance after the developer signs in." />}</section><InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} token={createdInvite} setToken={setCreatedInvite} /><PersonPolicyDialog person={policyPerson} onClose={() => setPolicyPerson(null)} onSaved={people.reload} /></>;
+  return <><PageHeader title="People & keys" description="Manage invitations, account allowances, and user-owned keys." action={<button className="button button-primary" onClick={() => { setCreatedInvite(null); setInviteOpen(true); }}><Plus size={16} /> Invite person</button>} /><DataNotice error={people.error ?? peopleActionError} onRetry={people.reload} /><section className="section-block table-section"><div className="toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Search people</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people" /></label><span className="count-label">{people.value ? `${filtered.length} people` : "— people"}</span></div>{people.loading ? <LoadingLine /> : filtered.length ? <PeopleTable people={filtered} onEditPolicy={setPolicyPerson} onToggle={togglePerson} /> : <EmptyState title="No people returned" body="Create an invitation, then assign an allowance after the developer signs in." />}</section><InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} token={createdInvite} setToken={setCreatedInvite} /><AllowanceDialog person={policyPerson} onClose={() => setPolicyPerson(null)} onSave={(input) => api.updatePersonPolicy(policyPerson!.id, input).then(people.reload)} /></>;
 }
 
 export function InviteDialog({ open, onOpenChange, token, setToken }: { open: boolean; onOpenChange: (open: boolean) => void; token: string | null; setToken: (token: string | null) => void }) {
@@ -733,19 +677,19 @@ export function InviteDialog({ open, onOpenChange, token, setToken }: { open: bo
 }
 
 function PeopleTable({ people, onEditPolicy, onToggle }: { people: PersonRecord[]; onEditPolicy: (person: PersonRecord) => void; onToggle: (person: PersonRecord) => void }) {
-  return <div className="table-scroll"><table><thead><tr><th>Person</th><th>Status</th><th>Allowance</th><th>Used</th><th>RPM</th><th>Keys</th><th>Requests</th><th>Last active</th><th>Actions</th></tr></thead><tbody>{people.map((person) => <tr key={person.id}><td><strong>{person.displayName}</strong><small>{person.email ?? "Email not provided"}</small></td><td><StatusLabel status={person.status} /></td><td>{person.allowanceUsd == null ? "Not assigned" : `${money(person.allowanceUsd)} / ${person.allowancePeriod}`}</td><td>{money(person.usedUsd)}</td><td>{count(person.rpmLimit)}</td><td>{count(person.keyCount)}</td><td>{count(person.requestCount)}</td><td>{dateTime(person.lastActiveAt)}</td><td><div className="row-actions"><button type="button" className="button button-quiet button-small" onClick={() => onEditPolicy(person)}>Limits</button><button type="button" className="button button-quiet button-small" onClick={() => { void onToggle(person); }}>{person.status === "disabled" ? "Enable" : "Disable"}</button></div></td></tr>)}</tbody></table></div>;
+  return <div className="table-scroll"><table><thead><tr><th>Person</th><th>Status</th><th>Allowance</th><th>Used</th><th>RPM</th><th>Keys</th><th>Requests</th><th>Last active</th><th>Actions</th></tr></thead><tbody>{people.map((person) => <tr key={person.id}><td><strong>{person.displayName}</strong><small>{person.email ?? "Email not provided"}</small></td><td><StatusLabel status={person.status} /></td><td>{person.allowanceUsd == null ? "Not assigned" : `${formatUsd(person.allowanceUsd)} / ${person.allowancePeriod}`}</td><td>{formatUsd(person.usedUsd)}</td><td>{count(person.rpmLimit)}</td><td>{count(person.keyCount)}</td><td>{count(person.requestCount)}</td><td>{dateTime(person.lastActiveAt)}</td><td><div className="row-actions"><button type="button" className="button button-quiet button-small" onClick={() => onEditPolicy(person)}>Limits</button><button type="button" className="button button-quiet button-small" onClick={() => { void onToggle(person); }}>{person.status === "disabled" ? "Enable" : "Disable"}</button></div></td></tr>)}</tbody></table></div>;
 }
 
-function PersonPolicyDialog({ person, onClose, onSaved }: { person: PersonRecord | null; onClose: () => void; onSaved: () => void }) {
+export function PersonPolicyDialog({ person, onClose, onSaved }: { person: PersonRecord | null; onClose: () => void; onSaved: () => void }) {
   const [allowance, setAllowance] = useState("");
-  const [period, setPeriod] = useState<"day" | "week">("week");
+  const [period, setPeriod] = useState<"daily" | "weekly">("weekly");
   const [rpm, setRpm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setAllowance(person?.allowanceUsd == null ? "" : String(person.allowanceUsd));
-    setPeriod(person?.allowancePeriod === "day" ? "day" : "week");
+    setPeriod(person?.allowancePeriod === "daily" ? "daily" : "weekly");
     setRpm(person?.rpmLimit == null ? "" : String(person.rpmLimit));
     setError(null);
   }, [person]);
@@ -754,11 +698,11 @@ function PersonPolicyDialog({ person, onClose, onSaved }: { person: PersonRecord
     event.preventDefault();
 
     if (!person) return;
-    const allowanceValue = allowance.trim() ? Number(allowance) : null;
+    const allowanceValue = allowance.trim() || null;
     const rpmValue = rpm.trim() ? Number(rpm) : null;
 
-    if ((allowanceValue != null && (!Number.isFinite(allowanceValue) || allowanceValue <= 0)) || (rpmValue != null && (!Number.isInteger(rpmValue) || rpmValue < 1))) {
-      setError("Use a positive USD allowance and a whole-number RPM, or leave either field unlimited.");
+    if ((allowanceValue != null && !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(allowanceValue)) || (rpmValue != null && (!Number.isInteger(rpmValue) || rpmValue < 1))) {
+      setError("Use a nonnegative decimal USD allowance and a whole-number RPM, or leave either unlimited.");
 
       return;
     }
@@ -777,50 +721,18 @@ function PersonPolicyDialog({ person, onClose, onSaved }: { person: PersonRecord
     }
   }
 
-  return <Dialog.Root open={Boolean(person)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="person-policy-description"><div className="dialog-title-row"><div><Dialog.Title>Account limits</Dialog.Title><Dialog.Description id="person-policy-description">{person?.displayName} · limits apply across all of this person’s keys.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div><form className="dialog-form" onSubmit={save}><label className="field-label" htmlFor="person-allowance">USD allowance</label><input id="person-allowance" type="number" min="0.01" step="0.01" value={allowance} onChange={(event) => setAllowance(event.target.value)} placeholder="Unlimited" /><label className="field-label" htmlFor="person-allowance-period">Allowance period</label><select id="person-allowance-period" value={period} disabled={!allowance} onChange={(event) => setPeriod(event.target.value === "day" ? "day" : "week")}><option value="day">Daily</option><option value="week">Weekly</option></select><label className="field-label" htmlFor="person-rpm">Requests per minute</label><input id="person-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Unlimited" /><p className="field-help">Each key the person owns shares this user-wide RPM bucket.</p>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save limits"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root open={Boolean(person)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="person-policy-description"><div className="dialog-title-row"><div><Dialog.Title>Account limits</Dialog.Title><Dialog.Description id="person-policy-description">{person?.displayName} · limits apply across all of this person’s keys.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div><form className="dialog-form" onSubmit={save}><label className="field-label" htmlFor="person-allowance">USD allowance</label><input id="person-allowance" inputMode="decimal" value={allowance} onChange={(event) => setAllowance(event.target.value)} placeholder="Unlimited" /><label className="field-label" htmlFor="person-allowance-period">Allowance period</label><select id="person-allowance-period" value={period} disabled={!allowance} onChange={(event) => setPeriod(event.target.value === "daily" ? "daily" : "weekly")}><option value="daily">Daily</option><option value="weekly">Weekly</option></select><label className="field-label" htmlFor="person-rpm">Requests per minute</label><input id="person-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Unlimited" /><p className="field-help">Each key the person owns shares this user-wide RPM bucket.</p>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save limits"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
 function ProvidersPage() {
-  const providers = useLoad(api.listProviders);
-  const models = useLoad(api.listOperatorModels);
-  const [createOpen, setCreateOpen] = useState(false);
-  const [syncingId, setSyncingId] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [modelSearch, setModelSearch] = useState("");
-  const catalogModels = models.value ?? [];
-  const pendingModels = catalogModels.filter((model) => `${model.id} ${model.upstreamModelId ?? ""} ${model.providerName}`.toLowerCase().includes(modelSearch.toLowerCase()));
-
-  async function syncProvider(providerId: string) {
-    setSyncingId(providerId);
-    setNotice(null);
-
-    try {
-      const result = await api.syncProvider(providerId);
-      setNotice(`Model sync complete: ${result.modelsDiscovered} discovered. Review pricing and approval below.`);
-      providers.reload();
-      models.reload();
-    } catch {
-      setNotice("Model sync failed. Check the provider URL, credentials, and /models support.");
-    } finally {
-      setSyncingId(null);
-    }
-  }
-
-  return <><PageHeader title="Providers & models" description="Connect OpenAI-compatible upstreams, sync catalogs, then approve and price models." action={<button className="button button-primary" onClick={() => setCreateOpen(true)}><Plus size={16} /> Add provider</button>} />
-    {notice && <div className="inline-notice notice-info" role="status"><Network size={16} /><span>{notice}</span></div>}
-    <DataNotice error={providers.error} onRetry={providers.reload} />
-    <DataNotice error={models.error} onRetry={models.reload} />
-    <section className="section-block table-section"><div className="section-heading"><div><h2>Provider connections</h2><p>Credentials are write-only and must remain server-side.</p></div><span className="count-label">{providers.value ? `${providers.value.length} providers` : "— providers"}</span></div>{providers.loading ? <LoadingLine /> : providers.value?.length ? <ProviderList providers={providers.value} onSync={syncProvider} syncingId={syncingId} /> : <EmptyState title="No provider connections" body="Add a compatible base URL and an upstream credential through the authenticated operator API. Credentials are never read back into the browser." />}</section>
-    <section className="section-block table-section"><div className="section-heading"><div><h2>Model approval and pricing</h2><p>Discovered models stay unavailable until rates are recorded and approved.</p></div><BadgeCheck size={18} /></div>{catalogModels.length > 0 && <div className="toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Search discovered models</span><input value={modelSearch} onChange={(event) => setModelSearch(event.target.value)} placeholder="Search model IDs or providers" /></label><span className="count-label">{pendingModels.length} / {catalogModels.length} models</span></div>}{models.loading ? <LoadingLine /> : catalogModels.length ? pendingModels.length ? <div className="model-review-list">{pendingModels.map((model) => <ModelPolicyRow key={`${model.providerId}:${model.id}`} model={model} onSaved={models.reload} />)}</div> : <EmptyState title="No models match" body="Try another model name or provider." compact /> : <EmptyState title="No discovered models" body="Sync a provider to populate its catalog. Nothing becomes callable until it has a verified price and is approved." compact />}</section>
-    <ProviderCreateDialog open={createOpen} onOpenChange={setCreateOpen} onCreated={() => { providers.reload(); models.reload(); }} />
-  </>;
+  return <ProviderListPage portalApi={api} />;
 }
 
-function ProviderList({ providers, onSync, syncingId }: { providers: ProviderRecord[]; onSync?: (providerId: string) => void; syncingId?: string | null }) {
-  return <div className="provider-list">{providers.map((provider) => <div className="provider-row" key={provider.id}><span className="provider-icon"><Network size={17} /></span><div className="provider-copy"><strong>{provider.name}</strong><small className="mono">{provider.baseUrlDisplay}</small></div><div className="provider-model-count">{count(provider.approvedModels)} / {count(provider.discoveredModels)} models approved</div><StatusLabel status={provider.health} /><span className="provider-sync">Synced {dateTime(provider.lastSyncAt)}</span>{onSync && <button className="button button-secondary button-small" type="button" disabled={syncingId === provider.id} onClick={() => onSync(provider.id)}>{syncingId === provider.id ? "Syncing…" : "Sync models"}</button>}</div>)}</div>;
+function ProviderList({ providers, onSync, syncingId }: { providers: Array<ProviderRecord | import("../contracts/api").ProviderConnectionRecord>; onSync?: (providerId: string) => void; syncingId?: string | null }) {
+  return <div className="provider-list">{providers.map((provider) => <div className="provider-row" key={provider.id}><span className="provider-icon"><Network size={17} /></span><div className="provider-copy"><strong>{"brandName" in provider ? `${provider.brandName} · ${provider.connectionLabel}` : provider.name}</strong><small className="mono">{provider.baseUrlDisplay}</small></div><div className="provider-model-count">{count(provider.approvedModels)} / {count(provider.discoveredModels)} models approved</div><StatusLabel status={provider.health} /><span className="provider-sync">Synced {dateTime(provider.lastSyncAt)}</span>{onSync && <button className="button button-secondary button-small" type="button" disabled={syncingId === provider.id} onClick={() => onSync(provider.id)}>{syncingId === provider.id ? "Syncing…" : "Sync models"}</button>}</div>)}</div>;
 }
 
-function ProviderCreateDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
+export function ProviderCreateDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
   const [name, setName] = useState("");
   const [baseUrl, setBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
@@ -833,7 +745,7 @@ function ProviderCreateDialog({ open, onOpenChange, onCreated }: { open: boolean
     setError(null);
 
     try {
-      await api.createProvider({ name: name.trim(), baseUrl: baseUrl.trim(), apiKey });
+      await api.createProvider({ name: name.trim(), brandSlug: name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-"), connectionLabel: name.trim(), baseUrl: baseUrl.trim(), apiKey });
       setApiKey("");
       onOpenChange(false);
       onCreated();
@@ -859,7 +771,7 @@ function ProviderCreateDialog({ open, onOpenChange, onCreated }: { open: boolean
   </Dialog.Root>;
 }
 
-function ModelPolicyRow({ model, onSaved }: { model: ModelRecord; onSaved: () => void }) {
+export function ModelPolicyRow({ model, onSaved }: { model: ModelRecord; onSaved: () => void }) {
   const [inputPrice, setInputPrice] = useState(model.inputUsdPerMillion == null ? "" : String(model.inputUsdPerMillion));
   const [outputPrice, setOutputPrice] = useState(model.outputUsdPerMillion == null ? "" : String(model.outputUsdPerMillion));
   const [cachePrice, setCachePrice] = useState(model.cacheUsdPerMillion == null ? "" : String(model.cacheUsdPerMillion));
@@ -912,7 +824,7 @@ function ModelPolicyRow({ model, onSaved }: { model: ModelRecord; onSaved: () =>
   return <div className="model-policy-row"><div className="model-policy-heading"><strong className="mono">{model.upstreamModelId ?? model.id}</strong><span>{model.providerName} · {!model.available ? "Blocked" : model.approved ? "Approved" : "Pending review"}</span></div><div className="form-two-col model-price-fields"><label><span className="field-label">Input USD / 1M</span><input type="number" min="0" step="0.000001" value={inputPrice} onChange={(event) => setInputPrice(event.target.value)} /></label><label><span className="field-label">Output USD / 1M</span><input type="number" min="0" step="0.000001" value={outputPrice} onChange={(event) => setOutputPrice(event.target.value)} /></label><label><span className="field-label">Cached input USD / 1M</span><input type="number" min="0" step="0.000001" value={cachePrice} onChange={(event) => setCachePrice(event.target.value)} placeholder="Optional" /></label><label><span className="field-label">Pricing source</span><input value={priceSource} onChange={(event) => setPriceSource(event.target.value)} placeholder="Official provider price page" /></label></div><div className="model-policy-actions"><label className="checkbox-label"><input type="checkbox" checked={capabilities.includes("text")} onChange={(event) => setCapabilities((current) => event.target.checked ? [...current, "text"] : current.filter((capability) => capability !== "text"))} /> Text chat</label><label className="checkbox-label"><input type="checkbox" checked={capabilities.includes("vision")} onChange={(event) => setCapabilities((current) => event.target.checked ? [...current, "vision"] : current.filter((capability) => capability !== "vision"))} /> Vision input</label><label className="checkbox-label"><input type="checkbox" checked={approved} onChange={(event) => setApproved(event.target.checked)} /> Allow developers to use this model</label><button type="button" className="button button-secondary button-small" disabled={saving} onClick={() => { void savePolicy(); }}>{saving ? "Saving…" : "Save model policy"}</button>{message && <span role="status" className="field-help">{message}</span>}</div></div>;
 }
 
-function OperatorUsagePage() {
+export function OperatorUsagePage() {
   const activity = useLoad(() => api.listOperatorActivity());
   const [model, setModel] = useState("");
   const [status, setStatus] = useState("all");

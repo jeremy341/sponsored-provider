@@ -42,8 +42,10 @@ export interface ActivityEvent {
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
-  estimatedCostUsd: number | null;
+  estimatedCostUsd: string | null;
   costSource: "gateway_estimate" | "provider_reported" | "unknown";
+  requestId?: string | null;
+  tokenCompleteness?: "complete" | "partial" | "unknown";
   status: "success" | "error" | "rejected" | "interrupted";
   errorCategory: string | null;
   latencyMs: number | null;
@@ -56,8 +58,8 @@ export interface ApiKeyRecord {
   label: string;
   prefix: string;
   modelAccess: ModelAccess;
-  spendCapUsd: number | null;
-  spendUsedUsd: number | null;
+  spendCapUsd: string | null;
+  spendUsedUsd: string | null;
   spendPeriod: "day" | "week" | "month" | "lifetime" | null;
   spendResetAt: string | null;
   rpmLimit: number | null;
@@ -68,13 +70,14 @@ export interface ApiKeyRecord {
 
 export interface ModelRecord {
   id: string;
+  displayName?: string;
   upstreamModelId?: string;
   providerId?: string;
   providerName: string;
   capabilities: Array<"text" | "vision">;
-  inputUsdPerMillion: number | null;
-  outputUsdPerMillion: number | null;
-  cacheUsdPerMillion: number | null;
+  inputUsdPerMillion: string | null;
+  outputUsdPerMillion: string | null;
+  cacheUsdPerMillion: string | null;
   pricingVerified: boolean;
   priceSource?: string | null;
   approved: boolean;
@@ -87,10 +90,12 @@ export interface PersonRecord {
   displayName: string;
   email: string | null;
   status: "active" | "pending" | "disabled";
-  allowanceUsd: number | null;
-  allowancePeriod: "day" | "week" | null;
+  allowanceUsd: string | null;
+  allowancePeriod: "daily" | "weekly" | null;
   rpmLimit: number | null;
-  usedUsd: number | null;
+  usedUsd: string | null;
+  reservedUsd: string;
+  allowanceResetAt: string | null;
   keyCount: number;
   requestCount: number;
   lastActiveAt: string | null;
@@ -107,8 +112,111 @@ export interface ProviderRecord {
   approvedModels: number;
 }
 
+export interface ProviderBudgetRecord {
+  limitUsd: string | null;
+  period: string | null;
+  reserveUsd: string;
+  usedUsd: string | null;
+  reservedUsd: string;
+  remainingUsd: string | null;
+  resetAt: string | null;
+}
+
+export interface ProviderConnectionRecord {
+  id: string;
+  brandId: string;
+  brandSlug: string;
+  brandName: string;
+  connectionLabel: string;
+  providerKind: string;
+  baseUrlDisplay: string;
+  enabled: boolean;
+  mappingStatus: string;
+  health: "healthy" | "degraded" | "unknown" | "disabled" | "error";
+  lastSyncAt: string | null;
+  discoveredModels: number;
+  approvedModels: number;
+  budget: ProviderBudgetRecord;
+}
+
+export interface ProviderBrandRecord {
+  id: string;
+  slug: string;
+  name: string;
+  connections: ProviderConnectionRecord[];
+}
+
+export interface PriceVersionRecord {
+  id?: string;
+  inputUsdPerMillion: string;
+  outputUsdPerMillion: string;
+  cachedInputUsdPerMillion: string | null;
+  source: string | null;
+  effectiveAt?: string | null;
+  sourceUrl?: string | null;
+  evidence?: string | null;
+  confidence?: string | null;
+}
+
+export interface OfferRouteRecord {
+  id: string;
+  connectionId: string;
+  connectionLabel: string;
+  upstreamModelId: string;
+  order: number;
+  enabled: boolean;
+  active: boolean;
+  connectionEnabled: boolean;
+  stale: boolean;
+  reviewRequired: boolean;
+  priceStatus: string;
+  mismatchReason?: string | null;
+}
+
+export interface CatalogOfferRecord {
+  id: string;
+  brandSlug: string;
+  brandName: string;
+  canonicalModelId: string;
+  displayName: string;
+  capabilities: string[];
+  approved: boolean;
+  available: boolean;
+  activePrice: PriceVersionRecord | null;
+  pendingPrice: PriceVersionRecord | null;
+  priceSuggestions: PriceVersionRecord[];
+  routes: OfferRouteRecord[];
+}
+
+export interface OperatorUsageFilter {
+  cursor?: string | null;
+  limit?: number;
+  brandSlug?: string;
+  connectionId?: string;
+  model?: string;
+  from?: string;
+  to?: string;
+  outcome?: string;
+}
+
+export interface OperatorActivityRecord extends ActivityEvent {
+  brandSlug?: string | null;
+  connectionId?: string | null;
+  connectionLabel?: string | null;
+}
+
+export type CreateProviderResponse =
+  | { id: string; name: string; brandSlug: string; connectionLabel: string; models: string[] }
+  | { provider: ProviderConnectionRecord; sync: { tested: boolean; discovered: number; models: string[]; error: string | null } };
+
+export type SyncProviderResponse =
+  | { providerId: string; connectionId: string; modelsDiscovered: number; models: string[]; staleModels: number }
+  | { providerId: string; tested: boolean; discovered: number; models: string[]; error: string | null };
+
 export interface CreateProviderInput {
   name: string;
+  brandSlug: string;
+  connectionLabel: string;
   baseUrl: string;
   apiKey: string;
 }
@@ -175,7 +283,19 @@ export interface DeveloperDashboard {
   topModels: ModelUsageRecord[];
   keys: ApiKeyRecord[];
   recentActivity: ActivityEvent[];
-  allowance: { usedUsd: number | null; limitUsd: number | null; period: string | null; resetAt: string | null } | null;
+  allowance: {
+    usedUsd: string;
+    reservedUsd: string;
+    consumedUsd: string;
+    limitUsd: string | null;
+    remainingUsd: string | null;
+    period: string | null;
+    resetAt: string | null;
+    source: string;
+    usedNanoUsd?: number;
+    reservedNanoUsd?: number;
+    limitNanoUsd?: number | null;
+  } | null;
 }
 
 export interface OperatorDashboard {
@@ -190,7 +310,7 @@ export interface OperatorDashboard {
 export interface CreateKeyInput {
   label: string;
   modelAccess: ModelAccess;
-  spendCapUsd: number | null;
+  spendCapUsd: string | null;
   spendPeriod: "day" | "week" | "month" | "lifetime" | null;
   rpmLimit: number | null;
 }
@@ -221,20 +341,28 @@ export interface PortalApi {
   archiveKey(keyId: string): Promise<void>;
   listModels(): Promise<ModelRecord[]>;
   listActivity(cursor?: string): Promise<Page<ActivityEvent>>;
-  listOperatorActivity(cursor?: string): Promise<Page<ActivityEvent>>;
+  listOperatorActivity(filters?: OperatorUsageFilter): Promise<Page<OperatorActivityRecord>>;
   listPeople(): Promise<PersonRecord[]>;
-  listProviders(): Promise<ProviderRecord[]>;
+  listProviders(): Promise<ProviderConnectionRecord[]>;
+  listOperatorOffers(): Promise<CatalogOfferRecord[]>;
   listOperatorModels(): Promise<ModelRecord[]>;
   getGuardrails(): Promise<GuardrailSnapshot>;
-  createProvider(input: CreateProviderInput): Promise<ProviderRecord>;
-  syncProvider(providerId: string): Promise<{ providerId: string; modelsDiscovered: number; models: string[] }>;
+  createProvider(input: CreateProviderInput): Promise<CreateProviderResponse>;
+  syncProvider(providerId: string): Promise<SyncProviderResponse>;
+  updateOfferPrice(offerId: string, input: PriceVersionRecord): Promise<{ id: string; offerId: string; status: string }>;
+  approveOfferPrice(offerId: string, versionId: string): Promise<void>;
+  setOfferAvailable(offerId: string, available: boolean): Promise<void>;
+  setRouteAvailability(routeId: string, enabled: boolean): Promise<void>;
+  updateRouteOrder(offerId: string, connectionIds: string[]): Promise<void>;
+  mapConnectionModel(connectionId: string, upstreamModelId: string, offerId: string): Promise<void>;
+  updateConnectionBudget(connectionId: string, input: { limitUsd: string | null; period: string | null; reserveUsd: string }): Promise<void>;
   setModelPolicy(providerId: string, modelId: string, policy: ModelPolicyInput): Promise<void>;
   createInvite(input: { max_uses: number; expires_in_seconds: number }): Promise<CreateInviteResult>;
   listOperatorInvites(): Promise<InviteRecord[]>;
   revokeInvite(inviteId: string): Promise<InviteRecord>;
   getDeveloperInvites(): Promise<DeveloperInviteStatus>;
   createDeveloperInvite(): Promise<CreateInviteResult>;
-  updatePersonPolicy(userId: string, input: { allowanceUsd: number | null; allowancePeriod: "day" | "week" | null; rpmLimit: number | null }): Promise<void>;
+  updatePersonPolicy(userId: string, input: { allowanceUsd: string | null; allowancePeriod: "daily" | "weekly" | null; rpmLimit: number | null }): Promise<void>;
   setPersonEnabled(userId: string, enabled: boolean): Promise<void>;
   setGlobalStop(stopped: boolean): Promise<void>;
   updateGuardrails(input: { globalSpendCapUsd?: number; safetyReserveUsd?: number }): Promise<void>;
