@@ -21,12 +21,13 @@ afterEach(() => {
 });
 
 describe("local auth", () => {
-  it("uses decorative icons for the auth brand, lock, and password reveal", () => {
+  it("marks the brand with a pixel glyph and keeps decorative icons for lock and reveal", () => {
     renderAuth();
 
     const icons = document.querySelectorAll("svg.lucide");
 
-    expect(icons).toHaveLength(3);
+    expect(icons).toHaveLength(2);
+    expect(document.querySelector(".auth-mark .brand-mark")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Show password" }).querySelector("svg.lucide")).toBeInTheDocument();
   });
 

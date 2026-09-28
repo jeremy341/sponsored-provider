@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Gauge, Eye, EyeOff, LockKeyhole } from "lucide-react";
-import { api, ApiError } from "../lib/api";
+import { Eye, EyeOff, LockKeyhole } from "lucide-react";
+import { ApiError, api } from "../lib/api";
 
 type AuthMode = "login" | "signup";
 
@@ -34,20 +34,20 @@ export function AuthPage() {
 
       navigate(result.role === "operator" ? "/operator" : "/developer", { replace: true });
     } catch (caught) {
-
+      // Credential prompts stay generic; transport failures keep their explicit message.
       setError(isSignup
         ? caught instanceof ApiError ? caught.message : "Account creation failed. Check the invitation and try again."
-        : "Invalid username or password");
+        : caught instanceof ApiError ? caught.message : "Invalid username or password");
     } finally {
-
       setBusy(false);
     }
   }
 
   return <main className="session-screen auth-screen">
-    <div className="session-mark"><Gauge size={20} aria-hidden="true" /> provider<span className="brand-dot">.</span></div>
+    <div className="auth-stars" aria-hidden="true" />
+    <div className="session-mark auth-mark"><span className="brand-mark" aria-hidden="true" /> sponsored<span className="brand-dot">_</span>provider</div>
     <section className="auth-panel" aria-labelledby="auth-title">
-      <div className="auth-heading"><span className="auth-icon"><LockKeyhole size={18} aria-hidden="true" /></span><h1 id="auth-title">{isSignup ? "Create your account" : "Sign in"}</h1><p>{isSignup ? "Use the username you want to use for your provider account." : "Sign in to your provider workspace."}</p></div>
+      <div className="auth-heading"><span className="auth-icon"><LockKeyhole size={18} aria-hidden="true" /></span><h1 id="auth-title">{isSignup ? "Create your account" : "Console sign in"}</h1><p>{isSignup ? "Choose the username for your new provider account." : "Sign in to your sponsored provider workspace."}</p></div>
       <div className="auth-mode" aria-label="Account access">
         <button type="button" className={!isSignup ? "selected" : ""} aria-label="Switch to sign in" aria-pressed={!isSignup} onClick={() => { setMode("login"); setError(null); }}>Sign in</button>
         <button type="button" className={isSignup ? "selected" : ""} aria-label="Switch to account creation" aria-pressed={isSignup} onClick={() => { setMode("signup"); setError(null); }}>Create account</button>

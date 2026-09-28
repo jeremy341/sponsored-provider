@@ -1,3 +1,5 @@
+> **Superseded (2026-09-28):** the Ayu-dark amber visual direction was replaced by the near-black + lime pixel identity in `.ulpi/design/DESIGN.md`. The component contracts below remain historically accurate; the color/type/shadow specifics are not.
+
 # Plan: Portal redesign → ai.hackclub.com console + retro pixel layer + legacy dashboard removal
 
 **Status:** planning only — no code written; only this file exists.

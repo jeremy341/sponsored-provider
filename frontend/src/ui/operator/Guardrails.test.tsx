@@ -10,6 +10,31 @@ afterEach(() => {
 });
 
 describe("operator guardrails", () => {
+  it("rejects malformed IPs locally without calling the block API", async () => {
+    window.history.replaceState({}, "", "/operator/guardrails");
+    vi.spyOn(api, "getSession").mockResolvedValue({ user: { displayName: "Operator", email: null }, role: "operator", csrfToken: "csrf" });
+    vi.spyOn(api, "getGuardrails").mockResolvedValue({
+      globalSpendCapUsd: 20,
+      globalSpendUsedUsd: 4,
+      safetyReserveUsd: 2,
+      globalStopped: false,
+      blockedIps: [],
+      recentAudit: [],
+    });
+    const blockIp = vi.spyOn(api, "blockIp").mockResolvedValue(undefined);
+
+    render(<App />);
+    await screen.findByRole("button", { name: "Block IP" });
+
+    await userEvent.type(screen.getByLabelText("IP address"), "not-an-ip");
+    await userEvent.click(screen.getByRole("button", { name: "Block IP" }));
+
+    const alert = await screen.findByRole("alert");
+
+    expect(alert).toHaveTextContent(/valid IPv4 or IPv6 address/i);
+    expect(blockIp).not.toHaveBeenCalled();
+  });
+
   it("keeps the emergency-stop confirmation", async () => {
     window.history.replaceState({}, "", "/operator/guardrails");
     vi.spyOn(api, "getSession").mockResolvedValue({ user: { displayName: "Operator", email: null }, role: "operator", csrfToken: "csrf" });

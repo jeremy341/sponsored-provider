@@ -1,6 +1,6 @@
 ---
 project: Sponsored Provider
-design_system: Radix UI + shadcn/ui themed with .ulpi/design/DESIGN.md
+design_system: Radix UI + existing React/Vite components themed with .ulpi/design/DESIGN.md
 platform: Responsive web, one same-origin application
 ---
 
@@ -47,7 +47,7 @@ The signed-in account menu contains identity, session, and sign-out actions. Ope
 
 ### Sign-in and access states
 
-- Sign-in uses Hack Club Auth OIDC with only required identity scopes. Accounts are identified by the stable OIDC subject, not mutable email.
+- Sign-in uses local usernames and passwords with secure same-origin session cookies (Hack Club Auth is dormant). Accounts are identified by the portal user record, not mutable email.
 - Day-one eligibility is Hack Club Auth sign-in plus a valid operator-issued invite. Do not require a separate verification-status scope in the first release.
 - A valid identity without an invitation sees a pending/access-needed state, never a partially provisioned API key.
 - Disabled users lose portal and issued-key access promptly. The operator can see who invited/approved them and when.

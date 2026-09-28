@@ -5,7 +5,7 @@ import { formatUsdExact } from "../../lib/money";
 import { ChartContainer } from "./ChartContainer";
 import { buildSpendSlices, type SpendSlice } from "./spendChartData";
 
-const SPEND_SERIES = ["#e6b450", "#59c2ff", "#aad94c", "#d2a6ff", "#f07178"];
+const SPEND_SERIES = ["#9bec5b", "#62b7ff", "#e6c75f", "#5fd4c0", "#c9a2ff"];
 
 export function spendSliceColor(index: number): string {
   return SPEND_SERIES[index % SPEND_SERIES.length];

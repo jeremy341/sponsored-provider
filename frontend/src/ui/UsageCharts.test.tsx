@@ -15,11 +15,11 @@ const models: ModelSpendRecord[] = [
 
 describe("usage chart components", () => {
   it("assigns stable chart-series colors to model slices", () => {
-    expect(spendSliceColor(0)).toBe("#e6b450");
-    expect(spendSliceColor(1)).toBe("#59c2ff");
-    expect(spendSliceColor(2)).toBe("#aad94c");
-    expect(spendSliceColor(3)).toBe("#d2a6ff");
-    expect(spendSliceColor(4)).toBe("#f07178");
+    expect(spendSliceColor(0)).toBe("#9bec5b");
+    expect(spendSliceColor(1)).toBe("#62b7ff");
+    expect(spendSliceColor(2)).toBe("#e6c75f");
+    expect(spendSliceColor(3)).toBe("#5fd4c0");
+    expect(spendSliceColor(4)).toBe("#c9a2ff");
     expect(spendSliceColor(5)).toBe(spendSliceColor(0));
     expect(new Set(Array.from({ length: 5 }, (_, index) => spendSliceColor(index))).size).toBe(5);
   });

@@ -53,7 +53,7 @@ export function AppShell({ role, nav, home, homeLabel, userName, email, preview,
 
   return <div className="app-frame app-shell" data-collapsed={collapsed ? "true" : "false"}>
     <a href="#main-content" className="skip-link">Skip to content</a>
-    <Sidebar home={home} nav={nav} userName={userName} email={email} preview={preview} collapsed={collapsed} />
+    <Sidebar home={home} nav={nav} role={role} userName={userName} email={email} preview={preview} collapsed={collapsed} />
     <div className="shell-main">
       <TopBar title={title} role={role} nav={nav} userName={userName} preview={preview} collapsed={collapsed} onToggleCollapse={toggleCollapse} />
       <main id="main-content" className="main-content" tabIndex={-1}>

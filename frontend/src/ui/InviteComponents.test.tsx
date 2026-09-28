@@ -3,7 +3,8 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../lib/api";
 import type { DeveloperInviteStatus, InviteRecord } from "../contracts/api";
-import { DeveloperInviteCard, InviteDialog } from "./App";
+import { DeveloperInviteCard } from "./developer/DeveloperHomePage";
+import { InviteDialog } from "./operator/PeoplePage";
 
 const activeLegacyInvite: InviteRecord = {
   id: "legacy-1",

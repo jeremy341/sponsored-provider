@@ -11,7 +11,7 @@ describe("portal shell", () => {
     render(<App />);
 
     const navigation = screen.getByRole("navigation", { name: "Primary navigation" });
-    const brands = screen.getAllByRole("link", { name: "provider." });
+    const brands = screen.getAllByRole("link", { name: /sponsored.?provider/i });
     const navLinks = within(navigation).getAllByRole("link");
 
     expect(within(navigation).getByRole("link", { name: /API keys/i })).toHaveAttribute("aria-current", "page");
@@ -21,7 +21,7 @@ describe("portal shell", () => {
 
     expect(brands).toHaveLength(1);
 
-    for (const brand of brands) expect(brand.querySelector("svg.lucide")).toBeInTheDocument();
+    for (const brand of brands) expect(brand.querySelector(".brand-mark")).toBeInTheDocument();
 
     expect(navLinks).toHaveLength(5);
 
