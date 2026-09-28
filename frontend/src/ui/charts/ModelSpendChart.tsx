@@ -5,7 +5,11 @@ import { formatUsdExact } from "../../lib/money";
 import { ChartContainer } from "./ChartContainer";
 import { buildSpendSlices, type SpendSlice } from "./spendChartData";
 
-const sliceColors = ["var(--chart-primary)", "var(--chart-secondary)", "var(--chart-tertiary)", "var(--chart-muted)"];
+export function spendSliceColor(index: number): string {
+  const hue = (index * 137.508 + 350) % 360;
+
+  return `hsl(${hue.toFixed(3)} 62% 66%)`;
+}
 
 export function spendTooltipValue(rowId: string, slicesById: ReadonlyMap<string, SpendSlice>): string {
   const slice = slicesById.get(rowId);
@@ -26,7 +30,7 @@ export function ModelSpendChart({ models, knownSpendUsd, unpricedRequests }: { m
       <div className="model-spend-layout">
         <ChartContainer ariaLabel="Model spend distribution" height={232}><PieChart accessibilityLayer>
           <Pie data={breakdown.slices} dataKey="value" nameKey="name" innerRadius="58%" outerRadius="84%" paddingAngle={1} stroke="var(--surface)" strokeWidth={2} isAnimationActive={false}>
-            {breakdown.slices.map((slice, index) => <Cell key={slice.id} fill={sliceColors[index % sliceColors.length]} />)}
+            {breakdown.slices.map((slice, index) => <Cell key={slice.id} fill={spendSliceColor(index)} />)}
           </Pie>
           <Tooltip formatter={(_value, _name, item) => {
             const rowId = String(item.payload?.id ?? "");
@@ -34,7 +38,7 @@ export function ModelSpendChart({ models, knownSpendUsd, unpricedRequests }: { m
             return [spendTooltipValue(rowId, tooltipData), "Spend"];
           }} contentStyle={{ background: "var(--elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)" }} />
         </PieChart></ChartContainer>
-        <ul className="model-spend-legend" aria-label="Model spend percentages">{breakdown.slices.map((slice, index) => <li key={slice.id}><span className="chart-legend-dot" style={{ background: sliceColors[index % sliceColors.length] }} aria-hidden="true" /><span className="model-spend-name" title={slice.name}>{slice.name}</span><span className="model-spend-percent">{slice.percent}%</span></li>)}</ul>
+        <ul className="model-spend-legend" aria-label="Model spend percentages">{breakdown.slices.map((slice, index) => <li key={slice.id}><span className="chart-legend-dot" style={{ background: spendSliceColor(index) }} aria-hidden="true" /><span className="model-spend-name" title={slice.name}>{slice.name}</span><span className="model-spend-percent">{slice.percent}%</span></li>)}</ul>
       </div>
       <table className="sr-only" aria-label="Model spend distribution data"><caption>Priced model spend totals and percentages</caption><thead><tr><th>Model</th><th>Spend</th><th>Share</th><th>Requests</th></tr></thead><tbody>{breakdown.slices.map((slice) => <tr key={slice.id}><td>{slice.name}</td><td>{formatUsdExact(slice.spendUsd)}</td><td>{slice.percent}%</td><td>{count(slice.requests)}</td></tr>)}</tbody></table>
     </>}

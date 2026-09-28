@@ -48,9 +48,9 @@ export function ModelDetailPage({ portalApi }: { portalApi: Pick<PortalApi, "lis
 
   if (models === null && !loadError) return <section className="section-block" aria-label="Model details"><div className="loading-line" role="status"><span className="sr-only">Loading model details</span></div></section>;
 
-  if (loadError) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link><h1>Model details unavailable</h1><p>The published catalog could not be loaded. Try again from the model list.</p></section>;
+  if (loadError) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link model-back-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link><h1>Model details unavailable</h1><p>The published catalog could not be loaded. Try again from the model list.</p></section>;
 
-  if (!model) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link><span className="eyebrow">Catalog entry not found</span><h1>Model unavailable</h1><p>This model is no longer in the published catalog. Historical activity remains in your usage history, but this ID cannot be used for new requests.</p></section>;
+  if (!model) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link model-back-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link><span className="eyebrow">Catalog entry not found</span><h1>Model unavailable</h1><p>This model is no longer in the published catalog. Historical activity remains in your usage history, but this ID cannot be used for new requests.</p></section>;
 
   const displayName = model.displayName ?? model.id.split("::").at(-1) ?? model.id;
 
