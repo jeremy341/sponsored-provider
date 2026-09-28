@@ -16,6 +16,15 @@ The user selected **current calendar month** as the default model-spend chart ra
 4. The operator retains full provider, routing, approval, budget, invitation, people, usage, and safeguard controls. Developer data remains scoped to the authenticated developer.
 5. The refreshed experience remains usable with keyboard/screen readers and at phone, tablet, and desktop widths.
 
+## Frontend design direction
+
+- **Aesthetic:** “Provider Atlas” — a calm, information-dense model exchange inside an operational console. Keep the currently shipped zinc/red system and IBM Plex typography; the catalog should feel more like a precise technical index than a marketing grid.
+- **Purpose and tone:** help developers compare cost/capability and get a working request quickly; help operators diagnose and control routing without mixing role-specific data. Trustworthy and direct, not playful or sales-oriented.
+- **Differentiation anchor:** every model card pairs provider provenance and canonical ID with a compact, verified price band. The identity/pricing row is the recognizable signature; red is reserved for the primary action, active state, and public ID rather than decorative gradients.
+- **Spatial system:** preserve the current centered, max-width console frame and 8px spacing rhythm. Use a responsive 3/2/1-column model grid, stable card heights, and side-by-side analytics only where the chart legend remains readable.
+- **Motion:** restrained disclosure/route transitions only; respect `prefers-reduced-motion`. Do not add animation solely for decoration.
+- **DFII:** aesthetic impact 4, context fit 5, implementation feasibility 4, performance safety 4, consistency risk 2; score **15/15** using the frontend-design rubric. Risk is controlled by reusing the established palette/type/layout and adding only chart primitives, not a second design system.
+
 ## Current product baseline
 
 The portal is a same-origin FastAPI + React/Vite application with a role-aware shell. Existing developer routes are `/developer`, `/developer/keys`, `/developer/models`, `/developer/activity`, and `/developer/quickstart`. Operator routes are `/operator`, `/operator/people`, `/operator/providers`, `/operator/usage`, and `/operator/guardrails`.
