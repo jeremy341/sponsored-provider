@@ -51,6 +51,6 @@ describe("model detail route", () => {
     renderDetails("/developer/models/removed%3A%3Amodel%2Fgone", [model]);
     const state = await screen.findByRole("region", { name: /model unavailable/i });
     expect(within(state).getByText(/no longer in the published catalog/i)).toBeInTheDocument();
-    expect(within(state).getByRole("link", { name: /back to models/i })).toBeInTheDocument();
+    expect(within(state).getByRole("link", { name: /back to models/i })).toHaveClass("model-back-link");
   });
 });

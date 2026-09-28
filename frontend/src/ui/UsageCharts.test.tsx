@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import type { ModelSpendRecord } from "../contracts/api";
 import { buildSpendSlices } from "./charts/spendChartData";
-import { ModelSpendChart, spendTooltipValue } from "./charts/ModelSpendChart";
+import { ModelSpendChart, spendSliceColor, spendTooltipValue } from "./charts/ModelSpendChart";
 import { UsageTrendChart } from "./charts/UsageTrendChart";
 
 const models: ModelSpendRecord[] = [
@@ -14,6 +14,13 @@ const models: ModelSpendRecord[] = [
 ];
 
 describe("usage chart components", () => {
+  it("assigns a distinct stable color to every visible model slice", () => {
+    const colors = Array.from({ length: 12 }, (_, index) => spendSliceColor(index));
+
+    expect(new Set(colors).size).toBe(colors.length);
+    expect(colors).toEqual(Array.from({ length: 12 }, (_, index) => spendSliceColor(index)));
+  });
+
   it("groups model shares below three percent and retains exact total spend", () => {
     const result = buildSpendSlices(models, "1.00");
     expect(result.state).toBe("ready");
