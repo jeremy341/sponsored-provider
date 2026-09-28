@@ -47,12 +47,12 @@ function PeriodModelRanking({ models }: { models: ModelUsageRecord[] }) {
 }
 
 function periodLabel(analytics: DashboardAnalytics): string {
-  const from = new Date(analytics.window.from);
-  const to = new Date(analytics.window.to);
+  const from = new Date(analytics.period.from);
+  const to = new Date(analytics.period.to);
 
-  if (analytics.window.range === "current_month") return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: analytics.window.timezone }).format(from);
+  if (analytics.period.key === "current_month") return new Intl.DateTimeFormat("en-GB", { month: "long", year: "numeric", timeZone: analytics.period.timezone }).format(from);
 
-  const formatter = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: analytics.window.timezone });
+  const formatter = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: analytics.period.timezone });
 
   return `${formatter.format(from)} – ${formatter.format(to)}`;
 }
