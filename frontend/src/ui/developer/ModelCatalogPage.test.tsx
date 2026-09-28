@@ -48,6 +48,7 @@ describe("provider model catalog", () => {
 
     const card = await screen.findByRole("article", { name: /DeepSeek V4 Flash/ });
     expect(within(card).getByRole("link", { name: /DeepSeek V4 Flash/ })).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: /copy model id/i }).querySelector("svg.pixel-icon-svg")).toHaveAttribute("aria-hidden", "true");
     await userEvent.click(within(card).getByRole("button", { name: /copy model id/i }));
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(baseModel.id);
     expect(within(card).getByRole("link", { name: /DeepSeek V4 Flash/ })).toHaveAttribute("href", expect.stringContaining("search=deepseek"));

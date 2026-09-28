@@ -1,91 +1,101 @@
 ---
 project: Sponsored Provider
 register: product
-aesthetic_direction: technical / utilitarian
-color_strategy: committed
-design_system: Radix UI + shadcn/ui, themed with project tokens
-design_variance: 6
+aesthetic_direction: retro-futuristic / after-hours pixel operations console
+color_strategy: full-palette
+design_system: Radix UI and existing React/Vite components themed with Poorup tokens
+design_variance: 7
 motion_intensity: 2
-visual_density: 6
+visual_density: 7
 ---
 
-## Design Read
+# Design Read
 
-A student-scale AI gateway that feels like a dependable instrument: quiet surfaces, clear ownership, visible usage, and a safe next action for both operators and developers.
+An after-hours control room for sponsored AI access: the exact Poorup palette and crisp pixel geometry make the provider feel like part of the same world, while its information hierarchy remains a clear operations tool rather than a board-game screen.
 
 ## Signature
 
-The usage runway is the signature. It shows the operator’s shared provider ceiling and each developer’s personal allowance with the same visual grammar. It makes the relationship between shared capacity and individual usage understandable without turning every screen into a chart wall.
+The usage runway is a segmented ledger instrument: gold tick marks, a crisp SVG position marker, and explicit used/reserved/remaining labels. The same grammar represents a developer's personal allowance and the operator's shared upstream exposure, but their labels and scopes never collapse into one another.
+
+## Inspiration
+
+- **Poorup:** take the rendered near-black teal surfaces, warm gold ink and structural rules, brick-red action color, square geometry, Pixelify/Silkscreen type character, and crisp pixel-grid SVG craft. Reject its game logo, board art, mascots, cursor reticle, and gameplay copy; create a provider-specific icon family in the same SVG grammar.
+- **Synthesis:** preserve Poorup's visual rules exactly, but let provider ownership, user limits, model prices, request history, and safeguards determine the console's content and layout.
+- **Authority:** the checked-out Poorup stylesheet's rendered CSS tokens are the source for exact values. The Poorup design notes and stylesheet disagree on the bright-red token; this lock uses the stylesheet's rendered `#E36B5F` and records the discrepancy for future reconciliation.
 
 ## Color (locked)
 
-The signed-in portals use the approved HCAI-inspired zinc/red system. These values are the implementation authority in `frontend/src/ui/styles.css`.
-
-| role | hex | use |
+| Role | Value | Use |
 |---|---|---|
-| canvas | #18181b | page background |
-| surface | #27272a | cards, tables, and menus |
-| elevated | #303035 | dialogs and raised surfaces |
-| heading | #fafafa | primary text |
-| body | #d4d4d8 | body and secondary text |
-| quiet | #a1a1aa | tertiary labels |
-| border | #303035 | dividers; pair with fill for control boundaries |
-| strong border | #71717a | inputs and important boundaries |
-| accent | #ec3750 | primary action and selected state |
-| accent hover | #d62640 | hover and pressed primary action |
-| accent text | #ff8495 | small accent text and links |
-| success | #22c55e | healthy/success state |
-| warning | #f59e0b | approaching limit or incomplete coverage |
-| danger | #f87171 | error/stopped text |
-| info | #60a5fa | informational state |
+| Canvas | `#01070A` | App background |
+| Chrome | `#020A0D` | Header and navigation surfaces |
+| Panel | `#071314` | Primary sections, cards, tables |
+| Raised panel | `#09191A` | Menus, selected rows, raised controls |
+| Deep surface | `#030C10` | Code, inset areas, quiet table cells |
+| Board tile / center | `#061011` / `#031D1E` | Limited decorative/chart framing only |
+| Inset / card / board frame | `#04100F` / `#071516` / `#020C0D` | Inset controls, ledger panels, rare framed surfaces |
+| Surface hover / board hover | `#0B1C1D` / `#0A1A1A` | Hovered rows and board items |
+| Button hover / pressed | `#0C1C1D` / `#050F10` | Secondary button/icon-control feedback; distinct from general row hover |
+| Disabled / selected / active | `#071011` / `#0C1F1C` / `#0D211F` | Non-color-only control state pairing required |
+| Special / card highlight | `#0C2524` / `#0B2020` | Limited emphasis surfaces |
+| Primary ink | `#F0D9AC` | Highest emphasis |
+| Body ink | `#E8D3AB` | Headings and readable text |
+| Muted ink | `#A79D7D` | Secondary copy and metadata |
+| Gold accent steps | `#CFA75F`, `#C88F2E`, `#9B783D`, `#5C5033` | Selection, rules, markers, quiet emphasis |
+| Action red | `#AF2A21` | Primary action fill and urgent action state |
+| Red hover / pressed | `#BE3126` / `#98231C` | Action feedback |
+| Bright red | `#E36B5F` | Large/icon-sized secondary emphasis only |
+| Success | `#35A653` | Success/healthy state, paired with a label/icon |
+| Information blue | `#286EA1` | Large markers or tinted surfaces, not small text |
+| Olive | `#78894F` | Secondary icon/data category |
+| Default/active rule | `#5C5033` / `#C88F2E` | Borders, dividers, selected rules |
+| Dark/subtle/strong/shadow rule | `#1D2927` / `#3A382A` / `#6B5A36` / `#101916` | Structural hierarchy and inset edges |
+| Error surface/border/ink | `#170807` / `#AF2A21` / `#F0B1A6` | Error notice with label/icon |
+| Action edge/shadow | `#D05A49` / `#721C18` | Only for small button-edge detailing |
 
-Contrast checks on the approved palette: `#fafafa` is 16.97:1 on canvas and 14.27:1 on surface; `#d4d4d8` is 11.99:1 and 10.08:1; `#ff8495` is 6.37:1 on surface; `#101114` on the accent fill is 4.70:1. Use semantic status colors with text or icons, never as the only status signal. The accent red is for fills, large marks, and selected states; use accent text for small text on dark surfaces.
+Contrast checks against rendered Poorup surfaces: `#F0D9AC` on canvas `#01070A` is 14.70:1; `#E8D3AB` on panel `#071314` is 12.89:1; `#CFA75F` on panel is 8.40:1; `#A79D7D` on panel is 6.98:1; `#35A653` on panel is 6.05:1; `#F0D9AC` on action red is 4.79:1. Action red on panel is only 2.86:1 and information blue on panel 3.45:1, so neither is small body text. Use the accessible gold/ink token for status text, pair status colors with explicit labels/icons, and use red primarily as a control fill/large mark.
 
 ## Type (locked)
 
-| role | family | use |
+| Role | Family | Use |
 |---|---|---|
-| UI | IBM Plex Sans, self-hosted via Fontsource | headings, body, labels, and controls; local substitute for the reference Google Sans hierarchy |
-| utility | IBM Plex Mono, self-hosted via Fontsource | IDs, timestamps, metrics, and code |
+| Display / section (`--font-display`) | Pixelify Sans | Page and section headings; uppercase section labels where they remain readable |
+| UI / body | Pixelify Sans | Navigation, controls, descriptions, and form copy; retain readable body sizing and line-height |
+| Pixel utility | Silkscreen | Short micro-labels and selected compact numeric readouts only |
+| Technical utility | IBM Plex Mono | Model IDs, API values, timestamps, tokens, currency, and code |
 
-Do not add remote font requests or change the Content Security Policy for typography without a separate approved task.
-
-## Icons (locked)
-
-Use Lucide icons only. Pair every status icon with text; no icon-only destructive actions. Use the same 1.75px stroke weight and 16/18/20px sizing steps across both portals.
+Use local font assets only after confirming their licenses and carrying required notices. Never fetch fonts at runtime. Use tabular numerals for money, token totals, time, and IDs. Do not use Silkscreen for paragraphs, helper text, or long table cells.
 
 ## Scales (locked)
 
-- spacing: 4px base; 4, 8, 12, 16, 24, 32, 48, 64
-- radius: 8px controls and menus, 16px panels/dialogs, 24px prominent metric strip
-- motion: 120ms feedback, 240ms panel transitions; `cubic-bezier(0.16, 1, 0.3, 1)`; no bounce; honor reduced motion
-- focus: 2px solid accent with 3px offset
-- breakpoints: 640px, 768px, 1024px, 1280px
+- Spacing: `2, 4, 8, 12, 16, 20, 24, 32, 40px`; use no competing spacing system.
+- Radius: `2px` for controls, rows, panels, and dialogs; `3px` only for small pressed/interactive details. No pills or rounded SaaS cards.
+- Border: `1px` normal; `2px` selected, focus, or high-emphasis boundary.
+- Surfaces: flat teal-black fills, gold hierarchy lines, a subtle inset highlight and restrained canvas-tinted shadow. No glass, gradient chrome, or large blurred glow.
+- Shadow tokens: panel `0 2px 8px rgb(0 0 0 / 45%)`; inset `inset 0 1px 0 rgb(240 217 172 / 5%)`; active `0 0 8px rgb(200 143 46 / 12%)`. Keep large page content unblurred and quiet.
+- Motion: hover `80–120ms`, press `60–80ms`, panels `120–160ms`; stepped/ease-out character; no bounce; honor `prefers-reduced-motion`.
+- Focus: visible `2px` gold outline with `1px` offset; do not rely on accent color alone.
+- Responsive checkpoints: `390px`, `768px`, `1024px`, `1280px`, and `1440px`; preserve safe areas and 44px minimum touch targets.
 
-## Controls and data color
+## Icon and texture language
 
-- Native `select` controls share the same zinc surface, strong boundary, 8px radius, dark option palette, and visible accent focus. Filters keep the platform arrow; only the workspace switcher uses a custom chevron wrapper and suppresses the native arrow with matching right padding.
-- Selects have distinct hover and disabled treatments. Disclosure buttons such as provider groups expose `aria-expanded` and have visible hover, pressed, and keyboard-focus states.
-- On phone widths, model-ID copy, catalog show-all, code-language tabs, analytics tabs, and selects have at least 44px hit areas.
-- Charts use Hack Club red with zinc neutrals (`--chart-primary`, `--chart-secondary`, `--chart-tertiary`, `--chart-muted`, `--chart-grid`). Do not reuse warning/error colors as decorative series; semantic success, warning, danger, and info remain reserved for status and coverage meaning.
+- One provider-owned pixel SVG family, built from low-resolution rect/path geometry with `shape-rendering="crispEdges"`, gold/red/teal CSS variables, and a consistent 16/20/24/32px size set.
+- Keep Radix primitives for accessible dialogs/tabs/menus and use these SVGs as glyphs; do not install an icon or UI library.
+- Never reuse the Poorup wordmark, board squares, property art, mascots, or reticle cursor. Keep the browser's native pointer/text cursors.
+- Screen-print/noise texture may appear only in restrained branding or empty-state moments. No scanline/noise overlay over dense data, code, forms, or charts.
+- Recharts remains a semantic data chart rendered as SVG; theme its axis, grid, tooltip, frame, and markers. Do not rasterize it or make data harder to read for pixel effect.
 
-## Voice
+## Voice and product boundaries
 
-Technical, direct, non-alarmist. Use short, human wording. Actions use consistent verbs: `Create`, `Save`, `Disable`, `Revoke`, `Archive`, `Block`, `Resume`. Explain whether a figure is a local estimate or provider-reported amount. Never imply the portal can see or control upstream facts it cannot verify. Never rely on color alone.
-
-## Inspiration synthesis
-
-- OpenRouter: take the readable usage summary, model catalog, key controls, and provider-aware usage breakdown. Reject its marketplace breadth and organization features that a small sponsored gateway does not need yet.
-- Hack Club AI: take the direct OpenAI-compatible quickstart and student-friendly first-call path. Reject assumptions that every user shares one credential or one undifferentiated activity log.
-- Existing provider: retain budget guardrails, upstream secrecy, model allowlists, and the usage runway. Replace the owner-only admin-token experience with role-aware sessions and user-scoped pages.
+Direct, calm, operational. Preserve current Provider Console terminology and factual copy, adding only small console-style labels where they improve wayfinding. Keep operator/developer ownership explicit; do not imply upstream-reported cost when estimated, or show unknown cost as zero/free. Keep usernames/passwords, invitations, per-user data, upstream secrets, model policies, request history, `/v1`, and server/API behavior unchanged.
 
 ## Layout rules
 
-- Use the compact top header with no more than five primary destinations per role. On mobile, use the compact header and accessible navigation sheet.
-- Prefer a stat strip, chart with a useful legend, and table-first activity views. Do not stack nested cards or duplicate every figure in multiple widgets.
-- Operator screens can be dense but must keep one primary action per view. Developer screens should foreground the model/key setup and personal allowance.
-- Dense tables use server-side filters and pagination; preserve horizontal swipe on mobile while hiding decorative scrollbars.
-- Request detail never displays prompt or completion text.
+- Keep the current role-specific top shell and route topology; restyle its brand, active navigation, account context, and mobile sheet in this system.
+- Use ledger-like ruled sections and table-first data. Reserve framed panels for real groups; avoid repeated card grids and nested surfaces.
+- Developer views foreground personal allowance, keys, model access, quickstart, and private activity. Operator views foreground shared exposure, providers/routes, people, aggregate activity, and safeguards.
+- Shared controls use one button/input/select/tab/disclosure/dialog vocabulary. Status combines text/icon with color.
+- `/dashboard` remains a compatibility route and receives the same visual tokens without changing its endpoint or authentication behavior in this visual pass.
 
 ## Consistency rule
 

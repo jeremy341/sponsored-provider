@@ -1,6 +1,6 @@
 import { useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
-import { Check, Copy } from "lucide-react";
+import { PixelIcon } from "../icons/PixelIcon";
 
 type ExampleLanguage = "curl" | "python" | "javascript";
 
@@ -74,7 +74,7 @@ export function ModelCodeExamples({ modelId }: { modelId: string }) {
   return <section className="model-examples" aria-labelledby="model-examples-heading">
     <div className="model-examples-heading"><div><h2 id="model-examples-heading">Use this model</h2><p>Same-origin OpenAI-compatible endpoint. Replace the placeholder with your own key.</p></div></div>
     <Tabs.Root value={language} onValueChange={(value) => { if (isExampleLanguage(value)) setLanguage(value); }} className="model-code-tabs">
-      <div className="model-code-toolbar"><Tabs.List aria-label="Code example language">{languages.map((key) => <Tabs.Trigger key={key} value={key}>{labels[key]}</Tabs.Trigger>)}</Tabs.List><button type="button" className="button button-quiet button-small" onClick={() => { void copyExample(); }} aria-label={`Copy ${labels[language]} example`}>{copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}{copied ? "Copied" : "Copy"}</button></div>
+      <div className="model-code-toolbar"><Tabs.List aria-label="Code example language">{languages.map((key) => <Tabs.Trigger key={key} value={key}>{labels[key]}</Tabs.Trigger>)}</Tabs.List><button type="button" className="button button-quiet button-small" onClick={() => { void copyExample(); }} aria-label={`Copy ${labels[language]} example`}><PixelIcon name={copied ? "confirm" : "copy"} />{copied ? "Copied" : "Copy"}</button></div>
       {languages.map((key) => <Tabs.Content key={key} value={key} className="model-code-panel"><pre className="code-block model-code-block" tabIndex={0}><code>{examples[key]}</code></pre></Tabs.Content>)}
       <p className="model-example-safety">Keep API keys in a server-side environment variable. Never commit a real key.</p>
     </Tabs.Root>

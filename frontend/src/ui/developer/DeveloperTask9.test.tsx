@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
@@ -34,6 +35,14 @@ function api(overrides: Partial<PortalApi> = {}): PortalApi {
 }
 
 describe("Task 9 developer views", () => {
+
+  it("keeps the operator ledger width rule scoped away from developer activity", () => {
+    const stylesheet = readFileSync("src/ui/styles.css", "utf8");
+
+    expect(stylesheet).toMatch(/\.operator-usage-page\s+\.activity-table-wrap table\s*\{\s*min-width:\s*1060px/);
+    expect(stylesheet).not.toMatch(/(^|})\s*\.activity-table-wrap table\s*\{\s*min-width:\s*1060px/);
+  });
+
   it("shows the shared allowance, reservations, remaining balance, and Berlin reset", () => {
     render(<AllowanceSummary allowance={{ usedUsd: "1.234567891", reservedUsd: "0.25", consumedUsd: "1.484567891", limitUsd: "5", remainingUsd: "3.515432109", period: "weekly", resetAt: "2026-09-28T00:00:00Z", source: "gateway estimate and active reservations" }} />);
     expect(screen.getByText("$1.234567891")).toBeInTheDocument();
