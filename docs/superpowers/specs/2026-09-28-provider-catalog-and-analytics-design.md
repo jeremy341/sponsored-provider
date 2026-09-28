@@ -10,7 +10,7 @@ The user selected **current calendar month** as the default model-spend chart ra
 
 ## Success criteria
 
-1. A developer can quickly search or browse one card per published canonical model, understand its verified rates and capabilities, open a stable detail URL, and copy a correct OpenAI-compatible example.
+1. A developer can quickly search or browse one card per published provider-brand/canonical-model offer, understand its verified rates and capabilities, open a stable detail URL, and copy a correct OpenAI-compatible example.
 2. The model detail page shows only known, trustworthy metadata; unavailable prices or technical facts are never represented as zero or invented.
 3. Request/token/spend trends and model-spend distribution use the same server-defined period and role scope. A spend chart only claims to represent a total when its model segments reconcile to that total.
 4. The operator retains full provider, routing, approval, budget, invitation, people, usage, and safeguard controls. Developer data remains scoped to the authenticated developer.
@@ -28,7 +28,7 @@ Current invariants to preserve:
 
 - local username/password authentication and invite-only account creation; no OAuth activation;
 - operator/developer role separation and owner-scoped developer keys/activity;
-- one canonical public model even when multiple upstream offers serve it;
+- one public offer per provider brand and canonical model, with duplicate routes merged within that brand; the same model from different brands remains separately selectable and provider-scoped;
 - operator-controlled provider/model approval and availability, per-key model allowlists and spend caps, and the shared $7/month allowance default for newly invited developers;
 - server-side budget reservations, provider/global safeguards, append-only historical usage snapshots, and one-worker SQLite deployment assumptions;
 - no stored or displayed prompts/completions, and no upstream credentials/base URLs in the developer portal;
@@ -47,7 +47,7 @@ The authenticated Hack Club AI pages were not publicly renderable in this audit;
 ### Listing
 
 - Keep the existing searchable, filterable catalog and provider/capability facets.
-- Present responsive cards grouped by the **canonical model's vendor/family**, not one duplicate per upstream offer. Keep one public model ID for the merged model; show a compact “served by N providers” indicator where this is known.
+- Present responsive cards grouped by **provider brand**. Merge duplicate upstream model IDs into one offer/card within that brand; show a compact “N active routes” indicator where known. If two provider brands serve the same canonical model, keep separate cards and provider-scoped public IDs as specified by the catalog-routing design.
 - Each card should show display name, canonical public ID, text/vision capability, availability, and verified input/output rates per million. Cached-input pricing may appear as a compact third rate when verified. The price source/verification status must remain visible.
 - Show only a small initial set per group on narrower screens with a clear “Show all” control; preserve search and sorting for large catalogs.
 - Use a semantic article/card with a primary detail link and separate copy-ID button. Do not put a button inside an anchor.
@@ -56,7 +56,7 @@ The authenticated Hack Club AI pages were not publicly renderable in this audit;
 ### Detail route and content
 
 - Add a deep-linkable developer detail route under `/developer/models/*`. The wildcard accommodates canonical IDs that contain `/`; parsing, URL encoding, and unknown IDs must be tested. The detail page's back link returns to the catalog and preserves its search/filter state.
-- Resolve details from the provider's database-backed published catalog. Do not call each upstream from a developer page. Return only public catalog data and safe display labels for active routes; never return credentials or internal URLs.
+- Resolve details from the provider-brand-scoped, database-backed published offer. Do not call each upstream from a developer page. Return only public catalog data and safe display labels for active same-brand routes; never return credentials or internal URLs.
 - Detail hierarchy: breadcrumb; model name/vendor/capability/availability; copyable public ID; verified input/output/cached-input rates and provenance; optional technical details; code examples.
 - Show context window, max output, description, tokenizer, or modality details only when the provider supplies trustworthy metadata or an operator has explicitly verified it. The initial version should not invent or synthesize model descriptions.
 - For models no longer published, historical request rows remain intact. A historical detail link may show a clearly marked unavailable/tombstone view based on request-time snapshots; it must not make the model callable again.
@@ -127,8 +127,8 @@ Dashboard layout recommendation:
 
 ## Implementation acceptance criteria
 
-1. Model cards open deep-linked details and back navigation restores catalog filters; slash-containing IDs work on direct load/refresh.
-2. Cards/details show only database-published models and preserve canonical merging across upstream providers.
+1. Model cards open deep-linked details and back navigation restores catalog filters; slash-containing, provider-scoped IDs work on direct load/refresh.
+2. Cards/details show only database-published offers, merge duplicate routes within the same brand, and never merge separate provider brands.
 3. Snippets match the actual `/v1` contract, use placeholders, copy correctly, and expose no secret.
 4. Current-month, 7-day, 30-day, and 90-day aggregation tests verify timezone boundaries and identical period filters across summary, trend, and model breakdown.
 5. For fully priced fixtures, model shares total 100% and the dollar sum matches the period total; `<3%` models aggregate into one Other slice. Unknown-cost fixtures are visibly incomplete and never counted as free.
@@ -140,7 +140,7 @@ Dashboard layout recommendation:
 
 - Default analytics range: current month, selected by the user; use `Europe/Berlin` as the recommended period boundary to align with the monthly allowance.
 - Model-mix metric: spend distribution, not request count; chart denominator is the same selected period's known spend.
-- Model presentation: one public card per merged canonical model; provider routes remain provenance/routing details.
+- Model presentation: one public card per provider-brand/canonical-model offer; merge same-brand routes, keep cross-brand offers distinct, and show route provenance in details.
 - Metadata: show provider/operator-verified values only; do not hallucinate descriptions or technical specifications.
 - Auth and all currently deployed product features remain unchanged.
 
