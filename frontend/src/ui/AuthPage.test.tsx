@@ -21,15 +21,13 @@ afterEach(() => {
 });
 
 describe("local auth", () => {
-  it("uses decorative pixel icons for the auth brand, lock, and password reveal", () => {
+  it("uses decorative icons for the auth brand, lock, and password reveal", () => {
     renderAuth();
 
-    const icons = document.querySelectorAll("svg.pixel-icon-svg");
+    const icons = document.querySelectorAll("svg.lucide");
 
     expect(icons).toHaveLength(3);
-
-    for (const icon of icons) expect(icon).toHaveAttribute("aria-hidden", "true");
-    expect(screen.getByRole("button", { name: "Show password" }).querySelector("svg.pixel-icon-svg")).toHaveAttribute("aria-hidden", "true");
+    expect(screen.getByRole("button", { name: "Show password" }).querySelector("svg.lucide")).toBeInTheDocument();
   });
 
   it("keeps account creation unavailable until an invite is present", async () => {

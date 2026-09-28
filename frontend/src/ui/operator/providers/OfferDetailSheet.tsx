@@ -1,6 +1,6 @@
 import { useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { PixelIcon } from "../../icons/PixelIcon";
+import { X } from "lucide-react";
 import type { CatalogOfferRecord, OfferRouteRecord, PortalApi } from "../../../contracts/api";
 import { PriceReviewPanel } from "./PriceReviewPanel";
 import { RoutePriorityEditor } from "./RoutePriorityEditor";
@@ -36,7 +36,7 @@ export function OfferDetailSheet({ offer, offers, portalApi, onChanged, onClose 
 
   return <Dialog.Root open={Boolean(offer)} onOpenChange={(open) => { if (!open) onClose(); }}>
     <Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content offer-sheet" aria-describedby="offer-description">
-      {offer && <><div className="dialog-title-row"><div><Dialog.Title>{offer.displayName}</Dialog.Title><Dialog.Description id="offer-description">{offer.brandName} · public model ID <code>{offer.canonicalModelId}</code></Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close offer details"><PixelIcon name="close" /></button></Dialog.Close></div>
+      {offer && <><div className="dialog-title-row"><div><Dialog.Title>{offer.displayName}</Dialog.Title><Dialog.Description id="offer-description">{offer.brandName} · public model ID <code>{offer.canonicalModelId}</code></Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close offer details"><X size={18} /></button></Dialog.Close></div>
         <label className="offer-availability"><span><strong>Available to developers</strong><small>{offer.activePrice ? "Offer-level access; route switches are managed separately." : "Price required before publication."}</small></span><input type="checkbox" role="switch" aria-label="Available to developers" checked={offer.available} disabled={!offer.activePrice || !offer.approved} onChange={(event) => { void setAvailable(event.target.checked); }} /></label>
         {!offer.activePrice && <p className="inline-notice notice-warning" role="status">Price required. This offer is unavailable to users.</p>}
         {error && <p className="inline-notice notice-error" role="alert">{error}</p>}

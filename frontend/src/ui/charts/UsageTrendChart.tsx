@@ -88,7 +88,7 @@ export function UsageTrendChart({ series }: { series: AnalyticsUsagePoint[] }) {
         }} contentStyle={{ background: "var(--elevated)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--text)" }} />
         <Line type="monotone" dataKey="chartValue" name={label} stroke="var(--chart-primary)" strokeWidth={2} dot={{ r: 2, fill: "var(--chart-primary)" }} activeDot={{ r: 4 }} connectNulls={false} isAnimationActive={false} />
       </LineChart></ChartContainer>
-      <table className="sr-only" aria-label="Usage trend data"><caption>Daily {label.toLowerCase()} values</caption><thead><tr><th>Date</th><th>{label}</th>{metric === "spend" && <th>Cost coverage</th>}</tr></thead><tbody>{points.map((point) => <tr key={point.day}><td>{point.day}</td><td>{valueText(point[key])}</td>{metric === "spend" && <td>{spendCoverageLabel(point)}</td>}</tr>)}</tbody></table>
+      <table className="sr-only" aria-label="Usage trend data"><caption>Daily {label.toLowerCase()} values</caption><thead><tr><th scope="col">Date</th><th scope="col">{label}</th>{metric === "spend" && <th scope="col">Cost coverage</th>}</tr></thead><tbody>{points.map((point) => <tr key={point.day}><td>{point.day}</td><td>{valueText(point[key])}</td>{metric === "spend" && <td>{spendCoverageLabel(point)}</td>}</tr>)}</tbody></table>
     </> : <div className="chart-placeholder"><span>No usage data yet</span><small>The trend will fill from recorded request events.</small></div>}
   </section>;
 }
