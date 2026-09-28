@@ -6,7 +6,7 @@ import { App } from "./App";
 afterEach(() => window.history.replaceState({}, "", "/"));
 
 describe("portal shell", () => {
-  it("shows developer-only navigation in the shared header", () => {
+  it("shows developer-only navigation in the sidebar rail", () => {
     window.history.replaceState({}, "", "/developer/keys?preview=developer");
     render(<App />);
 
@@ -19,15 +19,18 @@ describe("portal shell", () => {
     expect(within(navigation).queryByRole("link", { name: /People & keys/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main-content");
 
-    expect(brands).toHaveLength(2);
+    expect(brands).toHaveLength(1);
 
-    for (const brand of brands) expect(brand.querySelector("svg.pixel-icon-svg")).toHaveAttribute("aria-hidden", "true");
+    for (const brand of brands) expect(brand.querySelector("svg.lucide")).toBeInTheDocument();
 
     expect(navLinks).toHaveLength(5);
 
-    for (const link of navLinks) expect(link.querySelector("svg.pixel-icon-svg")).toHaveAttribute("aria-hidden", "true");
+    for (const link of navLinks) expect(link.querySelector("svg.lucide")).toHaveAttribute("aria-hidden", "true");
 
-    expect(screen.getByRole("img", { name: "Preview only" })).toHaveClass("pixel-icon-svg");
+    const previewIcon = document.querySelector("svg.lucide-circle-help");
+
+    expect(previewIcon).toBeInTheDocument();
+    expect(previewIcon).toHaveAttribute("aria-label", "Preview only");
   });
 
   it("keeps operator navigation separate and opens the mobile navigation with an accessible trigger", async () => {
@@ -44,14 +47,14 @@ describe("portal shell", () => {
     await userEvent.click(openNavigation);
     const dialog = await screen.findByRole("dialog", { name: "Navigation" });
 
-    expect(dialog.querySelectorAll("svg.pixel-icon-svg")).toHaveLength(7);
-
-    for (const icon of dialog.querySelectorAll("svg.pixel-icon-svg")) expect(icon).toHaveAttribute("aria-hidden", "true");
+    expect(dialog.querySelectorAll("svg.lucide")).toHaveLength(7);
 
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).not.toBeInTheDocument());
     expect(openNavigation).toHaveFocus();
 
+    await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
+    await screen.findByRole("dialog", { name: "Navigation" });
     await userEvent.selectOptions(screen.getByLabelText("Choose portal"), "developer");
 
     const developerNavigation = screen.getByRole("navigation", { name: "Primary navigation" });

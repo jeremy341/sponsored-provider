@@ -11,8 +11,11 @@
     "lint": "oxlint src vite.config.ts oxlint.config.ts"
   },
   "dependencies": {
+    "@fontsource-variable/noto-sans": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.2.6",
-    "@fontsource/ibm-plex-sans": "^5.2.6",
+    "@fontsource/maple-mono": "^5.3.0",
+    "@fontsource/silkscreen": "^5.3.0",
+    "@fontsource/vt323": "^5.3.0",
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-tabs": "^1.1.13",

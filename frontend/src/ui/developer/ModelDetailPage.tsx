@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
-import { PixelIcon } from "../icons/PixelIcon";
+import { ArrowLeft, Check, Copy } from "lucide-react";
 import type { ModelRecord, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
 import { getLayoutPreviewRole } from "../../lib/preview";
@@ -48,15 +48,16 @@ export function ModelDetailPage({ portalApi }: { portalApi: Pick<PortalApi, "lis
 
   if (models === null && !loadError) return <section className="section-block" aria-label="Model details"><div className="loading-line" role="status"><span className="sr-only">Loading model details</span></div></section>;
 
-  if (loadError) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link model-back-link" to={returnTo}><PixelIcon name="chevronLeft" /> Back to models</Link><h1>Model details unavailable</h1><p>The published catalog could not be loaded. Try again from the model list.</p></section>;
+  if (loadError) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link model-back-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link><h1>Model details unavailable</h1><p>The published catalog could not be loaded. Try again from the model list.</p></section>;
 
-  if (!model) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link model-back-link" to={returnTo}><PixelIcon name="chevronLeft" /> Back to models</Link><span className="eyebrow">Catalog entry not found</span><h1>Model unavailable</h1><p>This model is no longer in the published catalog. Historical activity remains in your usage history, but this ID cannot be used for new requests.</p></section>;
+  if (!model) return <section className="section-block model-unavailable" aria-label="Model unavailable"><Link className="text-link model-back-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link><span className="eyebrow">Catalog entry not found</span><h1>Model unavailable</h1><p>This model is no longer in the published catalog. Historical activity remains in your usage history, but this ID cannot be used for new requests.</p></section>;
 
   const displayName = model.displayName ?? model.id.split("::").at(-1) ?? model.id;
 
   return <article className="model-detail-page">
-    <Link className="text-link model-back-link" to={returnTo}><PixelIcon name="chevronLeft" /> Back to models</Link>
-    <header className="model-detail-header"><div><span className="eyebrow">{model.providerName} · {model.capabilities.map((item) => item === "vision" ? "Vision" : "Text").join(" + ")}</span><h1>{displayName}</h1><p>{model.available ? "Available for new requests" : "Currently unavailable"} · OpenAI-compatible chat</p></div><button type="button" className="button button-secondary model-id-copy" onClick={() => { void copyId(model.id); }}><PixelIcon name={copied ? "confirm" : "copy"} />{copied ? "Copied" : "Copy model ID"}</button></header>
+    <Link className="text-link model-back-link" to={returnTo}><ArrowLeft size={15} /> Back to models</Link>
+    <header className="model-detail-header"><div><span className="eyebrow">{model.providerName} · {model.capabilities.map((item) => item === "vision" ? "Vision" : "Text").join(" + ")}</span><h1>{displayName}</h1><p>{model.available ? "Available for new requests" : "Currently unavailable"} · OpenAI-compatible chat</p></div><button type="button" className="button button-secondary model-id-copy" onClick={() => { void copyId(model.id); }}>{copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}{copied ? "Copied" : "Copy model ID"}</button></header>
+    <span className="sr-only" aria-live="polite">{copied ? "Model ID copied to clipboard" : ""}</span>
     <div className="model-public-id"><span>API model ID</span><code>{model.id}</code></div>
     <section className="model-detail-prices" aria-label="Model pricing">
       <PriceCard label="Input" value={model.pricingVerified ? model.inputUsdPerMillion : null} verified={model.pricingVerified} />

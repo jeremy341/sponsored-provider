@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { PixelIcon } from "../../icons/PixelIcon";
+import { X } from "lucide-react";
 import type { PersonRecord } from "../../../contracts/api";
 import { MoneyRunway } from "../MoneyRunway";
 
@@ -44,7 +44,7 @@ export function AllowanceEditor({ person, onSave, onClose }: { person: PersonRec
 }
 
 export function AllowanceDialog({ person, onSave, onClose }: { person: PersonRecord | null; onSave: AllowanceEditorProps["onSave"]; onClose: () => void }) {
-  return <Dialog.Root open={Boolean(person)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="allowance-description"><div className="dialog-title-row"><div><Dialog.Title>Edit allowance</Dialog.Title><Dialog.Description id="allowance-description">Allowance applies across this person’s keys.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close allowance editor"><PixelIcon name="close" /></button></Dialog.Close></div>{person && <AllowanceEditor key={person.id} person={person} onSave={onSave} onClose={onClose} />}</Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root open={Boolean(person)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="allowance-description"><div className="dialog-title-row"><div><Dialog.Title>Edit allowance</Dialog.Title><Dialog.Description id="allowance-description">Allowance applies across this person’s keys.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close allowance editor"><X size={18} /></button></Dialog.Close></div>{person && <AllowanceEditor key={person.id} person={person} onSave={onSave} onClose={onClose} />}</Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
 type AllowanceEditorProps = React.ComponentProps<typeof AllowanceEditor>;

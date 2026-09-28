@@ -35,8 +35,6 @@ describe("invite controls", () => {
     });
 
     const revoke = vi.spyOn(api, "revokeInvite").mockResolvedValue(revokedInvite);
-    const confirm = vi.fn(() => true);
-    vi.stubGlobal("confirm", confirm);
     const setToken = vi.fn();
 
     render(<InviteDialog open onOpenChange={vi.fn()} token={null} setToken={setToken} />);
@@ -47,7 +45,8 @@ describe("invite controls", () => {
     expect(screen.queryByLabelText(/email/i)).not.toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "Revoke" }));
-    expect(confirm).toHaveBeenCalledOnce();
+    expect(await screen.findByRole("dialog", { name: "Revoke this invitation?" })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Revoke invite" }));
     expect(revoke).toHaveBeenCalledWith("legacy-1");
     await waitFor(() => expect(screen.getByText("revoked")).toBeInTheDocument());
 

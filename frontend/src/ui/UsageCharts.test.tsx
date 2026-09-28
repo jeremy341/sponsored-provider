@@ -14,11 +14,14 @@ const models: ModelSpendRecord[] = [
 ];
 
 describe("usage chart components", () => {
-  it("assigns a distinct stable color to every visible model slice", () => {
-    const colors = Array.from({ length: 12 }, (_, index) => spendSliceColor(index));
-
-    expect(new Set(colors).size).toBe(colors.length);
-    expect(colors).toEqual(Array.from({ length: 12 }, (_, index) => spendSliceColor(index)));
+  it("assigns stable chart-series colors to model slices", () => {
+    expect(spendSliceColor(0)).toBe("#e6b450");
+    expect(spendSliceColor(1)).toBe("#59c2ff");
+    expect(spendSliceColor(2)).toBe("#aad94c");
+    expect(spendSliceColor(3)).toBe("#d2a6ff");
+    expect(spendSliceColor(4)).toBe("#f07178");
+    expect(spendSliceColor(5)).toBe(spendSliceColor(0));
+    expect(new Set(Array.from({ length: 5 }, (_, index) => spendSliceColor(index))).size).toBe(5);
   });
 
   it("groups model shares below three percent and retains exact total spend", () => {

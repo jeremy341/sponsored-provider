@@ -83,7 +83,7 @@ describe("Task 8 operator interface", () => {
 
     render(<ProviderListPage portalApi={api({ createProvider })} />);
     await userEvent.click((await screen.findAllByRole("button", { name: /Add connection/i }))[0]);
-    expect(screen.getByRole("button", { name: /Close connection form/i }).querySelector("svg.pixel-icon-svg")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Close connection form/i }).querySelector("svg.lucide")).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText(/Provider brand/i), "Acme AI");
     await userEvent.type(screen.getByLabelText(/Private connection label/i), "EU primary");
     await userEvent.type(screen.getByLabelText(/OpenAI compatible HTTPS URL/i), "https://eu.example.test/v1");
@@ -124,7 +124,7 @@ describe("Task 8 operator interface", () => {
     expect(screen.getByText(/Active price/i)).toBeInTheDocument();
     expect(screen.getByText(/Pending price/i)).toBeInTheDocument();
     expect(screen.getByText(/\$1\.25/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Approve price/i }).querySelector("svg.pixel-icon-svg")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Approve price/i }).querySelector("svg.lucide")).toBeInTheDocument();
   });
 
   it("blocks_mismatched_fallback_with_reason", async () => {
@@ -222,10 +222,10 @@ describe("Task 8 operator interface", () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith({ allowanceUsd: "18.75", allowancePeriod: "daily", rpmLimit: 30 }));
   });
 
-  it("uses a pixel close glyph in the allowance editor without changing ownership scope", async () => {
+  it("uses a close glyph in the allowance editor without changing ownership scope", async () => {
     const save = vi.fn().mockResolvedValue(undefined);
     render(<AllowanceDialog person={person} onSave={save} onClose={vi.fn()} />);
-    expect(screen.getByRole("button", { name: /Close allowance editor/i }).querySelector("svg.pixel-icon-svg")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Close allowance editor/i }).querySelector("svg.lucide")).toBeInTheDocument();
     expect(screen.getByText(/Allowance applies across this person’s keys/i)).toBeInTheDocument();
   });
 
@@ -254,7 +254,7 @@ describe("Task 8 operator interface", () => {
     const listOperatorActivity = vi.fn().mockResolvedValue({ items: [], nextCursor: null });
     render(<OperatorUsagePage portalApi={api({ listProviders: vi.fn().mockResolvedValue([connection]), listOperatorActivity })} />);
     await screen.findByLabelText(/Connection/i);
-    expect(screen.getByLabelText("Model").closest(".search-field")?.querySelector("svg.pixel-icon-svg")).toBeInTheDocument();
+    expect(screen.getByLabelText("Model").closest(".search-field")?.querySelector("svg.lucide")).toBeInTheDocument();
     await userEvent.selectOptions(screen.getByLabelText(/Connection/i), "conn-1");
     await waitFor(() => expect(listOperatorActivity).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: "conn-1" })));
   });
@@ -273,7 +273,7 @@ describe("Task 8 operator interface", () => {
   it("groups_connections_by_brand_and_keeps_private_labels", async () => {
     render(<ProviderListPage portalApi={api()} />);
     await openBrand();
-    expect(screen.getByRole("button", { name: /Acme AI/ }).querySelector("svg.pixel-icon-svg")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Acme AI/ }).querySelector("svg.lucide")).toBeInTheDocument();
     expect(screen.getByText("EU primary")).toBeInTheDocument();
   });
 
