@@ -105,15 +105,15 @@ export interface ModelSpendRecord {
   spendUsd: string | null;
 }
 
-export interface AnalyticsWindow {
-  range: DashboardRange;
+export interface AnalyticsPeriod {
+  key: DashboardRange;
   from: string;
   to: string;
   timezone: "Europe/Berlin";
 }
 
 export interface DashboardAnalytics {
-  window: AnalyticsWindow;
+  period: AnalyticsPeriod;
   summary: UsageSummary | null;
   series: AnalyticsUsagePoint[];
   topModels: ModelUsageRecord[];

@@ -164,4 +164,10 @@ describe("Poorup visual system foundation", () => {
       expect(lastBorderRadiusFor(selector, legacyStylesheet), `legacy ${selector}`).toBe("var(--radius-control)");
     }
   });
+
+  it("uses 16px mobile text controls inside the portal to prevent browser auto-zoom", () => {
+    const mobileOverrides = stylesheet.slice(stylesheet.lastIndexOf("@media(max-width:767px)"));
+
+    expect(mobileOverrides).toContain(".app-frame input:not([type=checkbox]):not([type=radio]),.app-frame textarea,.app-frame select{font-size:16px}");
+  });
 });
