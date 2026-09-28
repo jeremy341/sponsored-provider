@@ -1,6 +1,8 @@
+> **Superseded (2026-09-28):** the Poorup pixel-console direction is replaced by the Ayu-dark console direction in `.ulpi/design/DESIGN.md` (`docs/superpowers/plans/2026-09-28-ai-hackclub-theme-redesign.md`). The implemented Poorup pass remains in git history; the uncommitted draft is archived at `docs/superpowers/archive/poorup-console-design-draft.md`. Do not implement this spec.
+
 # Poorup-Style Provider Console · Design Specification
 
-Status: approved direction; implementation not started. This spec applies to the current Provider Console UI without changing server behavior.
+Status: superseded — see banner above. Original status line preserved below. This spec applies to the current Provider Console UI without changing server behavior.
 
 ## Job and audience
 

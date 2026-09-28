@@ -1,3 +1,5 @@
+> **Superseded (2026-09-28):** replaced by the direction contract in `.impeccable/surfaces/frontend-src-ui-app-tsx.md` and `.ulpi/design/DESIGN.md`.
+
 # Sponsored Provider · Poorup visual system
 
 ## Direction contract
