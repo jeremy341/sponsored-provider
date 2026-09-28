@@ -104,8 +104,12 @@ def test_monthly_migration_preserves_allowance_history_invites_keys_usage_and_re
         connection.execute("INSERT INTO portal_users(id,display_name,role,allowance_period,created_at,last_login_at) VALUES('monthly','Monthly','developer','monthly','2026-01-01','2026-01-02')")
 
 
-def test_full_init_upgrades_if_not_exists_legacy_table_with_live_foreign_keys(tmp_path):
-    path = tmp_path / "if-not-exists-legacy.db"
+@pytest.mark.parametrize(("stored_table_name", "expected_prefix"), [
+    ("IF NOT EXISTS portal_users", "CREATE TABLE IF NOT EXISTS portal_users"),
+    ('"portal_users"', 'CREATE TABLE "portal_users"'),
+])
+def test_full_init_upgrades_legacy_table_with_live_foreign_keys(tmp_path, stored_table_name, expected_prefix):
+    path = tmp_path / "legacy.db"
     with sqlite3.connect(path) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.executescript("""
@@ -165,15 +169,16 @@ def test_full_init_upgrades_if_not_exists_legacy_table_with_live_foreign_keys(tm
         """)
         connection.execute("PRAGMA writable_schema=ON")
         connection.execute(
-            "UPDATE sqlite_master SET sql=replace(sql,'CREATE TABLE portal_users',"
-            "'CREATE TABLE IF NOT EXISTS portal_users') WHERE type='table' AND name='portal_users'"
+            "UPDATE sqlite_master SET sql=replace(sql,'CREATE TABLE portal_users',?) "
+            "WHERE type='table' AND name='portal_users'",
+            (f"CREATE TABLE {stored_table_name}",),
         )
         connection.execute("PRAGMA writable_schema=OFF")
         connection.execute("PRAGMA schema_version=1234")
         saved_sql = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='portal_users'"
         ).fetchone()[0]
-        assert saved_sql.startswith("CREATE TABLE IF NOT EXISTS portal_users")
+        assert saved_sql.startswith(expected_prefix)
 
     repository = PortalDatabase(str(path), key_pepper="p" * 40)
 
@@ -202,6 +207,28 @@ def test_full_init_upgrades_if_not_exists_legacy_table_with_live_foreign_keys(tm
             "VALUES('monthly','Monthly','developer','monthly','2026-01-01','2026-01-02')"
         )
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_monthly_migration_rejects_unrecognized_table_declaration_after_check_rewrite(tmp_path):
+    path = tmp_path / "unsupported-ddl.db"
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    connection.execute("""CREATE TABLE portal_users (
+        id TEXT PRIMARY KEY, allowance_period TEXT CHECK(allowance_period IS NULL OR allowance_period IN ('daily','weekly'))
+    )""")
+    connection.execute("PRAGMA writable_schema=ON")
+    connection.execute(
+        "UPDATE sqlite_master SET sql=replace(sql,'CREATE TABLE portal_users',"
+        "'CREATE TABLE /* unsupported declaration */ portal_users') "
+        "WHERE type='table' AND name='portal_users'"
+    )
+    connection.execute("PRAGMA writable_schema=OFF")
+    connection.execute("PRAGMA schema_version=2345")
+
+    with pytest.raises(RuntimeError, match="portal_users table declaration"):
+        PortalDatabase._migrate_monthly_allowance_period(connection)
+    connection.close()
 
 
 def test_monthly_migration_rolls_back_failed_copy_with_if_not_exists_schema(tmp_path):

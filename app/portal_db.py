@@ -487,13 +487,13 @@ class PortalDatabase:
             )
         ]
         updated_sql, table_replacements = re.subn(
-            r"CREATE TABLE(?:\s+IF NOT EXISTS)?\s+portal_users\b",
+            r'CREATE TABLE(?:\s+IF NOT EXISTS)?\s+(?:"portal_users"|`portal_users`|\[portal_users\]|portal_users)(?!\w)',
             "CREATE TABLE portal_users_monthly",
             updated_sql,
             count=1,
         )
         if table_replacements != 1:
-            return
+            raise RuntimeError("Could not rewrite portal_users table declaration for monthly allowance migration")
         columns = [row["name"] for row in conn.execute("PRAGMA table_info(portal_users)")]
         quoted_columns = ",".join('"' + name.replace('"', '""') + '"' for name in columns)
         if conn.in_transaction:
