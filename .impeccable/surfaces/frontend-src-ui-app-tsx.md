@@ -5,18 +5,18 @@ primary_target: "frontend/src/ui/App.tsx"
 related_targets: ["frontend/src/ui/styles.css"]
 ---
 
-# Sponsored Provider · Poorup visual system
+# Sponsored Provider · Ayu-dark console + bitmap accents
 
 ## Direction contract
 
-**THESIS:** Make sponsored AI operations feel like an after-hours instrument panel, not a generic SaaS dashboard or a board-game screen.
+**THESIS:** An operations console for sponsored AI access: ai.hackclub.com shell discipline with a phosphor-terminal bitmap accent — never a generic SaaS dashboard, never a game screen.
 
-**OWN-WORLD:** Poorup's exact near-black teal, aged gold, brick-red actions, 2–3px corners, ruled surfaces, pixel typography, and crisp SVG geometry; provider-specific glyphs, no Poorup game logo/art.
+**OWN-WORLD:** Ayu-dark (`#0b0e14/#0d1017/#0f131a`, ink `#bfbdb6`, amber `#e6b450`), 16rem rail + 56px command bar + allowance pill, hairline `gap-px` stat grids, dense tables with amber OK, mono/tabular numerals; VT323 numerals ≥18px, Silkscreen 11–12px uppercase labels, stepped runway gauges; Lucide 16px icons, `.45rem` radii, 150ms color-only motion.
 
-**STORY:** Developers understand their own allowance, keys, models, and activity; operators see shared exposure and reach provider/abuse controls without confusing the scopes.
+**STORY:** Developers read allowance, keys, models, activity at a glance; operators read shared exposure and reach provider/abuse controls; scopes never collapse; unknown cost is never zero.
 
-**FIRST VIEWPORT:** Keep the role-aware top shell. Developer: lifetime totals, personal allowance runway, and first-call action. Operator: shared runway, health/usage signal, and recent activity.
+**FIRST VIEWPORT:** Left rail + command bar with allowance pill. Developer home: 4-up VT323 stat strip, Jump-to cards, amber-numbered Quickstart, stepped allowance runway. Operator overview: shared runway, provider health, recent activity.
 
-**FORM:** Code-led; user-pinned Poorup pixel-console world. Direction-seed key `e7832357` records exploration only; the user's choice is authoritative.
+**FORM:** Code-led; user-pinned ai.hackclub.com match + VT323/Silkscreen retro layer. Direction-seed key `701efc43` rolled; the pinned brief takes precedence — teletext, datamatics, orienteering, and wayfinding challengers declined on product-truth grounds (each abandons the mandated reference match).
 
 **FINISH:** unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance.

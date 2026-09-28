@@ -9,6 +9,8 @@ motion_intensity: 2
 visual_density: 6
 ---
 
+> **Superseded (2026-09-28):** this zinc/red refresh is replaced by the Ayu-dark console direction in `.ulpi/design/DESIGN.md` and `docs/superpowers/plans/2026-09-28-ai-hackclub-theme-redesign.md`. Kept as a historical record; do not implement.
+
 # Hack Club AI-inspired portal refresh
 
 ## Job and audience
