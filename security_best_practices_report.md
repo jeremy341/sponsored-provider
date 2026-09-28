@@ -1,3 +1,5 @@
+> **Update (2026-09-28):** the legacy Control Room dashboard, `/api/admin/*` routes, and the `X-Admin-Token` credential were removed (plan `docs/superpowers/plans/2026-09-28-ai-hackclub-theme-redesign.md`). Findings S1, S2, and S4 below are resolved by removal; S3 remains applicable.
+
 # Security best-practices audit
 
 ## Executive summary

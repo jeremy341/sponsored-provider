@@ -1,7 +1,8 @@
 import httpx
 import respx
 from app.config import Settings
-from app.main import estimate_cost
+from app.database import Database
+from app.main import estimate_cost, upstream_client
 from pathlib import Path
 from shutil import rmtree
 from uuid import uuid4
@@ -14,41 +15,26 @@ def test_health_never_needs_upstream(client):
     assert response.json()["ok"] is True
 
 
-def test_dashboard_starts_empty(client):
-    test_client, _, _ = client
-    response = test_client.get("/api/dashboard", headers={"X-Admin-Token": "admin"})
-    assert response.status_code == 200
-    assert response.json()["budget"]["used_usd"] == 0
-    assert response.json()["totals"]["requests"] == 0
-    assert response.json()["billing"]["reconciled"] is False
-
-
-def test_admin_can_create_and_disable_provider_key(client):
+def test_provider_key_can_be_created_and_disabled(client):
     test_client, _, db = client
-    created = test_client.post("/api/admin/keys", headers={"X-Admin-Token": "admin"}, json={"label": "local-client"})
-    assert created.status_code == 200
-    raw_key = created.json()["key"]
-    key_id = created.json()["id"]
+    raw_key, metadata = db.create_key("local-client")
     assert raw_key.startswith("sp_sk_")
     assert db.find_key(raw_key) is not None
-    assert test_client.post(f"/api/admin/keys/{key_id}/disable", headers={"X-Admin-Token": "admin"}).json()["enabled"] is False
+    db.set_key_state(metadata["id"], False)
     assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 401
 
 
 def test_key_creation_accepts_policy_atomically(client):
-    test_client, _, _ = client
-    response = test_client.post("/api/admin/keys", headers={"X-Admin-Token": "admin"}, json={"label": "atomic", "allowed_upstreams": "provider-1", "allowed_models": "model-a, model-b", "spend_limit_usd": 35, "requests_per_minute": 0, "token_limit": 0, "risk_approved": True})
-    assert response.status_code == 200
-    raw_key = response.json()["key"]
+    test_client, _, db = client
+    raw_key, _ = db.create_key("atomic", {"allowed_upstreams": "provider-1", "allowed_models": "model-a, model-b", "spend_limit_usd": 35, "requests_per_minute": 0, "token_limit": 0, "risk_approved": True})
     visible = test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"})
     assert [item["id"] for item in visible.json()["data"]] == ["model-a", "model-b"]
 
 
-def test_admin_can_revoke_key_permanently(client):
+def test_provider_key_revoke_is_permanent(client):
     test_client, _, db = client
     raw_key, metadata = db.create_key("revoke-me")
-    response = test_client.post(f"/api/admin/keys/{metadata['id']}/revoke", headers={"X-Admin-Token": "admin"})
-    assert response.status_code == 200
+    db.set_key_state(metadata["id"], False, revoke=True)
     assert db.find_key(raw_key)["revoked_at"] is not None
     assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 401
 
@@ -62,53 +48,48 @@ def test_models_requires_key_and_returns_allowlist(client):
     assert [item["id"] for item in response.json()["data"]] == ["qwen-test"]
 
 
-def test_dashboard_requires_admin_token(client):
-    test_client, _, _ = client
-    assert test_client.get("/api/dashboard").status_code == 401
-
-
-def test_dashboard_page_and_static_assets_are_served(client):
-    test_client, _, _ = client
-    assert test_client.get("/dashboard").status_code == 200
-    assert test_client.get("/static/style.css").status_code == 200
-
-
-def test_admin_can_update_guardrails_and_emergency_stop(client):
+def test_guardrail_settings_and_emergency_stop_gate_health(client):
     test_client, settings, _ = client
-    response = test_client.post("/api/admin/config", headers={"X-Admin-Token": "admin"}, json={"allowed_models": "qwen-a, qwen-b", "provider_hard_stop_usd": 35, "rate_limit_requests_per_minute": 4})
-    assert response.status_code == 200
+    settings.allowed_models = "qwen-a, qwen-b"
+    settings.provider_hard_stop_usd = 35
+    settings.rate_limit_requests_per_minute = 4
     assert settings.model_allowlist == {"qwen-a", "qwen-b"}
     assert settings.rate_limit_requests_per_minute == 4
-    stopped = test_client.post("/api/admin/config", headers={"X-Admin-Token": "admin"}, json={"emergency_stop": True})
-    assert stopped.json()["config"]["emergency_stop"] is True
+    settings.emergency_stop = True
     assert test_client.get("/health").json()["ok"] is False
 
 
 @respx.mock
-def test_admin_can_load_models_from_private_upstream_key(client):
-    test_client, settings, _ = client
+async def test_configured_upstream_lists_models_without_profile(client):
+    _, settings, db = client
     settings.alibaba_base_url = "https://1.1.1.1/v1"
     route = respx.get(f"{settings.normalized_base_url}/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "qwen-a"}, {"id": "qwen-a"}, {"id": "qwen-b"}]}))
-    response = test_client.get("/api/admin/upstream-models", headers={"X-Admin-Token": "admin"})
-    assert response.status_code == 200
-    assert response.json()["models"] == ["qwen-a", "qwen-b"]
+    api_client, resolved = upstream_client(None, db, settings)
+    assert resolved == "configured"
+    payload = await api_client.list_models()
+    items = payload.get("data", payload if isinstance(payload, list) else [])
+    assert sorted({item.get("id") for item in items if isinstance(item, dict) and item.get("id")}) == ["qwen-a", "qwen-b"]
     assert route.called
 
 
 @respx.mock
-def test_admin_can_add_encrypted_upstream_profile_and_sync_models(client):
-    test_client, settings, _ = client
-    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "OpenAI test", "provider_kind": "openai", "base_url": "https://93.184.216.34/v1", "api_key": "upstream-secret"})
-    assert created.status_code == 200
-    profile_id = created.json()["id"]
-    listed = test_client.get("/api/admin/upstreams", headers={"X-Admin-Token": "admin"})
-    assert listed.status_code == 200
-    assert listed.json()["upstreams"][0]["secret_configured"] is True
-    assert "upstream-secret" not in listed.text
+async def test_upstream_profile_secret_stays_encrypted_and_models_sync(client):
+    _, settings, _ = client
+    db = Database(settings.database_path, "test-pepper", settings.provider_secret_key)
+    profile = db.create_upstream("OpenAI test", "openai", "https://93.184.216.34/v1", "upstream-secret")
+    profile_id = profile["id"]
+    stored = db.list_upstreams()
+    assert stored[0]["secret_configured"] is True
+    assert "upstream-secret" not in str(stored)
     respx.get("https://93.184.216.34/v1/models").mock(return_value=httpx.Response(200, json={"data": [{"id": "gpt-test"}]}))
-    synced = test_client.get(f"/api/admin/upstream-models?profile_id={profile_id}", headers={"X-Admin-Token": "admin"})
-    assert synced.status_code == 200
-    assert synced.json()["models"] == ["gpt-test"]
+    api_client, resolved = upstream_client(profile_id, db, settings)
+    assert resolved == profile_id
+    payload = await api_client.list_models()
+    items = payload.get("data", payload if isinstance(payload, list) else [])
+    model_ids = sorted({item.get("id") for item in items if isinstance(item, dict) and item.get("id")})
+    db.update_upstream_models(profile_id, model_ids, "healthy" if model_ids else "empty_catalog")
+    refreshed = next(item for item in db.list_upstreams() if item["id"] == profile_id)
+    assert refreshed["models"] == ["gpt-test"]
 
 
 def test_failed_provider_sync_preserves_last_successful_model_ids(client):
@@ -128,23 +109,26 @@ def test_failed_provider_sync_preserves_last_successful_model_ids(client):
     assert refreshed["health_status"] == "error"
 
 
-def test_admin_can_store_model_specific_pricing(client):
-    test_client, _, _ = client
-    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "Priced", "provider_kind": "openai", "base_url": "https://provider.example/v1", "api_key": "secret"})
-    profile_id = created.json()["id"]
-    response = test_client.post(f"/api/admin/upstreams/{profile_id}/pricing", headers={"X-Admin-Token": "admin"}, json={"pricing": {"model-a": {"input": 0.1, "output": 0.2}}})
-    assert response.status_code == 200
+def test_upstream_pricing_is_stored(client):
+    _, settings, _ = client
+    db = Database(settings.database_path, "test-pepper", settings.provider_secret_key)
+    profile = db.create_upstream("Priced", "openai", "https://provider.example/v1", "secret")
+    db.update_upstream_pricing(profile["id"], {"model-a": {"input": 0.1, "output": 0.2}})
+    stored = db.list_upstreams()
+    priced = next(item for item in stored if item["id"] == profile["id"])
+    assert priced["pricing"] == {"model-a": {"input": 0.1, "output": 0.2}}
 
 
 def test_pricing_updates_merge_without_removing_existing_entries(client):
-    test_client, _, _ = client
-    created = test_client.post("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}, json={"name": "Priced merge", "provider_kind": "openai", "base_url": "https://provider.example/v1", "api_key": "secret"})
-    profile_id = created.json()["id"]
-    test_client.post(f"/api/admin/upstreams/{profile_id}/pricing", headers={"X-Admin-Token": "admin"}, json={"pricing": {"model-a": {"input": 0.1, "output": 0.2}}})
-    test_client.post(f"/api/admin/upstreams/{profile_id}/pricing", headers={"X-Admin-Token": "admin"}, json={"pricing": {"model-b": {"input": 0.3, "output": 0.4}}})
-    stored = test_client.get("/api/admin/upstreams", headers={"X-Admin-Token": "admin"}).json()["upstreams"]
-    profile = next(item for item in stored if item["id"] == profile_id)
-    assert set(profile["pricing"]) == {"model-a", "model-b"}
+    _, settings, _ = client
+    db = Database(settings.database_path, "test-pepper", settings.provider_secret_key)
+    profile = db.create_upstream("Priced merge", "openai", "https://provider.example/v1", "secret")
+    profile_id = profile["id"]
+    db.update_upstream_pricing(profile_id, {"model-a": {"input": 0.1, "output": 0.2}})
+    db.update_upstream_pricing(profile_id, {"model-b": {"input": 0.3, "output": 0.4}})
+    stored = db.list_upstreams()
+    profile_row = next(item for item in stored if item["id"] == profile_id)
+    assert set(profile_row["pricing"]) == {"model-a", "model-b"}
 
 
 def test_budget_reservation_counts_active_requests(client):
@@ -157,11 +141,10 @@ def test_budget_reservation_counts_active_requests(client):
     assert db.reserve_budget(1, "provider", "model", 0.006, 100, 0.01, None)
 
 
-def test_admin_can_block_client_ip_before_key_validation(client):
+def test_ip_block_applies_before_key_validation(client):
     test_client, _, db = client
     raw_key, _ = db.create_key("blocked-client")
-    response = test_client.post("/api/admin/blocked-ips", headers={"X-Admin-Token": "admin"}, json={"ip": "203.0.113.10", "reason": "abuse"})
-    assert response.status_code == 200
+    db.block_ip("203.0.113.10", "abuse")
     db.block_ip("testclient", "test abuse")
     blocked = test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"})
     assert blocked.status_code == 403
@@ -199,10 +182,9 @@ def test_chat_proxy_forwards_allowlisted_model_and_records_usage(client):
 def test_key_policy_can_require_approval_and_limit_models(client):
     test_client, _, db = client
     raw_key, metadata = db.create_key("restricted")
-    policy = test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"risk_profile": "strict", "risk_approved": False, "allowed_models": "qwen-other", "requests_per_minute": 2, "token_limit": 1000, "spend_limit_usd": 1})
-    assert policy.status_code == 200
+    db.update_key_policy(metadata["id"], risk_profile="strict", risk_approved=False, allowed_models="qwen-other", requests_per_minute=2, token_limit=1000, spend_limit_usd=1)
     assert test_client.get("/v1/models", headers={"Authorization": f"Bearer {raw_key}"}).status_code == 403
-    test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"risk_approved": True})
+    db.update_key_policy(metadata["id"], risk_approved=True)
     response = test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json={"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]})
     assert response.status_code == 404
 
@@ -213,7 +195,7 @@ def test_zero_key_rpm_means_unlimited_not_inherit_global_limit(client):
     settings.alibaba_base_url = "https://1.1.1.1/v1"
     settings.rate_limit_requests_per_minute = 1
     raw_key, metadata = db.create_key("unlimited-rpm")
-    test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"requests_per_minute": 0})
+    db.update_key_policy(metadata["id"], requests_per_minute=0)
     respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}))
     payload = {"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]}
     assert test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json=payload).status_code == 200
@@ -224,7 +206,7 @@ def test_zero_key_rpm_means_unlimited_not_inherit_global_limit(client):
 def test_key_spend_cap_blocks_before_upstream_request(client):
     test_client, settings, db = client
     raw_key, metadata = db.create_key("small-budget")
-    test_client.post(f"/api/admin/keys/{metadata['id']}/policy", headers={"X-Admin-Token": "admin"}, json={"spend_limit_usd": 0.001})
+    db.update_key_policy(metadata["id"], spend_limit_usd=0.001)
     route = respx.post(f"{settings.normalized_base_url}/chat/completions").mock(return_value=httpx.Response(200, json={"choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 500, "total_tokens": 1500}}))
     response = test_client.post("/v1/chat/completions", headers={"Authorization": f"Bearer {raw_key}"}, json={"model": "qwen-test", "messages": [{"role": "user", "content": "hello"}]})
     assert response.status_code == 429
@@ -241,12 +223,11 @@ def test_settings_bootstrap_generates_persistent_secrets(tmp_path):
     test_dir = tmp_path / f".bootstrap-test-{uuid4().hex}"
     test_dir.mkdir()
     settings = Settings(database_path=str(test_dir / "provider.db"))
-    assert settings.admin_token
     assert settings.provider_secret_key
     assert settings.provider_key_pepper
     assert (test_dir / "runtime-secrets.json").exists()
     second = Settings(database_path=str(test_dir / "provider.db"))
-    assert second.admin_token == settings.admin_token
+    assert second.provider_secret_key == settings.provider_secret_key
     rmtree(test_dir, ignore_errors=True)
 
 

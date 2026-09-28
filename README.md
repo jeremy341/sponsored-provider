@@ -13,11 +13,9 @@ pytest
 uvicorn app.main:app --reload
 ```
 
-For a local legacy-dashboard start, `.env` is optional. On first launch the app generates `runtime-secrets.json` beside the database (ignored by Git) and uses the saved values for legacy dashboard authentication, upstream-secret encryption, and provider-key hashing. Keep that file private and persistent. The new portal is served from the same FastAPI process after you build `frontend/`.
+For a local start, `.env` is optional. On first launch the app generates `runtime-secrets.json` beside the database (ignored by Git) and uses the saved values for upstream-secret encryption and provider-key hashing. Keep that file private and persistent. The portal is served from the same FastAPI process after you build `frontend/`.
 
-Open http://127.0.0.1:8000/dashboard for the usage dashboard.
-
-The legacy `/dashboard` remains available during the staged portal rollout. The portal at `/` uses local usernames, passwords, and server-side secure session cookies; browser code does not store session tokens.
+The portal at `/` uses local usernames, passwords, and server-side secure session cookies; browser code does not store session tokens.
 
 Create a provider key locally:
 
@@ -73,9 +71,5 @@ The server does not call any upstream at startup. Tests use mocked HTTP response
 ## API
 
 - `GET /health`
-- `GET /dashboard`
-- `GET /api/dashboard`
 - `GET /v1/models`
 - `POST /v1/chat/completions`
-- `GET/POST /api/admin/keys` with `X-Admin-Token`
-- `POST /api/admin/keys/{id}/disable|enable|revoke` with `X-Admin-Token`
