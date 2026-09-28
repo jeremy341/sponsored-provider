@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.datastructures import MutableHeaders
 
 from .alibaba import AlibabaClient
 from .config import Settings, get_settings
@@ -56,7 +57,9 @@ async def lifespan(_app):
         auth_rate_limit_window_seconds=settings.portal_auth_rate_limit_window_seconds,
         legacy_database=legacy_db,
         settings=settings,
+        demo_mode=settings.portal_demo_mode,
     )
+    _app.state.portal_service = portal_service
     if not getattr(_app.state, "portal_routes_added", False):
         _app.include_router(create_portal_router(portal_service))
         _app.state.portal_routes_added = True
@@ -71,9 +74,44 @@ app.mount("/assets", StaticFiles(directory=PORTAL_DIST / "assets", check_dir=Fal
 rate_limiter = RateLimiter()
 
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next):
+def _bind_demo_session(request: Request) -> None:
+    """Demo mode: bind cookie-less requests to a stable server-side session.
+
+    Only intended for sandbox/preview environments (PORTAL_DEMO_MODE=true).
+    Keeps the portal usable even when the embedding browser refuses to store
+    the preview's cookies: the session lives on the server, the CSRF token is
+    learned from /api/session, and the request is bound before routing.
+    """
+    service = getattr(request.app.state, "portal_service", None)
+    if service is None or not service.demo_mode:
+        return
+    if request.url.path.startswith("/v1") or request.url.path.startswith("/auth/"):
+        return
+    role_param = request.query_params.get("as", "")
+    requested_role = role_param if role_param in {"operator", "developer"} else None
+    token = request.cookies.get("portal_session")
+    if requested_role is None and token and service.repository.get_session(token) is not None:
+        return
+    demo = service.ensure_demo_session(requested_role or "operator")
+    if requested_role is not None and token == demo.raw_token:
+        return
+    reserved = {"portal_session", "portal_csrf"}
+    pairs = [part.strip() for part in (request.headers.get("cookie") or "").split(";") if part.strip() and part.strip().split("=", 1)[0] not in reserved]
+    pairs.append(f"portal_session={demo.raw_token}")
+    pairs.append(f"portal_csrf={demo.csrf_token}")
+    MutableHeaders(scope=request.scope)["cookie"] = "; ".join(pairs)
+    request.state.demo_bind = (service, demo)
+
+
+async def security_headers_middleware(request: Request, call_next):
+    request.state.demo_bind = None
+    _bind_demo_session(request)
     response = await call_next(request)
+    bound = getattr(request.state, "demo_bind", None)
+    if bound is not None:
+        demo_service, demo_session = bound
+        demo_service._apply_cookie(response, name="portal_session", value=demo_session.raw_token, httponly=True)
+        demo_service._apply_cookie(response, name="portal_csrf", value=demo_session.csrf_token, httponly=False)
     allow_framing = get_settings().portal_allow_framing
     response.headers["X-Content-Type-Options"] = "nosniff"
     if not allow_framing:
@@ -87,6 +125,9 @@ async def security_headers(request: Request, call_next):
     if request.url.path.startswith(("/auth/", "/api/", "/v1/")):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+app.middleware("http")(security_headers_middleware)
 
 
 def get_db(settings: Settings = Depends(get_settings)):

@@ -1114,6 +1114,13 @@ class PortalDatabase:
             )
             return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
 
+    def first_active_user_id(self, role: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM portal_users WHERE role=? AND status='active' ORDER BY created_at LIMIT 1", (role,)
+            ).fetchone()
+            return row["id"] if row else None
+
     def reset_local_password(self, *, user_id: str, password_hash: str) -> bool:
         if not password_hash:
             raise ValueError("Password hash is required")

@@ -86,6 +86,7 @@ class PortalService:
         auth_rate_limit_window_seconds: int = 900,
         public_origin: str | None = None,
         models_dev_catalog: ModelsDevCatalog | None = None,
+        demo_mode: bool = False,
     ):
         if not 300 <= session_ttl_seconds <= 24 * 60 * 60:
             raise ValueError("Portal session lifetime must be between 5 minutes and 24 hours")
@@ -107,7 +108,45 @@ class PortalService:
         # SameSite=None; Secure; Partitioned (CHIPS) to survive at all.
         self.cookie_partitioned = bool(self.public_origin and self.public_origin.startswith("https://"))
         self.cookie_secure = cookie_secure or self.cookie_partitioned
+        self.demo_mode = demo_mode
+        self._demo_sessions: dict[str, CreatedSession] = {}
         self.models_dev_catalog = models_dev_catalog
+
+    def ensure_demo_session(self, role: str = "operator") -> CreatedSession:
+        """Return a stable session for demo mode, re-creating it if revoked or expired."""
+        cached = self._demo_sessions.get(role)
+        if cached is not None and self.repository.get_session(cached.raw_token) is not None:
+            return cached
+        session = self.repository.create_session(self._resolve_demo_user_id(role), ttl_seconds=self.session_ttl_seconds)
+        self._demo_sessions[role] = session
+        return session
+
+    def _resolve_demo_user_id(self, role: str) -> str:
+        if role not in {"operator", "developer"}:
+            role = "operator"
+        configured = ""
+        if self.settings is not None:
+            configured = getattr(self.settings, f"portal_bootstrap_{role}_username", "") or ""
+        if configured.strip():
+            try:
+                user = self.repository.get_local_user_by_username(normalize_username(configured))
+            except ValueError:
+                user = None
+            if user and user.get("status") == "active":
+                return str(user["id"])
+        existing = self.repository.first_active_user_id(role)
+        if existing:
+            return existing
+        self.repository.ensure_local_account(
+            username="demo",
+            normalized_username=normalize_username("demo"),
+            password_hash=hash_password(secrets.token_urlsafe(24)),
+            role=role,
+        )
+        user = self.repository.get_local_user_by_username(normalize_username("demo"))
+        if not user:
+            raise RuntimeError("Unable to provision the demo account")
+        return str(user["id"])
 
     def _apply_cookie(self, response: Response, *, name: str, value: str, httponly: bool, path: str = "/") -> None:
         if not self.cookie_partitioned:

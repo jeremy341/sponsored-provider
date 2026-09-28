@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     portal_bootstrap_operator_email: str = ""
     portal_public_origin: str = ""
     portal_allow_framing: bool = False
+    portal_demo_mode: bool = False
     portal_bootstrap_operator_username: str = ""
     portal_bootstrap_operator_password: str = ""
     portal_bootstrap_developer_username: str = ""
