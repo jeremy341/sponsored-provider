@@ -24,7 +24,6 @@ def _ready_offer_gateway(tmp_path, *, upstream_models=("raw-model",), priced=Tru
         database_path=database_path,
         provider_key_pepper=f"routed-gateway-{uuid4().hex}",
         provider_secret_key=Fernet.generate_key().decode(),
-        admin_token="admin-test-token",
         alibaba_api_key="configured-upstream-secret",
         alibaba_base_url="https://1.1.1.1/v1",
         allowed_models="",
@@ -98,7 +97,7 @@ def test_models_endpoint_returns_provider_scoped_offer_ids(tmp_path):
 def test_models_endpoint_never_leaks_connection_credentials_or_labels(tmp_path):
     """Developer-facing models contain no connection details."""
     database_path = str(tmp_path / f"portal-models-private-{uuid4().hex}.db")
-    settings = Settings(database_path=database_path, provider_key_pepper="private-models-test", provider_secret_key=Fernet.generate_key().decode(), admin_token="admin", alibaba_api_key="gateway-secret", allowed_models="")
+    settings = Settings(database_path=database_path, provider_key_pepper="private-models-test", provider_secret_key=Fernet.generate_key().decode(), alibaba_api_key="gateway-secret", allowed_models="")
     portal_pepper = hashlib.sha256(("sponsored-provider:portal:v1:" + settings.provider_key_pepper).encode()).hexdigest()
     legacy = Database(database_path, settings.provider_key_pepper, settings.provider_secret_key)
     profile = legacy.create_upstream("Provider A", "openai_compatible", "https://1.1.1.1/v1", "upstream-secret")
@@ -398,7 +397,6 @@ def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usa
         database_path=database_path,
         provider_key_pepper="portal-gateway-test-pepper",
         provider_secret_key=Fernet.generate_key().decode(),
-        admin_token="admin-test-token",
         alibaba_api_key="test-upstream",
         alibaba_base_url="https://1.1.1.1/v1",
         allowed_models="",
@@ -449,7 +447,7 @@ def test_portal_key_calls_existing_openai_compatible_gateway_and_saves_owned_usa
 @respx.mock
 def test_authenticated_model_rejection_is_logged_without_sending_upstream(tmp_path):
     database_path = str(tmp_path / "rejected.db")
-    settings = Settings(database_path=database_path, provider_key_pepper="reject-test-pepper", provider_secret_key=Fernet.generate_key().decode(), admin_token="admin", alibaba_api_key="test-upstream", provider_hard_stop_usd=10)
+    settings = Settings(database_path=database_path, provider_key_pepper="reject-test-pepper", provider_secret_key=Fernet.generate_key().decode(), alibaba_api_key="test-upstream", provider_hard_stop_usd=10)
     portal_pepper = hashlib.sha256(("sponsored-provider:portal:v1:" + settings.provider_key_pepper).encode()).hexdigest()
     portal = PortalDatabase(database_path, key_pepper=portal_pepper)
     user = portal.upsert_user(subject="member", email="member@example.test", name="Member")
@@ -477,7 +475,6 @@ def test_spend_capped_legacy_key_requires_output_bound_and_reports_reason(tmp_pa
         database_path=database_path,
         provider_key_pepper="legacy-bound-test",
         provider_secret_key=Fernet.generate_key().decode(),
-        admin_token="admin",
         alibaba_api_key="legacy-upstream-secret",
         alibaba_base_url="https://1.1.1.1/v1",
         allowed_models="legacy-model",
@@ -506,7 +503,7 @@ def test_spend_capped_legacy_key_requires_output_bound_and_reports_reason(tmp_pa
 def test_legacy_key_usage_is_mirrored_once_into_operator_history(tmp_path):
     database_path = str(tmp_path / "legacy.db")
     pepper = "legacy-import-test-pepper"
-    settings = Settings(database_path=database_path, provider_key_pepper=pepper, provider_secret_key=Fernet.generate_key().decode(), admin_token="admin")
+    settings = Settings(database_path=database_path, provider_key_pepper=pepper, provider_secret_key=Fernet.generate_key().decode())
     legacy = Database(database_path, settings.provider_key_pepper, settings.provider_secret_key)
     portal = PortalDatabase(database_path, key_pepper=hashlib.sha256(("sponsored-provider:portal:v1:" + pepper).encode()).hexdigest())
     owner = portal.upsert_user(subject="owner", email="owner@example.test", name="Owner", role="operator")

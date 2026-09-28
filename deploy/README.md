@@ -6,7 +6,7 @@ This runbook is deliberately staged. Do not replace or restart the existing Nest
 
 1. Inspect the existing service command, working directory, bound port, reverse-proxy target, database path, and `runtime-secrets.json`. Preserve any other service/domain mappings in the container.
 2. Build and test the portal in a staging checkout. Build the frontend into `frontend/dist` (`cd frontend && npm ci && npm run build`) before starting FastAPI.
-3. Back up the live SQLite database and `runtime-secrets.json` to a protected location outside the checkout. Restore both to a staging copy and confirm the old `/v1` key and `/dashboard` still work.
+3. Back up the live SQLite database and `runtime-secrets.json` to a protected location outside the checkout. Restore both to a staging copy and confirm the old `/v1` key and the portal login still work.
 4. Keep the existing Nest domain target on its current port (the current service template uses 8090). Do not change the unrelated service mapped to 8080.
 5. SQLite migrations and budget reservations use short write transactions. Keep the provider at one worker for the invite pilot, or move to PostgreSQL before intentionally running multiple workers or opening registration. Do not copy the existing four-worker template blindly without load/lock testing.
 
@@ -34,9 +34,9 @@ HCA OAuth settings and callback instructions describe the earlier integration on
 
 The service defaults to `./provider.db` and stores generated `runtime-secrets.json` beside that database. If moving either into a shared directory, stop the service, back up both files, copy them together, update `DATABASE_PATH`, and verify the restored staging copy before changing the live working directory. Starting with a new empty database would make old key/usage records appear to vanish.
 
-Keep `/v1/models` and `/v1/chat/completions` unchanged. A rollback may restore the prior portal/dashboard UI, but do not delete the additive portal tables or usage ledger. Re-enable the old release only after confirming the database remains readable and no request process still uses the new checkout.
+Keep `/v1/models` and `/v1/chat/completions` unchanged. A rollback may restore the prior portal UI, but do not delete the additive portal tables or usage ledger. Re-enable the old release only after confirming the database remains readable and no request process still uses the new checkout.
 
-For a staging restore rehearsal, copy the database and its matching `runtime-secrets.json` together into a disposable staging directory, preserve the original pair, start only the staging process against those copies, and verify login plus the existing `/v1` and `/dashboard` paths. Do not restore a production backup into the live path during a code rollback, and do not generate replacement secrets for an existing encrypted database: the saved encryption key is required to decrypt configured upstream credentials.
+For a staging restore rehearsal, copy the database and its matching `runtime-secrets.json` together into a disposable staging directory, preserve the original pair, start only the staging process against those copies, and verify login plus the existing `/v1` and portal paths. Do not restore a production backup into the live path during a code rollback, and do not generate replacement secrets for an existing encrypted database: the saved encryption key is required to decrypt configured upstream credentials.
 
 ## Smoke checks before switching the public domain
 

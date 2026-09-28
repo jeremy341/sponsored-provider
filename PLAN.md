@@ -53,6 +53,8 @@ Start with one Python modular monolith and one CLI. Use SQLite for the first sin
 
 Rejected for v1: Kubernetes, Docker orchestration, Redis, Postgres, a multi-provider abstraction, and a separate dashboard service. They increase operational surface without helping the first safety and integration milestones.
 
+> **Historical note (2026-09-28):** the `/dashboard` Control Room and admin-token API described in this section were removed; the React portal at `/` is the interface. The rest of this section is preserved as history.
+
 ## 3A. Dashboard-first product plan
 
 The first interface is the working `/dashboard` page served by the provider itself. It shows local usage, estimated cost, budget remaining, request activity, model breakdown, and provider-key state. The dashboard is operational rather than decorative: every displayed number comes from the SQLite usage ledger or current configuration.
@@ -384,11 +386,11 @@ Keep Uvicorn bound to `127.0.0.1:8000` on Nest. From the owner's computer, creat
 ssh -N -L 8000:127.0.0.1:8000 nest-user@your-nest-host
 ```
 
-Then open `http://127.0.0.1:8000/dashboard` in a local browser. The browser is local, but traffic is carried through the encrypted SSH connection to the Nest service. This is the recommended first operating mode because the admin dashboard is not exposed to the public internet.
+Then open `http://127.0.0.1:8000/` in a local browser. The browser is local, but traffic is carried through the encrypted SSH connection to the Nest service. (The legacy `/dashboard` Control Room was removed; operate through the portal.)
 
 ### Optional public access
 
-Only after the private tunnel works, add a Nest hostname, HTTPS reverse proxy, and an additional access boundary. The dashboard API must remain admin-token protected; do not expose the admin token in a URL, source code, or client API key.
+Only after the private tunnel works, add a Nest hostname, HTTPS reverse proxy, and an additional access boundary. The legacy admin-token API was removed with the Control Room; operator actions go through the portal's session-authenticated API. Never expose credentials in a URL, source code, or client API key.
 
 ### Dashboard information architecture
 

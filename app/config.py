@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     database_path: str = "./provider.db"
     provider_key_pepper: str = ""
     provider_secret_key: str = ""
-    admin_token: str = ""
     hackclub_client_id: str = ""
     hackclub_client_secret: str = ""
     portal_redirect_uri: str = ""
@@ -65,9 +64,6 @@ class Settings(BaseSettings):
             except (OSError, ValueError):
                 stored = {}
         changed = False
-        if not self.admin_token:
-            self.admin_token = stored.get("admin_token") or secrets.token_urlsafe(32)
-            changed = True
         if not self.provider_secret_key:
             self.provider_secret_key = stored.get("provider_secret_key") or Fernet.generate_key().decode()
             changed = True
@@ -77,7 +73,7 @@ class Settings(BaseSettings):
         if changed:
             self._bootstrap_generated = True
             secret_path.parent.mkdir(parents=True, exist_ok=True)
-            secret_path.write_text(json.dumps({"admin_token": self.admin_token, "provider_secret_key": self.provider_secret_key, "provider_key_pepper": self.provider_key_pepper}, indent=2), encoding="utf-8")
+            secret_path.write_text(json.dumps({"provider_secret_key": self.provider_secret_key, "provider_key_pepper": self.provider_key_pepper}, indent=2), encoding="utf-8")
             try:
                 secret_path.chmod(0o600)
             except OSError:

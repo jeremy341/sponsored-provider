@@ -61,7 +61,6 @@ def _operator_app(tmp_path):
         database_path=path,
         provider_key_pepper="z" * 40,
         provider_secret_key=Fernet.generate_key().decode(),
-        admin_token="operator-test-token",
     )
     legacy = Database(path, settings.provider_key_pepper, settings.provider_secret_key)
     repository = PortalDatabase(path, key_pepper="o" * 40)
@@ -191,7 +190,7 @@ def test_developer_invite_status_is_safe_and_entitlement_persists_after_use(tmp_
 
 def test_operator_guardrail_changes_persist_and_provider_secrets_stay_write_only(tmp_path):
     path = str(tmp_path / "operator.db")
-    settings = Settings(database_path=path, provider_key_pepper="z" * 40, provider_secret_key=Fernet.generate_key().decode(), admin_token="operator-token", provider_hard_stop_usd=35, provider_estimate_reserve_usd=0.1)
+    settings = Settings(database_path=path, provider_key_pepper="z" * 40, provider_secret_key=Fernet.generate_key().decode(), provider_hard_stop_usd=35, provider_estimate_reserve_usd=0.1)
     legacy = Database(path, settings.provider_key_pepper, settings.provider_secret_key)
     repository = PortalDatabase(path, key_pepper="p" * 40)
     app = FastAPI()
