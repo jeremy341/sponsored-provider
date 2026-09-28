@@ -90,7 +90,8 @@ Rejected: CRT scanlines or vignettes, flicker/glitch/chromatic aberration, neon 
 - Left rail 15.5rem (collapsible to a 3.5rem icon rail, persisted), sticky; wordmark is a 15px lime pixel mark plus Silkscreen "sponsored_provider"; a Silkscreen micro-label names the portal (Developer console / Operator console); active nav is lime text on lime-soft with a 2px inset left bar.
 - Command bar 52px: collapse trigger, Silkscreen page identity, allowance pill (square pixel status dot + VT323 numerals + Silkscreen period) right-aligned.
 - Mobile ≤767px: rail becomes the Radix bottom sheet; tables scroll internally; no page-level horizontal overflow.
-- Role nav (≤5 destinations each). Developer: Home · API keys · Models · Activity · Quickstart. Operator: Overview · People & keys · Providers & models · Usage · Guardrails & audit.
+- Role nav. Developer: Home · API keys · Models · Activity · Analytics · Quickstart. Operator: Overview · People & keys · Providers · Models & pricing · Usage · Guardrails · Audit log. Heavy pages are split so each tab owns one concern (connections vs catalog/pricing; guardrail policy vs audit trail).
+- App-shell scroll model: the document never scrolls. `body` is overflow-hidden and `.main-content` is the single scroll pane; long tables scroll inside `.table-scroll` (capped height, sticky header row). All dropdowns are themed Radix Select popups — native selects are not used.
 - Sections are flat: heading, optional description, thin top rule, content — not nested cards. Bordered panels are reserved for model cards, stat strips, code blocks, and dialog content.
 - Stat strips are hairline `1px`-divided grids; VT323 values; the first cell's value is lime.
 - Tables: muted Silkscreen headers, thin horizontal separators, mono for identifiers/money, internal horizontal scroll with `role="region"` + `tabIndex={0}`; the operator usage table keeps its 1060px minimum width scoped rule.

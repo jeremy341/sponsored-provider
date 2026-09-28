@@ -105,8 +105,8 @@ function mockOperatorApi() {
   vi.spyOn(api, "getGuardrails").mockResolvedValue(guardrails);
 }
 
-const developerRoutes = ["/developer", "/developer/keys", "/developer/models", "/developer/activity", "/developer/quickstart"];
-const operatorRoutes = ["/operator", "/operator/people", "/operator/providers", "/operator/usage", "/operator/guardrails"];
+const developerRoutes = ["/developer", "/developer/keys", "/developer/models", "/developer/activity", "/developer/analytics", "/developer/quickstart"];
+const operatorRoutes = ["/operator", "/operator/people", "/operator/providers", "/operator/models", "/operator/usage", "/operator/guardrails", "/operator/audit"];
 
 describe("portal route smoke", () => {
   const consoleErrors: unknown[] = [];

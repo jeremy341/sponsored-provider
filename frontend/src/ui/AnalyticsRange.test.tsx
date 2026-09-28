@@ -1,11 +1,11 @@
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DashboardAnalytics } from "../contracts/api";
 import type { OperatorDashboard } from "../contracts/api";
 import { api } from "../lib/api";
 import { App } from "./App";
 import { DashboardAnalyticsPanel } from "./DashboardAnalyticsPanel";
+import { pickSelect } from "../test/select";
 
 const analytics: DashboardAnalytics = {
   period: { key: "current_month", from: "2026-09-01T00:00:00+02:00", to: "2026-09-28T10:00:00+02:00", timezone: "Europe/Berlin" },
@@ -47,9 +47,9 @@ describe("dashboard analytics range", () => {
   it("defaults to this month and changes the shared selected range", async () => {
     const onRangeChange = vi.fn();
     render(<DashboardAnalyticsPanel analytics={analytics} range="current_month" onRangeChange={onRangeChange} />);
-    expect(screen.getByRole("combobox", { name: /analytics period/i })).toHaveValue("current_month");
+    expect(screen.getByRole("combobox", { name: /analytics period/i })).toHaveTextContent("This month");
     expect(screen.getByText(/September 2026/i)).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByRole("combobox", { name: /analytics period/i }), "30d");
+    await pickSelect(/analytics period/i, "Last 30 days");
     expect(onRangeChange).toHaveBeenCalledWith("30d");
   });
 

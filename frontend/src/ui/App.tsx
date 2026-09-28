@@ -10,10 +10,13 @@ import { QuickstartPage } from "./developer/QuickstartPage";
 import { ModelCatalogPage as ModelCatalogSurface } from "./developer/ModelCatalogPage";
 import { ModelDetailPage } from "./developer/ModelDetailPage";
 import { DeveloperActivityPage as DeveloperActivitySurface } from "./developer/DeveloperActivityPage";
+import { DeveloperAnalyticsPage } from "./developer/DeveloperAnalyticsPage";
 import { OperatorOverview } from "./operator/OperatorOverviewPage";
 import { PeoplePage } from "./operator/PeoplePage";
 import { GuardrailsPage } from "./operator/GuardrailsPage";
 import { ProviderListPage as ProvidersSurface } from "./operator/providers/ProviderListPage";
+import { ModelsPricingPage } from "./operator/models/ModelsPricingPage";
+import { AuditLogPage } from "./operator/AuditLogPage";
 import { OperatorUsagePage as OperatorUsageSurface } from "./operator/usage/OperatorUsagePage";
 import { AppShell } from "./shell/AppShell";
 import { developerNav, operatorNav } from "./shell/nav";
@@ -78,12 +81,15 @@ function PortalShell({ role, preview, userName, email }: { role: PortalRole; pre
       <Route path="/developer/models" element={<ModelCatalogSurface portalApi={api} />} />
       <Route path="/developer/models/*" element={<ModelDetailPage portalApi={api} />} />
       <Route path="/developer/activity" element={<DeveloperActivitySurface portalApi={api} />} />
+      <Route path="/developer/analytics" element={<DeveloperAnalyticsPage />} />
       <Route path="/developer/quickstart" element={<QuickstartPage />} />
       <Route path="/operator" element={<OperatorOverview />} />
       <Route path="/operator/people" element={<PeoplePage />} />
       <Route path="/operator/providers" element={<ProvidersSurface portalApi={api} />} />
+      <Route path="/operator/models" element={<ModelsPricingPage portalApi={api} />} />
       <Route path="/operator/usage" element={<OperatorUsageSurface portalApi={api} />} />
       <Route path="/operator/guardrails" element={<GuardrailsPage />} />
+      <Route path="/operator/audit" element={<AuditLogPage />} />
       <Route path="*" element={<NotFound home={home} homeLabel={homeLabel} />} />
     </Routes>
   </AppShell>;

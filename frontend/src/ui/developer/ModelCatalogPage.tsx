@@ -4,6 +4,7 @@ import { Check, Copy, Search } from "lucide-react";
 import type { ModelRecord, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
 import { getLayoutPreviewRole } from "../../lib/preview";
+import { SelectMenu } from "../SelectMenu";
 
 const INITIAL_GROUP_SIZE = 6;
 
@@ -103,9 +104,9 @@ export function ModelCatalogPage({ portalApi }: { portalApi: Pick<PortalApi, "li
     <section className="section-block table-section" aria-label="Published model catalog">
       <div className="toolbar model-catalog-toolbar">
         <label className="search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Search models</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search providers or models" /></label>
-        <label className="select-filter"><span className="sr-only">Filter by provider</span><select aria-label="Filter by provider" value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">All providers</option>{providers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
-        <label className="select-filter"><span className="sr-only">Filter by capability</span><select aria-label="Filter by capability" value={capability} onChange={(event) => setCapability(event.target.value)}><option value="all">All capabilities</option><option value="text">Text</option><option value="vision">Vision</option></select></label>
-        <label className="select-filter"><span className="sr-only">Sort by input price</span><select aria-label="Sort by input price" value={priceSort} onChange={(event) => setPriceSort(event.target.value)}><option value="provider">Provider order</option><option value="input_asc">Lowest input price</option><option value="input_desc">Highest input price</option></select></label>
+        <div className="select-filter"><SelectMenu ariaLabel="Filter by provider" value={provider} onValueChange={setProvider} options={[{ value: "all", label: "All providers" }, ...providers.map((name) => ({ value: name, label: name }))]} /></div>
+        <div className="select-filter"><SelectMenu ariaLabel="Filter by capability" value={capability} onValueChange={setCapability} options={[{ value: "all", label: "All capabilities" }, { value: "text", label: "Text" }, { value: "vision", label: "Vision" }]} /></div>
+        <div className="select-filter"><SelectMenu ariaLabel="Sort by input price" value={priceSort} onValueChange={setPriceSort} options={[{ value: "provider", label: "Provider order" }, { value: "input_asc", label: "Lowest input price" }, { value: "input_desc", label: "Highest input price" }]} /></div>
         <span className="count-label" aria-live="polite">{loading ? "Loading…" : `${filtered.length} models`}</span>
       </div>
       <span className="sr-only" aria-live="polite">{copiedId ? "Model ID copied to clipboard" : ""}</span>

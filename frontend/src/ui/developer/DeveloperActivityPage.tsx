@@ -3,6 +3,7 @@ import { Activity, Search } from "lucide-react";
 import type { ActivityEvent, ApiKeyRecord, DeveloperActivityFilter, Page, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
 import { getLayoutPreviewRole } from "../../lib/preview";
+import { SelectMenu } from "../SelectMenu";
 
 export function DeveloperActivityPage({ portalApi }: { portalApi: PortalApi }) {
   const [rows, setRows] = useState<ActivityEvent[]>([]);
@@ -58,8 +59,8 @@ export function DeveloperActivityPage({ portalApi }: { portalApi: PortalApi }) {
     {error && <div className="inline-notice notice-error" role="alert">{error} <button type="button" className="button button-small" onClick={() => { setFilters((current) => ({ ...current, cursor: undefined })); }}>Retry</button></div>}
     <section className="section-block table-section"><div className="toolbar activity-toolbar developer-activity-filters">
       <label className="search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Filter by model</span><input value={filters.model ?? ""} onChange={(event) => changeFilter("model", event.target.value)} placeholder="Filter by model" /></label>
-      <label className="select-filter"><span className="sr-only">Filter by key</span><select aria-label="Filter by key" value={filters.keyId ?? ""} onChange={(event) => changeFilter("keyId", event.target.value)}><option value="">All my keys</option>{keys.map((key) => <option key={key.id} value={key.id}>{key.label}</option>)}</select></label>
-      <label className="select-filter"><span className="sr-only">Filter by result</span><select aria-label="Filter by result" value={filters.outcome ?? ""} onChange={(event) => changeFilter("outcome", event.target.value)}><option value="">All results</option><option value="success">Success</option><option value="error">Error</option><option value="rejected">Rejected</option><option value="interrupted">Interrupted</option></select></label>
+      <div className="select-filter"><SelectMenu ariaLabel="Filter by key" value={filters.keyId ?? "__all__"} onValueChange={(next) => changeFilter("keyId", next === "__all__" ? "" : next)} options={[{ value: "__all__", label: "All my keys" }, ...keys.map((key) => ({ value: key.id, label: key.label }))]} /></div>
+      <div className="select-filter"><SelectMenu ariaLabel="Filter by result" value={filters.outcome ?? "__all__"} onValueChange={(next) => changeFilter("outcome", next === "__all__" ? "" : next)} options={[{ value: "__all__", label: "All results" }, { value: "success", label: "Success" }, { value: "error", label: "Error" }, { value: "rejected", label: "Rejected" }, { value: "interrupted", label: "Interrupted" }]} /></div>
       <label className="date-filter"><span>From</span><input aria-label="From date" type="date" value={filters.from ?? ""} onChange={(event) => changeFilter("from", event.target.value)} /></label>
       <label className="date-filter"><span>To</span><input aria-label="To date" type="date" value={filters.to ?? ""} onChange={(event) => changeFilter("to", event.target.value)} /></label>
       <span className="filter-note">Filters run on your account’s history</span>

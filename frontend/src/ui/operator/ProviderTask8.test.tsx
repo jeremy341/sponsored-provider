@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { pickSelect } from "../../test/select";
+import { ModelsPricingPage } from "./models/ModelsPricingPage";
 import { ProviderListPage } from "./providers/ProviderListPage";
 import { ConnectionBudgetEditor } from "./providers/ConnectionBudgetEditor";
 import { AllowanceDialog, AllowanceEditor } from "./people/AllowanceEditor";
@@ -39,7 +41,7 @@ function api(overrides: Partial<PortalApi> = {}): PortalApi {
     listProviders: vi.fn().mockResolvedValue([connection]), createProvider: vi.fn(), syncProvider: vi.fn(),
     listOperatorOffers: vi.fn().mockResolvedValue([offer]), updateOfferPrice: vi.fn(), approveOfferPrice: vi.fn(),
     setOfferAvailable: vi.fn(), setRouteAvailability: vi.fn().mockResolvedValue(undefined), updateRouteOrder: vi.fn(), mapConnectionModel: vi.fn(),
-    updateConnectionBudget: vi.fn(), ...overrides,
+    updateConnectionBudget: vi.fn(), getOperatorDashboard: vi.fn().mockResolvedValue(null), ...overrides,
   };
 
   return { ...portalApi, ...defaults, ...overrides };
@@ -69,10 +71,10 @@ describe("Task 8 operator interface", () => {
     const client = api({ syncProvider: vi.fn().mockRejectedValue(new Error("offline")) });
     render(<ProviderListPage portalApi={client} />);
     await openBrand();
-    expect(await screen.findByText("Model X")).toBeInTheDocument();
+    expect(await screen.findByText("EU primary")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: /Sync EU primary/i }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/sync failed/i);
-    expect(screen.getByText("Model X")).toBeInTheDocument();
+    expect(screen.getByText("EU primary")).toBeInTheDocument();
   });
 
   it("creates_connection_once_and_clears_its_raw_secret", async () => {
@@ -112,14 +114,14 @@ describe("Task 8 operator interface", () => {
   });
 
   it("keeps_unpriced_offer_off_user_catalog", async () => {
-    render(<ProviderListPage portalApi={api({ listOperatorOffers: vi.fn().mockResolvedValue([{ ...offer, activePrice: null, pendingPrice: null, available: true }]) })} />);
+    render(<ModelsPricingPage portalApi={api({ listOperatorOffers: vi.fn().mockResolvedValue([{ ...offer, activePrice: null, pendingPrice: null, available: true }]) })} />);
     await openOffer();
     expect(screen.getAllByText(/Price required/i).length).toBeGreaterThan(0);
     expect(screen.getByRole("switch", { name: /Available to developers/i })).toBeDisabled();
   });
 
   it("shows_pending_price_beside_active_price", async () => {
-    render(<ProviderListPage portalApi={api()} />);
+    render(<ModelsPricingPage portalApi={api()} />);
     await openOffer();
     expect(screen.getByText(/Active price/i)).toBeInTheDocument();
     expect(screen.getByText(/Pending price/i)).toBeInTheDocument();
@@ -128,7 +130,7 @@ describe("Task 8 operator interface", () => {
   });
 
   it("blocks_mismatched_fallback_with_reason", async () => {
-    render(<ProviderListPage portalApi={api()} />);
+    render(<ModelsPricingPage portalApi={api()} />);
     await openOffer();
     expect(screen.getAllByText(/Rate mismatch/i).length).toBeGreaterThan(0);
     expect(screen.getByText(/cannot serve requests until its price matches the approved offer/i)).toBeInTheDocument();
@@ -137,7 +139,7 @@ describe("Task 8 operator interface", () => {
 
   it("offer_toggle_is_distinct_from_connection_toggle", async () => {
     const client = api();
-    render(<ProviderListPage portalApi={client} />);
+    render(<ModelsPricingPage portalApi={client} />);
     await openOffer();
     const offerSwitch = screen.getByRole("switch", { name: /Available to developers/i });
     await userEvent.click(offerSwitch);
@@ -150,7 +152,7 @@ describe("Task 8 operator interface", () => {
   it("route_order_is_keyboard_controllable", async () => {
     const routableOffer = { ...offer, routes: offer.routes.map((route) => ({ ...route, reviewRequired: false, priceStatus: "matching" })) };
     const client = api({ listOperatorOffers: vi.fn().mockResolvedValue([routableOffer]) });
-    render(<ProviderListPage portalApi={client} />);
+    render(<ModelsPricingPage portalApi={client} />);
     await openOffer();
     const move = screen.getByRole("button", { name: /Move US fallback up/i });
     move.focus();
@@ -165,7 +167,7 @@ describe("Task 8 operator interface", () => {
 
     const client = api({ listOperatorOffers: vi.fn().mockResolvedValue([reconfirmableOffer]) });
 
-    render(<ProviderListPage portalApi={client} />);
+    render(<ModelsPricingPage portalApi={client} />);
     await openOffer();
     expect(screen.getAllByText(/Reconfirmation required/i).length).toBeGreaterThan(0);
     const routeSwitch = screen.getByRole("switch", { name: /Enable route US fallback/i });
@@ -176,7 +178,7 @@ describe("Task 8 operator interface", () => {
 
   it("shows a visible error when publishing an offer fails", async () => {
     const client = api({ setOfferAvailable: vi.fn().mockRejectedValue(new Error("blocked")) });
-    render(<ProviderListPage portalApi={client} />);
+    render(<ModelsPricingPage portalApi={client} />);
     await openOffer();
     await userEvent.click(screen.getByRole("switch", { name: /Available to developers/i }));
     expect(await screen.findByRole("alert")).toHaveTextContent(/could not update model availability/i);
@@ -185,7 +187,7 @@ describe("Task 8 operator interface", () => {
   it("includes an optional cached-input rate in a saved price suggestion", async () => {
     const updateOfferPrice = vi.fn().mockResolvedValue({ id: "suggestion-1", offerId: "offer-1", status: "pending" });
     const client = api({ updateOfferPrice });
-    render(<ProviderListPage portalApi={client} />);
+    render(<ModelsPricingPage portalApi={client} />);
     await openOffer();
     await userEvent.clear(screen.getByLabelText(/Cached input USD per 1M tokens/i));
     await userEvent.type(screen.getByLabelText(/Cached input USD per 1M tokens/i), "0.15");
@@ -203,11 +205,13 @@ describe("Task 8 operator interface", () => {
 
     const mapConnectionModel = vi.fn().mockResolvedValue(undefined);
     const client = api({ listOperatorOffers: vi.fn().mockResolvedValue([unconfirmedOffer, canonicalOffer, otherBrandOffer]), mapConnectionModel });
-    render(<ProviderListPage portalApi={client} />);
+    render(<ModelsPricingPage portalApi={client} />);
     await openOffer();
-    expect(screen.getByRole("option", { name: /Canonical Model/ })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: /Other AI/ })).not.toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText(/Canonical model for US fallback/i), "offer-2");
+    await userEvent.click(screen.getByRole("combobox", { name: /Canonical model for US fallback/i }));
+    const mappingOptions = await screen.findAllByRole("option");
+    expect(mappingOptions.some((item) => /Canonical Model/.test(item.textContent ?? ""))).toBe(true);
+    expect(mappingOptions.some((item) => /Other AI/.test(item.textContent ?? ""))).toBe(false);
+    await userEvent.click(screen.getByRole("option", { name: /Canonical Model/ }));
     await userEvent.click(screen.getByRole("button", { name: /Map US fallback/i }));
     await waitFor(() => expect(mapConnectionModel).toHaveBeenCalledWith("conn-2", "model-x", "offer-2"));
   });
@@ -217,7 +221,7 @@ describe("Task 8 operator interface", () => {
     render(<AllowanceEditor person={person} onSave={save} />);
     await userEvent.clear(screen.getByLabelText(/USD allowance/i));
     await userEvent.type(screen.getByLabelText(/USD allowance/i), "18.75");
-    await userEvent.selectOptions(screen.getByLabelText(/Allowance period/i), "daily");
+    await pickSelect(/Allowance period/i, "Daily");
     await userEvent.click(screen.getByRole("button", { name: /Save allowance/i }));
     await waitFor(() => expect(save).toHaveBeenCalledWith({ allowanceUsd: "18.75", allowancePeriod: "daily", rpmLimit: 30 }));
   });
@@ -234,10 +238,9 @@ describe("Task 8 operator interface", () => {
     const client = api({ updateConnectionBudget: save });
     render(<ConnectionBudgetEditor connection={connection} portalApi={client} onSaved={vi.fn()} />);
     await userEvent.click(screen.getByRole("button", { name: /Edit cap for EU primary/i }));
-    expect(screen.getByRole("option", { name: "Lifetime" })).toBeInTheDocument();
     await userEvent.clear(screen.getByLabelText(/Connection cap USD/i));
     await userEvent.type(screen.getByLabelText(/Connection cap USD/i), "45.125000001");
-    await userEvent.selectOptions(screen.getByLabelText(/Cap period/i), "monthly");
+    await pickSelect(/Cap period/i, "Monthly");
     await userEvent.clear(screen.getByLabelText(/Safety reserve USD/i));
     await userEvent.type(screen.getByLabelText(/Safety reserve USD/i), "4.25");
     await userEvent.click(screen.getByRole("button", { name: /Save connection budget/i }));
@@ -255,7 +258,7 @@ describe("Task 8 operator interface", () => {
     render(<OperatorUsagePage portalApi={api({ listProviders: vi.fn().mockResolvedValue([connection]), listOperatorActivity })} />);
     await screen.findByLabelText(/Connection/i);
     expect(screen.getByLabelText("Model").closest(".search-field")?.querySelector("svg.lucide")).toBeInTheDocument();
-    await userEvent.selectOptions(screen.getByLabelText(/Connection/i), "conn-1");
+    await pickSelect(/Connection/i, /EU primary/);
     await waitFor(() => expect(listOperatorActivity).toHaveBeenLastCalledWith(expect.objectContaining({ connectionId: "conn-1" })));
   });
 

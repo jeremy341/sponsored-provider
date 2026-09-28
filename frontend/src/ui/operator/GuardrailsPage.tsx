@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Ban, Globe2, Landmark, ScrollText, ShieldAlert, ShieldX } from "lucide-react";
+import { Ban, Globe2, Landmark, ShieldAlert, ShieldX } from "lucide-react";
 import { api } from "../../lib/api";
 import { dateTime, money } from "../../lib/format";
 import { DataNotice, EmptyState, LoadingLine, PageHeader, StatusLabel, useLoad } from "../shared";
@@ -165,11 +165,6 @@ export function GuardrailsPage() {
           <button className="button button-secondary" disabled={ipSaving}>{ipSaving ? "Saving…" : "Block IP"}</button>
         </form>
         {snapshot?.blockedIps.length ? <div className="simple-list">{snapshot.blockedIps.map((entry) => <div key={`${entry.ip}:${entry.createdAt}`}><code>{entry.ip}</code><span>{entry.reason ?? "No reason recorded"} · blocked {dateTime(entry.createdAt)}</span><button type="button" className="button button-quiet button-small" disabled={ipSaving} onClick={() => { void unblockAddress(entry.ip); }}>Unblock</button></div>)}</div> : <EmptyState title="No blocked IPs" body="No IP blocks are currently reported." compact />}
-      </section>
-
-      <section className="section-block audit-section" aria-labelledby="audit-heading">
-        <div className="section-heading"><div><h2 id="audit-heading">Recent audit events</h2><p>Policy actions with secret values redacted.</p></div><ScrollText size={18} /></div>
-        {snapshot?.recentAudit.length ? <div className="audit-list">{snapshot.recentAudit.map((event) => <div className="audit-row" key={event.id}><span><strong>{event.action}</strong><small>{event.actor} · {event.target}</small></span><time>{dateTime(event.occurredAt)}</time></div>)}</div> : <EmptyState title="No recent audit events" body="Operator changes will be recorded here." compact />}
       </section>
     </div>
 

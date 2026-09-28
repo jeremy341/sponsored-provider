@@ -1,18 +1,15 @@
 import { useState } from "react";
 import { NavLink } from "react-router-dom";
-import { Activity, ArrowRight, Boxes, Code2, Copy, KeyRound, Plus, Users } from "lucide-react";
+import { Activity, ArrowRight, Boxes, ChartNoAxesColumn, Code2, Copy, KeyRound, Plus, Users } from "lucide-react";
 import { ApiError, api } from "../../lib/api";
 import { dateTime } from "../../lib/format";
-import type { DashboardRange } from "../../contracts/api";
-import { ActivitySection, DataNotice, EmptyState, LoadingLine, ModelUsagePanel, PageHeader, StatStrip, StatusLabel, useLoad } from "../shared";
+import { ActivitySection, DataNotice, EmptyState, LoadingLine, PageHeader, StatStrip, StatusLabel, useLoad } from "../shared";
 import { AllowanceSummary } from "./AllowanceSummary";
-import { DashboardAnalyticsPanel } from "../DashboardAnalyticsPanel";
 import { KeyTable } from "./KeyTable";
 import { QuickstartExample } from "./QuickstartExample";
 
 export function DeveloperHome() {
-  const [range, setRange] = useState<DashboardRange>("current_month");
-  const data = useLoad(() => api.getDeveloperDashboard(range), [range]);
+  const data = useLoad(() => api.getDeveloperDashboard(), [api]);
   const models = useLoad(api.listModels);
   const dash = data.value;
 
@@ -24,6 +21,7 @@ export function DeveloperHome() {
       <NavLink to="/developer/keys"><KeyRound size={16} aria-hidden="true" /><span><strong>API keys</strong><small>Create and manage the keys your apps authenticate with.</small></span><ArrowRight size={14} aria-hidden="true" /></NavLink>
       <NavLink to="/developer/models"><Boxes size={16} aria-hidden="true" /><span><strong>Models</strong><small>Browse the approved language, image, and embedding models.</small></span><ArrowRight size={14} aria-hidden="true" /></NavLink>
       <NavLink to="/developer/activity"><Activity size={16} aria-hidden="true" /><span><strong>Activity</strong><small>See your recent requests, token usage, and errors.</small></span><ArrowRight size={14} aria-hidden="true" /></NavLink>
+      <NavLink to="/developer/analytics"><ChartNoAxesColumn size={16} aria-hidden="true" /><span><strong>Analytics</strong><small>Graphs for requests, tokens, and spend by period.</small></span><ArrowRight size={14} aria-hidden="true" /></NavLink>
       <NavLink to="/developer/quickstart"><Code2 size={16} aria-hidden="true" /><span><strong>Quickstart</strong><small>Make your first OpenAI-compatible request.</small></span><ArrowRight size={14} aria-hidden="true" /></NavLink>
     </nav>
     <div className="content-grid home-grid">
@@ -35,8 +33,6 @@ export function DeveloperHome() {
       <ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} developer />
       <DeveloperInviteCard />
     </div>
-    <DashboardAnalyticsPanel analytics={dash?.analytics ?? null} range={range} onRangeChange={setRange} loading={data.loading} />
-    <ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} developer />
   </>;
 }
 

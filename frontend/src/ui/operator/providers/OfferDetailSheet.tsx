@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 import type { CatalogOfferRecord, OfferRouteRecord, PortalApi } from "../../../contracts/api";
 import { PriceReviewPanel } from "./PriceReviewPanel";
 import { RoutePriorityEditor } from "./RoutePriorityEditor";
+import { SelectMenu } from "../../SelectMenu";
 
 export function OfferDetailSheet({ offer, offers, portalApi, onChanged, onClose }: { offer: CatalogOfferRecord | null; offers: CatalogOfferRecord[]; portalApi: PortalApi; onChanged: () => void; onClose: () => void }) {
   const [error, setError] = useState("");
@@ -48,7 +49,7 @@ export function OfferDetailSheet({ offer, offers, portalApi, onChanged, onClose 
             try { await portalApi.setRouteAvailability(route.id, event.target.checked); onChanged(); }
             catch { setError("Could not update route availability. Confirm its model mapping, fresh discovery, and matching price."); }
           }} /></label>
-            {route.priceStatus === "unconfirmed" && <div className="route-mapping-control"><label><span className="field-label">Canonical model for {route.connectionLabel}</span><select aria-label={`Canonical model for ${route.connectionLabel}`} value={mappingTargets[route.id] ?? offer.id} onChange={(event) => setMappingTargets((current) => ({ ...current, [route.id]: event.target.value }))}>{offers.filter((item) => item.brandSlug === offer.brandSlug).map((item) => <option key={item.id} value={item.id}>{item.displayName} · {item.canonicalModelId}</option>)}</select></label><button type="button" className="button button-secondary button-small" onClick={() => { void mapRoute(route); }}>Map {route.connectionLabel}</button></div>}
+            {route.priceStatus === "unconfirmed" && <div className="route-mapping-control"><div className="route-mapping-field"><span className="field-label" id={`route-mapping-${route.id}`}>Canonical model for {route.connectionLabel}</span><SelectMenu ariaLabel={`Canonical model for ${route.connectionLabel}`} value={mappingTargets[route.id] ?? offer.id} onValueChange={(next) => setMappingTargets((current) => ({ ...current, [route.id]: next }))} options={offers.filter((item) => item.brandSlug === offer.brandSlug).map((item) => ({ value: item.id, label: `${item.displayName} · ${item.canonicalModelId}` }))} /></div><button type="button" className="button button-secondary button-small" onClick={() => { void mapRoute(route); }}>Map {route.connectionLabel}</button></div>}
           </div>)}
           {mappingNotice && <p className="field-help" role="status">{mappingNotice}</p>}
         </section></>}

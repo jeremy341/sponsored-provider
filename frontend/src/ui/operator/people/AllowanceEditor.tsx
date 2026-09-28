@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import type { PersonRecord } from "../../../contracts/api";
 import { MoneyRunway } from "../MoneyRunway";
+import { SelectMenu } from "../../SelectMenu";
 
 export function AllowanceEditor({ person, onSave, onClose }: { person: PersonRecord; onSave: (input: { allowanceUsd: string | null; allowancePeriod: "daily" | "weekly" | "monthly" | null; rpmLimit: number | null }) => Promise<void>; onClose?: () => void }) {
   const [allowance, setAllowance] = useState(person.allowanceUsd ?? "");
@@ -35,9 +36,7 @@ export function AllowanceEditor({ person, onSave, onClose }: { person: PersonRec
     <MoneyRunway label={`${person.displayName} shared allowance`} usedUsd={person.usedUsd} limitUsd={person.allowanceUsd} period={person.allowancePeriod} reservedUsd={person.reservedUsd} resetAt={person.allowanceResetAt} />
     <p className="field-help">This allowance is shared across all of {person.displayName}’s keys. Unused credits expire when the period resets.</p>
     <label><span className="field-label">USD allowance</span><input aria-label="USD allowance" inputMode="decimal" value={allowance} onChange={(event) => setAllowance(event.target.value)} placeholder="Unlimited" /></label>
-    <label><span className="field-label">Allowance period</span><select aria-label="Allowance period" value={period} disabled={!allowance} onChange={(event) => { const value = event.currentTarget.value;
-
- if (value === "daily" || value === "weekly" || value === "monthly") setPeriod(value); }}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select></label>
+    <div><span className="field-label" id="allowance-period-label">Allowance period</span><SelectMenu ariaLabel="Allowance period" value={period} disabled={!allowance} onValueChange={(value) => { if (value === "daily" || value === "weekly" || value === "monthly") setPeriod(value); }} options={[{ value: "daily", label: "Daily" }, { value: "weekly", label: "Weekly" }, { value: "monthly", label: "Monthly" }]} /></div>
     <label><span className="field-label">Requests per minute</span><input inputMode="numeric" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Unlimited" /></label>
     {error && <p className="inline-notice notice-error" role="alert">{error}</p>}<div className="dialog-actions"><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save allowance"}</button></div>
   </form>;

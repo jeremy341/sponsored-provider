@@ -27,9 +27,11 @@ Design direction: technical/utilitarian, inherited and refined from the existing
 
 1. Overview
 2. People & keys
-3. Models & providers
-4. Usage
-5. Guardrails & audit
+3. Providers
+4. Models & pricing
+5. Usage
+6. Guardrails
+7. Audit log
 
 Provider profile details, pricing, invitations, and settings are contextual sub-pages or drawers, not extra top-level navigation.
 

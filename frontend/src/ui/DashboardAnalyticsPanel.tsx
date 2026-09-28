@@ -1,6 +1,7 @@
 import type { DashboardAnalytics, DashboardRange, ModelUsageRecord } from "../contracts/api";
 import { count } from "../lib/format";
 import { formatUsdExact } from "../lib/money";
+import { SelectMenu } from "./SelectMenu";
 import { ModelSpendChart } from "./charts/ModelSpendChart";
 import { UsageTrendChart } from "./charts/UsageTrendChart";
 
@@ -24,7 +25,7 @@ export function DashboardAnalyticsPanel({ analytics, range, onRangeChange, loadi
   const title = analytics ? periodLabel(analytics) : ranges.find((entry) => entry.value === range)?.label ?? "Selected period";
 
   return <section className="dashboard-analytics" aria-label="Period analytics">
-    <div className="analytics-heading"><div><span className="eyebrow">Selected period · Europe/Berlin</span><h2>Usage analytics</h2><p>{title} · This selector changes charts only; your allowance reset stays on its assigned cycle.</p></div><label className="analytics-range"><span>Analytics period</span><select aria-label="Analytics period" value={range} onChange={(event) => { if (isDashboardRange(event.target.value)) onRangeChange(event.target.value); }}>{ranges.map((entry) => <option key={entry.value} value={entry.value}>{entry.label}</option>)}</select></label></div>
+    <div className="analytics-heading"><div><span className="eyebrow">Selected period · Europe/Berlin</span><h2>Usage analytics</h2><p>{title} · This selector changes charts only; your allowance reset stays on its assigned cycle.</p></div><div className="analytics-range"><span id="analytics-range-label">Analytics period</span><SelectMenu ariaLabel="Analytics period" value={range} onValueChange={(next) => { if (isDashboardRange(next)) onRangeChange(next); }} options={ranges.map((entry) => ({ value: entry.value, label: entry.label }))} /></div></div>
     {loading ? <div className="loading-line" role="status"><span className="sr-only">Loading period analytics</span></div> : analytics ? <>
       <div className="analytics-stat-strip" aria-label={`${title} usage summary`}>
         <AnalyticsStat label="Requests" value={count(analytics.summary?.requests ?? null)} />

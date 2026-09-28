@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it } from "vitest";
 import { App } from "./App";
+import { pickSelect } from "../test/select";
 
 afterEach(() => window.history.replaceState({}, "", "/"));
 
@@ -23,7 +24,7 @@ describe("portal shell", () => {
 
     for (const brand of brands) expect(brand.querySelector(".brand-mark")).toBeInTheDocument();
 
-    expect(navLinks).toHaveLength(5);
+    expect(navLinks).toHaveLength(6);
 
     for (const link of navLinks) expect(link.querySelector("svg.lucide")).toHaveAttribute("aria-hidden", "true");
 
@@ -47,7 +48,7 @@ describe("portal shell", () => {
     await userEvent.click(openNavigation);
     const dialog = await screen.findByRole("dialog", { name: "Navigation" });
 
-    expect(dialog.querySelectorAll("svg.lucide")).toHaveLength(7);
+    expect(dialog.querySelectorAll("svg.lucide")).toHaveLength(9);
 
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).not.toBeInTheDocument());
@@ -55,7 +56,7 @@ describe("portal shell", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Open navigation" }));
     await screen.findByRole("dialog", { name: "Navigation" });
-    await userEvent.selectOptions(screen.getByLabelText("Choose portal"), "developer");
+    await pickSelect("Choose portal", "Developer portal");
 
     const developerNavigation = screen.getByRole("navigation", { name: "Primary navigation" });
 

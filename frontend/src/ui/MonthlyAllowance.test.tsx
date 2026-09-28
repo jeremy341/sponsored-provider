@@ -5,6 +5,7 @@ import type { PersonRecord } from "../contracts/api";
 import { remainingUsd } from "../lib/money";
 import { AllowanceSummary } from "./developer/AllowanceSummary";
 import { AllowanceEditor } from "./operator/people/AllowanceEditor";
+import { pickSelect } from "../test/select";
 
 const monthlyAllowance = {
   usedUsd: "1.25",
@@ -51,7 +52,7 @@ describe("monthly developer allowance", () => {
     const save = vi.fn().mockResolvedValue(undefined);
 
     render(<AllowanceEditor person={person} onSave={save} />);
-    await userEvent.selectOptions(screen.getByLabelText("Allowance period"), "monthly");
+    await pickSelect("Allowance period", "Monthly");
     await userEvent.click(screen.getByRole("button", { name: "Save allowance" }));
 
     await waitFor(() => expect(save).toHaveBeenCalledWith({ allowanceUsd: "7", allowancePeriod: "monthly", rpmLimit: 30 }));

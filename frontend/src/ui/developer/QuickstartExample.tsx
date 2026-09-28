@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Code2, Copy } from "lucide-react";
 import type { ModelRecord } from "../../contracts/api";
 import { LoadingLine } from "../shared";
+import { SelectMenu } from "../SelectMenu";
 
 export function QuickstartExample({ models, loading }: { models: ModelRecord[]; loading: boolean }) {
   const available = models.filter((model) => model.approved && model.available);
@@ -24,9 +25,7 @@ export function QuickstartExample({ models, loading }: { models: ModelRecord[]; 
 
   return <section className="section-block quickstart-example" aria-labelledby="first-call-title">
     <div className="section-heading"><div><h2 id="first-call-title">Make your first request</h2><p>OpenAI-compatible endpoint · use your own sponsored key.</p></div><Code2 size={18} aria-hidden="true" /></div>
-    {available.length > 0 && <label className="quickstart-model"><span>Model ID</span><select aria-label="Quickstart model" value={modelId} onChange={(event) => { setSelectedId(event.target.value); setCopied(false); }}>
-      {available.map((model) => <option value={model.id} key={model.id}>{model.providerName} · {model.id}</option>)}
-    </select></label>}
+    {available.length > 0 && <div className="quickstart-model"><span id="quickstart-model-label">Model ID</span><SelectMenu ariaLabel="Quickstart model" value={modelId} onValueChange={(next) => { setSelectedId(next); setCopied(false); }} options={available.map((model) => ({ value: model.id, label: `${model.providerName} · ${model.id}` }))} /></div>}
     {loading && <LoadingLine />}
     {!loading && available.length === 0 && <p className="field-help">No approved model is available here. Choose an approved model from the catalog before sending a request.</p>}
     <pre className="code-block"><code>{snippet}</code><button type="button" className="button button-secondary copy-code" onClick={() => { void copyExample(); }}><Copy size={14} />{copied ? "Copied" : "Copy example"}</button></pre>

@@ -3,6 +3,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Wallet, X } from "lucide-react";
 import type { PortalApi, ProviderConnectionRecord } from "../../../contracts/api";
 import { formatUsd } from "../../../lib/money";
+import { SelectMenu } from "../../SelectMenu";
 
 export function ConnectionBudgetEditor({ connection, portalApi, onSaved }: { connection: ProviderConnectionRecord; portalApi: PortalApi; onSaved: () => void }) {
   const [open, setOpen] = useState(false);
@@ -51,7 +52,7 @@ export function ConnectionBudgetEditor({ connection, portalApi, onSaved }: { con
       <div className="allowance-runway-summary"><div><span>Used</span><strong>{formatUsd(connection.budget.usedUsd)}</strong></div><div><span>Reserved</span><strong>{formatUsd(connection.budget.reservedUsd)}</strong></div><div><span>Remaining</span><strong>{formatUsd(connection.budget.remainingUsd)}</strong></div><div><span>Reset</span><strong>{connection.budget.resetAt ? new Intl.DateTimeFormat("en-GB", { dateStyle: "full", timeZone: "Europe/Berlin" }).format(new Date(connection.budget.resetAt)) + " · Berlin" : "Not scheduled"}</strong></div></div>
       <form className="dialog-form" onSubmit={(event) => { void submit(event); }}>
         <label><span className="field-label">Connection cap USD</span><input aria-label="Connection cap USD" inputMode="decimal" value={limitUsd} onChange={(event) => setLimitUsd(event.target.value)} placeholder="Unlimited" /></label>
-        <label><span className="field-label">Cap period</span><select aria-label="Cap period" value={period} disabled={!limitUsd} onChange={(event) => setPeriod(event.currentTarget.value)}><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option><option value="lifetime">Lifetime</option></select></label>
+        <div><span className="field-label" id="cap-period-label">Cap period</span><SelectMenu ariaLabel="Cap period" value={period} disabled={!limitUsd} onValueChange={setPeriod} options={[{ value: "daily", label: "Daily" }, { value: "weekly", label: "Weekly" }, { value: "monthly", label: "Monthly" }, { value: "lifetime", label: "Lifetime" }]} /></div>
         <label><span className="field-label">Safety reserve USD</span><input aria-label="Safety reserve USD" inputMode="decimal" value={reserveUsd} onChange={(event) => setReserveUsd(event.target.value)} /></label>
         <p className="field-help"><Wallet size={14} aria-hidden="true" /> Used, active reservations, reserve, and remaining headroom are separate values.</p>
         {error && <p className="inline-notice notice-error" role="alert">{error}</p>}

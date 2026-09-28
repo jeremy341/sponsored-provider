@@ -7,6 +7,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Network,
+  ScrollText,
   Shield,
   Users,
 } from "lucide-react";
@@ -24,15 +25,18 @@ export const developerNav: NavItem[] = [
   { path: "/developer/keys", label: "API keys", icon: KeyRound },
   { path: "/developer/models", label: "Models", icon: Boxes },
   { path: "/developer/activity", label: "Activity", icon: Activity },
+  { path: "/developer/analytics", label: "Analytics", icon: ChartNoAxesColumn },
   { path: "/developer/quickstart", label: "Quickstart", icon: Code2 },
 ];
 
 export const operatorNav: NavItem[] = [
   { path: "/operator", label: "Overview", icon: LayoutDashboard, end: true },
   { path: "/operator/people", label: "People & keys", icon: Users },
-  { path: "/operator/providers", label: "Providers & models", icon: Network },
+  { path: "/operator/providers", label: "Providers", icon: Network },
+  { path: "/operator/models", label: "Models & pricing", icon: Boxes },
   { path: "/operator/usage", label: "Usage", icon: ChartNoAxesColumn },
-  { path: "/operator/guardrails", label: "Guardrails & audit", icon: Shield },
+  { path: "/operator/guardrails", label: "Guardrails", icon: Shield },
+  { path: "/operator/audit", label: "Audit log", icon: ScrollText },
 ];
 
 export function isPortalRole(value: string): value is "developer" | "operator" {
