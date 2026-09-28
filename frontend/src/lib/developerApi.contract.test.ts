@@ -4,6 +4,20 @@ import { api } from "./api";
 afterEach(() => vi.unstubAllGlobals());
 
 describe("developer activity API query", () => {
+  it("requests the selected dashboard analytics range and defaults to current month", async () => {
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({}), {
+      status: 200, headers: { "Content-Type": "application/json" },
+    })));
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.getDeveloperDashboard();
+    await api.getDeveloperDashboard("30d");
+
+    expect(String(fetchMock.mock.calls[0][0])).toBe("/api/developer/dashboard?range=current_month");
+    expect(String(fetchMock.mock.calls[1][0])).toBe("/api/developer/dashboard?range=30d");
+  });
+
   it("sends model, key, date, and outcome filters to the owner-scoped server endpoint", async () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ items: [], nextCursor: null }), {
       status: 200, headers: { "Content-Type": "application/json" },

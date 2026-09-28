@@ -65,7 +65,7 @@ The authenticated Hack Club AI pages were not publicly renderable in this audit;
 ### Detail route and content
 
 - Add a deep-linkable developer detail route under `/developer/models/*`. The wildcard accommodates canonical IDs that contain `/`; parsing, URL encoding, and unknown IDs must be tested. The detail page's back link returns to the catalog and preserves its search/filter state.
-- Resolve details from the provider-brand-scoped, database-backed published offer. Do not call each upstream from a developer page. Return only public catalog data and safe display labels for active same-brand routes; never return credentials or internal URLs.
+- Resolve details from the provider-brand-scoped, database-backed published offer. Do not call each upstream from a developer page. Return only public catalog data and a verified aggregate count of eligible same-brand routes; never expose connection labels/IDs, credentials, or internal URLs.
 - Detail hierarchy: breadcrumb; model name/vendor/capability/availability; copyable public ID; verified input/output/cached-input rates and provenance; optional technical details; code examples.
 - Show context window, max output, description, tokenizer, or modality details only when the provider supplies trustworthy metadata or an operator has explicitly verified it. The initial version should not invent or synthesize model descriptions.
 - For models no longer published, historical request rows remain intact. A historical detail link may show a clearly marked unavailable/tombstone view based on request-time snapshots; it must not make the model callable again.
@@ -84,7 +84,8 @@ Use shadcn's chart composition—Recharts with `ChartContainer`, configured tool
 ### Shared analytics window
 
 - Default dashboard analytics to **This month** in `Europe/Berlin`.
-- Offer a bounded selector such as This month, Last 7 days, Last 30 days, and Last 90 days. One selection drives the dashboard period summary, daily trend, top-model ranking, and model-mix chart.
+- Offer a bounded selector such as This month, Last 7 days, Last 30 days, and Last 90 days. One selection drives the period-specific analytics summary, daily trend, top-model ranking, and model-mix chart. Preserve the existing lifetime usage totals as a separately labeled lifetime summary.
+- `current_month` starts at Berlin local midnight on day one and ends at the request's captured `now`. A `Nd` range covers N Berlin calendar dates including today: start at local midnight N−1 days before today's date and end at that same captured `now`; convert boundaries to UTC for database predicates.
 - Keep the developer's monthly allowance runway separate and always tied to its server-computed calendar-month window; changing a chart range must not alter a limit/reset.
 - Label any lifetime totals separately. Do not place an all-time summary beside a current-month chart without explicit labels.
 
@@ -100,16 +101,19 @@ Use shadcn's chart composition—Recharts with `ChartContainer`, configured tool
 
 ### Backend/data contract needed
 
-The dashboard API currently returns a fixed 14-day timeseries and all-time `topModels` capped at eight. The design therefore requires a role-scoped period query and a complete model breakdown, including total priced spend, per-model request/token/spend totals, and an unknown-cost/coverage signal. Developer responses must aggregate only that developer; operator responses may aggregate service-wide. Use event snapshots so removing a model or key cannot erase historical chart data.
+The dashboard API currently returns a fixed 14-day timeseries and all-time `topModels` capped at eight. The design therefore requires a role-scoped period query and a complete model breakdown, including total priced spend, per-model request/token/spend totals, and an unknown-cost/coverage signal. Preserve the existing all-time usage response for compatibility and label it “Lifetime”; add a period-specific analytics envelope for the charts. Developer responses must aggregate only that developer; operator responses may aggregate service-wide. Use event snapshots so removing a model or key cannot erase historical chart data.
 
 Suggested response contract (names illustrative):
 
 ```json
 {
-  "period": { "key": "current_month", "from": "...", "to": "...", "timezone": "Europe/Berlin" },
-  "summary": { "requests": 0, "inputTokens": null, "outputTokens": null, "knownSpendUsd": "0", "unpricedRequests": 0 },
-  "series": [],
-  "modelSpend": [{ "modelId": "...", "providerName": "...", "spendUsd": "0", "requests": 0, "tokens": null }]
+  "usage": { "requests": 0, "period": "all time" },
+  "analytics": {
+    "period": { "key": "current_month", "from": "...", "to": "...", "timezone": "Europe/Berlin" },
+    "summary": { "requests": 0, "inputTokens": null, "outputTokens": null, "knownSpendUsd": "0", "unpricedRequests": 0 },
+    "series": [],
+    "modelSpend": [{ "modelId": "...", "providerName": "...", "spendUsd": "0", "requests": 0, "tokens": null }]
+  }
 }
 ```
 
@@ -121,8 +125,8 @@ Keep the present role split and navigation. Developer catalog/detail/activity re
 
 Dashboard layout recommendation:
 
-- Developer: period-labeled summary; personal allowance card; usage trend + model-spend mix; quick links/Quickstart; keys and recent activity; model usage ranking.
-- Operator: global guardrail/runway and provider health; period-labeled aggregate trend + model-spend mix; recent activity; existing provider/people/usage controls.
+- Developer: lifetime stat strip explicitly labeled “Lifetime”; separate period-labeled analytics summary/trend/model-spend mix; personal allowance card; quick links/Quickstart; keys and recent activity; period-specific model ranking.
+- Operator: global guardrail/runway and provider health; lifetime totals explicitly labeled; separate period-labeled aggregate trend + model-spend mix; recent activity; existing provider/people/usage controls.
 - Desktop uses paired analytics cards; tablet stacks or uses a balanced two-column grid; phone stacks charts and shortens legends while retaining keyboard access.
 - Preserve all current invite/account, key, provider sync/pricing, model approval/routing, IP/model block, audit, rate-limit, and limit-management behavior.
 

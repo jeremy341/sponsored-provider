@@ -1,19 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import { Copy, Search, X } from "lucide-react";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
+import { Check, Copy, Search } from "lucide-react";
 import type { ModelRecord, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
 import { getLayoutPreviewRole } from "../../lib/preview";
 
-export function ModelCatalogPage({ portalApi }: { portalApi: PortalApi }) {
+const INITIAL_GROUP_SIZE = 6;
+
+export function ModelCatalogPage({ portalApi }: { portalApi: Pick<PortalApi, "listModels"> }) {
   const [models, setModels] = useState<ModelRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
-  const [provider, setProvider] = useState("all");
-  const [capability, setCapability] = useState("all");
-  const [priceSort, setPriceSort] = useState("provider");
-  const [selected, setSelected] = useState<ModelRecord | null>(null);
+  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const [search, setSearch] = useState(searchParams.get("search") ?? "");
+  const [provider, setProvider] = useState(searchParams.get("provider") ?? "all");
+  const [capability, setCapability] = useState(searchParams.get("capability") ?? "all");
+  const [priceSort, setPriceSort] = useState(searchParams.get("sort") ?? "provider");
+  const [expandedProviders, setExpandedProviders] = useState<string[]>([]);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
 
   async function load() {
     if (getLayoutPreviewRole() === "developer") {
@@ -64,49 +69,73 @@ export function ModelCatalogPage({ portalApi }: { portalApi: PortalApi }) {
     return [...result.entries()];
   }, [filtered]);
 
-  return <>
-    <header className="page-header"><div><h1>Models</h1><p>Browse published models and their verified USD rates. API IDs stay provider-scoped.</p></div></header>
-    {error && <div className="inline-notice notice-error" role="alert">{error} <button type="button" className="button button-small" onClick={() => { void load(); }}>Retry</button></div>}
-    <section className="section-block table-section"><div className="toolbar model-catalog-toolbar">
-      <label className="search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Search models</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search providers or models" /></label>
-      <label className="select-filter"><span className="sr-only">Filter by provider</span><select aria-label="Filter by provider" value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">All providers</option>{providers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
-      <label className="select-filter"><span className="sr-only">Filter by capability</span><select aria-label="Filter by capability" value={capability} onChange={(event) => setCapability(event.target.value)}><option value="all">All capabilities</option><option value="text">Text</option><option value="vision">Vision</option></select></label>
-      <label className="select-filter"><span className="sr-only">Sort by input price</span><select aria-label="Sort by input price" value={priceSort} onChange={(event) => setPriceSort(event.target.value)}><option value="provider">Provider order</option><option value="input_asc">Lowest input price</option><option value="input_desc">Highest input price</option></select></label>
-      <span className="count-label">{loading ? "Loading…" : `${filtered.length} models`}</span>
-    </div>
-    {loading ? <div className="loading-line" role="status"><span className="sr-only">Loading models</span></div> : grouped.length ? <div className="developer-model-groups">{grouped.map(([name, entries]) => <section className="developer-model-group" key={name}><h2>{name}</h2><div className="developer-model-grid">{entries.map((model) => <article className="developer-model-row" key={model.id}><div className="developer-model-identity"><strong>{model.displayName ?? model.id.split("::").at(-1)}</strong><span className="mono">{model.id}</span><div className="model-capability-list">{model.capabilities.map((item) => <span className="model-capability" key={item}>{item}</span>)}</div></div><div className="developer-model-rates"><span>{model.pricingVerified ? `${formatUsd(model.inputUsdPerMillion)} / 1M input` : "Input price not verified"}</span><span>{model.pricingVerified ? `${formatUsd(model.outputUsdPerMillion)} / 1M output` : "Output price not verified"}</span><span>{model.pricingVerified ? model.cacheUsdPerMillion == null ? "Cached input not reported" : `${formatUsd(model.cacheUsdPerMillion)} / 1M cached input` : "Cached input price not verified"}</span><small>{model.pricingVerified ? `Verified · ${model.priceSource ?? "price source not reported"}` : "Pricing not verified"}</small></div><button type="button" className="button button-secondary button-small" aria-label={`View details for ${model.providerName} / ${model.displayName ?? model.id.split("::").at(-1)}`} onClick={() => setSelected(model)}>Details</button></article>)}</div></section>)}</div> : <div className="empty-state"><div><h3>{models.length ? "No models match" : "No published models yet"}</h3><p>{models.length ? "Change the filters to see more of your provider catalog." : "Models appear here after the operator verifies their price and publishes them."}</p></div></div>}
-    </section>
-    <ModelDetailDialog model={selected} onClose={() => setSelected(null)} />
-  </>;
-}
+  function filtersQuery() {
+    const params = new URLSearchParams();
 
-function ModelDetailDialog({ model, onClose }: { model: ModelRecord | null; onClose: () => void }) {
-  const [copied, setCopied] = useState(false);
-  const endpoint = `${window.location.origin}/v1`;
+    if (search.trim()) params.set("search", search.trim());
 
-  const snippet = model ? [
-    `curl ${endpoint}/chat/completions \\`,
-    '  -H "Authorization: Bearer YOUR_API_KEY" \\',
-    '  -H "Content-Type: application/json" \\',
-    `  -d '{"model":"${model.id}","messages":[{"role":"user","content":"Hello"}]}'`,
-  ].join("\n") : "";
+    if (provider !== "all") params.set("provider", provider);
 
+    if (capability !== "all") params.set("capability", capability);
 
-  async function copyModelId() {
-    if (!model) return;
+    if (priceSort !== "provider") params.set("sort", priceSort);
 
-    try { await navigator.clipboard.writeText(model.id); setCopied(true); }
-    catch { setCopied(false); }
+    return params.size ? `?${params.toString()}` : "";
   }
 
-  return <Dialog.Root open={Boolean(model)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content model-detail-dialog" aria-describedby="model-detail-description">
-    {model && <><div className="dialog-title-row"><div><Dialog.Title>{model.displayName ?? model.id.split("::").at(-1)}</Dialog.Title><Dialog.Description id="model-detail-description">{model.providerName} · OpenAI-compatible chat model</Dialog.Description></div><Dialog.Close asChild><button type="button" className="icon-button" aria-label="Close model details"><X size={18} /></button></Dialog.Close></div>
-      <div className="model-public-id"><span>API model ID</span><code>{model.id}</code><button type="button" className="button button-quiet button-small" onClick={() => { void copyModelId(); }}><Copy size={14} />{copied ? "Copied" : "Copy ID"}</button></div>
-      <div className="model-price-strip"><div><span>Input</span><strong>{model.pricingVerified ? formatUsd(model.inputUsdPerMillion) : "Price not verified"}</strong><small>{model.pricingVerified ? "USD / 1M tokens" : "Rate unavailable"}</small></div><div><span>Output</span><strong>{model.pricingVerified ? formatUsd(model.outputUsdPerMillion) : "Price not verified"}</strong><small>{model.pricingVerified ? "USD / 1M tokens" : "Rate unavailable"}</small></div>{model.pricingVerified && <div><span>Cached input</span><strong>{model.cacheUsdPerMillion == null ? "Not reported" : formatUsd(model.cacheUsdPerMillion)}</strong><small>{model.cacheUsdPerMillion == null ? "Rate unavailable" : "USD / 1M tokens"}</small></div>}</div>
-      <p className="model-price-provenance">{model.pricingVerified ? `Price source: ${model.priceSource ?? "source not reported"}` : "Pricing is not verified; rates are unavailable."}{model.syncedAt ? ` · Catalog synced ${new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeZone: "Europe/Berlin" }).format(new Date(model.syncedAt))}` : ""}</p>
-      <section className="operator-subsection"><div className="operator-subheading"><h3>OpenAI-compatible example</h3><p>Use your own sponsored API key. Never place it in a public repository.</p></div><pre className="code-block model-example"><code>{snippet}</code></pre></section>
-    </>}
-  </Dialog.Content></Dialog.Portal></Dialog.Root>;
+  async function copyId(modelId: string) {
+    try {
+      await navigator.clipboard.writeText(modelId);
+      setCopiedId(modelId);
+      window.setTimeout(() => setCopiedId((current) => current === modelId ? null : current), 1800);
+    } catch {
+      setCopiedId(null);
+    }
+  }
+
+  function toggleProvider(name: string) {
+    setExpandedProviders((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
+  }
+
+  return <>
+    <header className="page-header"><div><h1>Models</h1><p>Compare published models by provider, capability, and verified USD rates.</p></div></header>
+    {error && <div className="inline-notice notice-error" role="alert">{error} <button type="button" className="button button-small" onClick={() => { void load(); }}>Retry</button></div>}
+    <section className="section-block table-section" aria-label="Published model catalog">
+      <div className="toolbar model-catalog-toolbar">
+        <label className="search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Search models</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search providers or models" /></label>
+        <label className="select-filter"><span className="sr-only">Filter by provider</span><select aria-label="Filter by provider" value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">All providers</option>{providers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
+        <label className="select-filter"><span className="sr-only">Filter by capability</span><select aria-label="Filter by capability" value={capability} onChange={(event) => setCapability(event.target.value)}><option value="all">All capabilities</option><option value="text">Text</option><option value="vision">Vision</option></select></label>
+        <label className="select-filter"><span className="sr-only">Sort by input price</span><select aria-label="Sort by input price" value={priceSort} onChange={(event) => setPriceSort(event.target.value)}><option value="provider">Provider order</option><option value="input_asc">Lowest input price</option><option value="input_desc">Highest input price</option></select></label>
+        <span className="count-label" aria-live="polite">{loading ? "Loading…" : `${filtered.length} models`}</span>
+      </div>
+      {loading ? <div className="loading-line" role="status"><span className="sr-only">Loading models</span></div> : grouped.length ? <div className="developer-model-groups">{grouped.map(([name, entries]) => {
+        const expanded = expandedProviders.includes(name);
+        const visible = expanded ? entries : entries.slice(0, INITIAL_GROUP_SIZE);
+
+        return <section className="developer-model-group" key={name} aria-label={`${name} models`}>
+          <div className="developer-model-group-heading"><h2>{name}</h2><span>{entries.length} {entries.length === 1 ? "model" : "models"}</span></div>
+          <div className="developer-model-grid">{visible.map((model) => {
+            const displayName = model.displayName ?? model.id.split("::").at(-1) ?? model.id;
+            const destination = `/developer/models/${encodeURIComponent(model.id)}${filtersQuery()}`;
+
+            return <article className="developer-model-card" key={model.id} aria-label={displayName}>
+              <div className="developer-model-card-top"><span className="provider-kicker">{model.providerName}</span><span className={`model-state${model.available ? " is-available" : ""}`}>{model.available ? "Available" : "Unavailable"}</span></div>
+              <h3><Link to={destination} state={{ from: `${location.pathname}${filtersQuery()}` }}>{displayName}</Link></h3>
+              <div className="developer-model-public-id"><code title={model.id}>{model.id}</code><button type="button" className="icon-button model-copy-button" aria-label={`Copy model ID ${model.id}`} onClick={() => { void copyId(model.id); }}>{copiedId === model.id ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}</button></div>
+              <div className="model-capability-list">{model.capabilities.map((item) => <span className="model-capability" key={item}>{item}</span>)}</div>
+              <div className="developer-model-card-prices">
+                <div><span>Input</span><strong>{model.pricingVerified ? formatUsd(model.inputUsdPerMillion) : "Price not verified"}</strong><small>USD / 1M tokens</small></div>
+                <div><span>Output</span><strong>{model.pricingVerified ? formatUsd(model.outputUsdPerMillion) : "Price not verified"}</strong><small>USD / 1M tokens</small></div>
+                {model.pricingVerified && model.cacheUsdPerMillion != null && <div className="model-cache-rate"><span>Cached input</span><strong>{formatUsd(model.cacheUsdPerMillion)}</strong><small>USD / 1M tokens</small></div>}
+              </div>
+              <div className="developer-model-card-footer"><span className="pricing-provenance">{model.pricingVerified ? `Verified · ${model.priceSource ?? "source not reported"}` : "Pricing not verified"}</span>{model.activeRouteCount != null && <span className="model-route-count">{model.activeRouteCount} active {model.activeRouteCount === 1 ? "route" : "routes"}</span>}</div>
+            </article>;
+          })}</div>
+          {entries.length > INITIAL_GROUP_SIZE && <button type="button" className="button button-quiet button-small model-group-toggle" aria-expanded={expanded} onClick={() => toggleProvider(name)}>{expanded ? "Show less" : `Show all ${entries.length} models`}</button>}
+        </section>;
+      })}</div> : <div className="empty-state"><div><h3>{models.length ? "No models match" : "No published models yet"}</h3><p>{models.length ? "Change the filters to see more of your provider catalog." : "Models appear here after the operator verifies their price and publishes them."}</p></div></div>}
+    </section>
+  </>;
 }
 
 function compareDecimal(left: string | null, right: string | null): number {

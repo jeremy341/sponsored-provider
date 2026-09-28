@@ -6,8 +6,8 @@ import { api } from "../../lib/api";
 import type { ApiKeyRecord, ModelRecord } from "../../contracts/api";
 
 const models: ModelRecord[] = [
-  { id: "acme::model-a", displayName: "Model A", providerName: "Acme AI", capabilities: ["text"], inputUsdPerMillion: "0.3", outputUsdPerMillion: "1.2", cacheUsdPerMillion: null, pricingVerified: true, priceSource: "verified", approved: true, available: true, syncedAt: null },
-  { id: "acme::model-b", displayName: "Model B", providerName: "Acme AI", capabilities: ["text"], inputUsdPerMillion: "0.5", outputUsdPerMillion: "1.5", cacheUsdPerMillion: null, pricingVerified: true, priceSource: "verified", approved: true, available: true, syncedAt: null },
+  { id: "acme::model-a", displayName: "Model A", providerName: "Acme AI", capabilities: ["text"], inputUsdPerMillion: "0.3", outputUsdPerMillion: "1.2", cacheUsdPerMillion: null, pricingVerified: true, priceSource: "verified", approved: true, available: true, syncedAt: null, activeRouteCount: null },
+  { id: "acme::model-b", displayName: "Model B", providerName: "Acme AI", capabilities: ["text"], inputUsdPerMillion: "0.5", outputUsdPerMillion: "1.5", cacheUsdPerMillion: null, pricingVerified: true, priceSource: "verified", approved: true, available: true, syncedAt: null, activeRouteCount: null },
 ];
 
 const createdKey: ApiKeyRecord = {

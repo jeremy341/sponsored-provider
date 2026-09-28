@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { MemoryRouter } from "react-router-dom";
 import type { ActivityEvent, ModelRecord, PortalApi } from "../../contracts/api";
 import { AllowanceSummary } from "./AllowanceSummary";
 import { ModelCatalogPage } from "./ModelCatalogPage";
@@ -10,7 +11,7 @@ import { ModelAccessPicker } from "./ModelAccessPicker";
 const model: ModelRecord = {
   id: "acme::model-x", displayName: "Model X", upstreamModelId: "private/raw-model-x", providerId: "private-connection-id", providerName: "Acme AI",
   capabilities: ["text", "vision"], inputUsdPerMillion: "0.3", outputUsdPerMillion: "1.2", cacheUsdPerMillion: "0.05",
-  pricingVerified: true, priceSource: "Models.dev · verified", approved: true, available: true, syncedAt: "2026-09-27T08:00:00Z",
+  pricingVerified: true, priceSource: "Models.dev · verified", approved: true, available: true, syncedAt: "2026-09-27T08:00:00Z", activeRouteCount: null,
 };
 
 const event: ActivityEvent = {
@@ -48,35 +49,32 @@ describe("Task 9 developer views", () => {
   });
 
   it("groups the public catalog by provider and shows exact input/output USD rates", async () => {
-    render(<ModelCatalogPage portalApi={api()} />);
+    render(<MemoryRouter><ModelCatalogPage portalApi={api()} /></MemoryRouter>);
     expect(await screen.findByRole("heading", { name: "Acme AI" })).toBeInTheDocument();
-    expect(screen.getByText("$0.30 / 1M input")).toBeInTheDocument();
-    expect(screen.getByText("$1.20 / 1M output")).toBeInTheDocument();
+    expect(screen.getAllByText("$0.30")).toHaveLength(1);
+    expect(screen.getAllByText("$1.20")).toHaveLength(1);
   });
 
-  it("shows a model detail with only verified cache price and public OpenAI example", async () => {
-    render(<ModelCatalogPage portalApi={api()} />);
-    await userEvent.click(await screen.findByRole("button", { name: /View details for Acme AI \/ Model X/i }));
-    expect(screen.getByText("Cached input")).toBeInTheDocument();
-    expect(screen.getByText("$0.05")).toBeInTheDocument();
-    expect(screen.getByText("acme::model-x", { selector: "code" })).toBeInTheDocument();
-    expect(screen.getByText(/"model":\s*"acme::model-x"/)).toBeInTheDocument();
-    expect(screen.queryByText(/context window/i)).not.toBeInTheDocument();
+  it("links a published offer to its provider-scoped public detail URL", async () => {
+    render(<MemoryRouter><ModelCatalogPage portalApi={api()} /></MemoryRouter>);
+    const card = await screen.findByRole("article", { name: "Model X" });
+    expect(within(card).getByRole("link", { name: "Model X" })).toHaveAttribute("href", "/developer/models/acme%3A%3Amodel-x");
+    expect(within(card).getByText("$0.05")).toBeInTheDocument();
     expect(screen.queryByText("private/raw-model-x")).not.toBeInTheDocument();
     expect(screen.queryByText("private-connection-id")).not.toBeInTheDocument();
   });
 
   it("omits unknown cached-input prices instead of implying they are free", async () => {
-    render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, cacheUsdPerMillion: null }]) })} />);
-    await userEvent.click(await screen.findByRole("button", { name: /View details for Acme AI \/ Model X/i }));
-    expect(screen.getByText("Not reported")).toBeInTheDocument();
+    render(<MemoryRouter><ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, cacheUsdPerMillion: null }]) })} /></MemoryRouter>);
+    const card = await screen.findByRole("article", { name: "Model X" });
+    expect(within(card).queryByText(/cached input/i)).not.toBeInTheDocument();
     expect(screen.queryByText("$0.05")).not.toBeInTheDocument();
   });
 
   it("shows an honest empty catalog in preview mode without API errors", async () => {
     window.history.replaceState({}, "", "/developer/models?preview=developer");
     const listModels = vi.fn();
-    render(<ModelCatalogPage portalApi={api({ listModels })} />);
+    render(<MemoryRouter><ModelCatalogPage portalApi={api({ listModels })} /></MemoryRouter>);
     expect(await screen.findByText("No published models yet")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(listModels).not.toHaveBeenCalled();
@@ -84,16 +82,14 @@ describe("Task 9 developer views", () => {
   });
 
   it("does not display a cached-input rate unless pricing is verified", async () => {
-    render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} />);
-    await userEvent.click(await screen.findByRole("button", { name: /View details for Acme AI \/ Model X/i }));
+    render(<MemoryRouter><ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} /></MemoryRouter>);
+    await screen.findByRole("article", { name: "Model X" });
     expect(screen.queryByText("Cached input")).not.toBeInTheDocument();
   });
 
   it("does not present unverified catalog rates as usable prices", async () => {
-    render(<ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} />);
+    render(<MemoryRouter><ModelCatalogPage portalApi={api({ listModels: vi.fn().mockResolvedValue([{ ...model, pricingVerified: false }]) })} /></MemoryRouter>);
     expect(await screen.findByRole("heading", { name: "Acme AI" })).toBeInTheDocument();
-    expect(screen.getAllByText(/price not verified/i).length).toBeGreaterThan(0);
-    await userEvent.click(screen.getByRole("button", { name: /View details for Acme AI \/ Model X/i }));
     expect(screen.getAllByText(/price not verified/i).length).toBeGreaterThan(0);
     expect(screen.queryByText("$0.30")).not.toBeInTheDocument();
     expect(screen.queryByText("$1.20")).not.toBeInTheDocument();

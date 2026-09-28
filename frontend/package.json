@@ -21,7 +21,8 @@
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "react-router-dom": "^7.9.1"
+    "react-router-dom": "^7.9.1",
+    "recharts": "3.10.1"
   },
   "devDependencies": {
     "@oxlint/plugins": "1.85.0",

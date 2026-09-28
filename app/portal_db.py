@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from app.catalog import DiscoveredModel, PriceSuggestion
-from app.periods import period_window
+from app.periods import DashboardWindow, period_window
 from app.routing import public_model_id as format_public_model_id, resolve_offer_routes
 
 
@@ -98,6 +98,7 @@ class OfferRoute:
     price_matches: bool = False
     review_required: bool = False
     connection_label: str | None = None
+    health_status: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -1828,12 +1829,12 @@ class PortalDatabase:
         )
         profile_join = ("LEFT JOIN upstream_profiles profile ON profile.id=connection.legacy_profile_id"
                         if cls._table_exists(conn, "upstream_profiles")
-                        else "LEFT JOIN (SELECT NULL AS id,NULL AS pricing_json) profile ON 0")
+                        else "LEFT JOIN (SELECT NULL AS id,NULL AS pricing_json,NULL AS health_status) profile ON 0")
         rows = conn.execute(f"""SELECT route.*,connection.brand_id connection_brand_id,
                 connection.label connection_label,
                 connection.enabled connection_enabled,connection.mapping_status,
                 brand.identity_status,discovered.active discovery_active,discovered.is_stale discovery_stale,
-                profile.id exact_profile_id,profile.pricing_json
+                profile.id exact_profile_id,profile.pricing_json,COALESCE(profile.health_status,'unknown') health_status
             FROM offer_routes route
             LEFT JOIN provider_connections connection ON connection.id=route.connection_id
             LEFT JOIN provider_brands brand ON brand.id=connection.brand_id
@@ -1856,7 +1857,7 @@ class PortalDatabase:
                 bool(row["connection_enabled"]), row["mapping_status"] or "unmapped",
                 row["identity_status"] or "unknown", bool(row["discovery_active"]),
                 bool(row["discovery_stale"]), confirmed, price_matches,
-                bool(row["review_required"]), row["connection_label"],
+                bool(row["review_required"]), row["connection_label"], row["health_status"],
             ))
         return offer, routes
 
@@ -2119,13 +2120,24 @@ class PortalDatabase:
                 normalized_query += " AND offer.active=1"
             normalized_query += " ORDER BY provider_name,model_id"
             normalized_rows = conn.execute(normalized_query).fetchall() if self._table_exists(conn, "upstream_profiles") else []
+            active_route_counts: dict[str, int] = {}
             if approved_only:
-                normalized_rows = [row for row in normalized_rows
-                                   if (loaded := self._load_offer_routes(conn, row["offer_id"]))
-                                   and resolve_offer_routes(*loaded)]
-        legacy = [dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}"} for row in rows]
+                eligible_rows = []
+                for row in normalized_rows:
+                    loaded = self._load_offer_routes(conn, row["offer_id"])
+                    eligible_routes = resolve_offer_routes(*loaded) if loaded else []
+                    route_count = sum(
+                        route.health_status.lower() not in {"degraded", "error", "unhealthy", "disabled", "offline"}
+                        for route in eligible_routes
+                    )
+                    if route_count:
+                        eligible_rows.append(row)
+                        active_route_counts[row["offer_id"]] = route_count
+                normalized_rows = eligible_rows
+        legacy = [dict(row) | {"capabilities": json.loads(row["capabilities_json"]), "public_model_id": f"{row['provider_id']}::{row['model_id']}", "active_route_count": None} for row in rows]
         normalized = [dict(row) | {"capabilities": json.loads(row["capabilities_json"] or "[]"),
-                                   "public_model_id": format_public_model_id(row["provider_id"], row["model_id"])} for row in normalized_rows]
+                                   "public_model_id": format_public_model_id(row["provider_id"], row["model_id"]),
+                                   "active_route_count": active_route_counts.get(row["offer_id"])} for row in normalized_rows]
         legacy_keys = {(model["provider_id"], model["model_id"]) for model in legacy}
         normalized = [model for model in normalized if (model["migration_ref"], model["model_id"]) not in legacy_keys]
         public_ids = {model["public_model_id"] for model in legacy}
@@ -3005,6 +3017,154 @@ class PortalDatabase:
             "total_tokens": point["total_tokens"] if point["has_tokens"] else None,
             "estimated_spend_usd": self._format_nano_usd(point["cost_nano_usd"]) if point["has_cost"] else None,
         } for point in grouped.values()]
+
+    @staticmethod
+    def _analytics_cost_usd(row: sqlite3.Row) -> Decimal | None:
+        estimate = row["estimated_cost_usd"]
+        nano_amount = row["amount_nano_usd"]
+        if nano_amount is not None:
+            return Decimal(nano_amount).scaleb(-9)
+        if estimate is not None:
+            return Decimal(str(estimate))
+        return None
+
+    @staticmethod
+    def _format_analytics_usd(amount: Decimal | None) -> str | None:
+        if amount is None:
+            return None
+        formatted = format(amount.normalize(), "f")
+        return formatted if formatted not in {"-0", ""} else "0"
+
+    def dashboard_analytics(self, owner_user_id: str | None, window: DashboardWindow) -> dict[str, Any]:
+        clauses = ["julianday(occurred_at)>=julianday(?)", "julianday(occurred_at)<julianday(?)"]
+        args: list[Any] = [window.start_utc.isoformat(), window.end_utc.isoformat()]
+        if owner_user_id is not None:
+            clauses.append("owner_user_id=?")
+            args.append(owner_user_id)
+        query = "SELECT id,brand_id,provider_id,canonical_model_id,model_id,brand_snapshot,provider_name_snapshot,occurred_at,status,input_tokens,output_tokens,total_tokens,amount_nano_usd,estimated_cost_usd FROM portal_usage_events WHERE " + " AND ".join(clauses) + " ORDER BY occurred_at,id"
+        with self.connect() as conn:
+            rows = conn.execute(query, args).fetchall()
+
+        model_groups: dict[tuple[str, str], dict[str, Any]] = {}
+        daily: dict[str, dict[str, Any]] = {}
+        input_tokens = output_tokens = total_tokens = 0
+        has_input = has_output = has_total = False
+        success_count = rejected_count = unpriced_count = 0
+        known_cost_usd = Decimal(0)
+        zone = ZoneInfo(window.timezone_name)
+
+        for row in rows:
+            event_day = datetime.fromisoformat(row["occurred_at"].replace("Z", "+00:00")).astimezone(zone).date().isoformat()
+            point = daily.setdefault(event_day, {
+                "requests": 0, "total_tokens": 0, "has_tokens": False,
+                "cost_usd": Decimal(0), "has_cost": False, "unpriced_requests": 0,
+            })
+            point["requests"] += 1
+            if row["total_tokens"] is not None:
+                point["total_tokens"] += row["total_tokens"]
+                point["has_tokens"] = True
+            if row["input_tokens"] is not None:
+                input_tokens += row["input_tokens"]
+                has_input = True
+            if row["output_tokens"] is not None:
+                output_tokens += row["output_tokens"]
+                has_output = True
+            if row["total_tokens"] is not None:
+                total_tokens += row["total_tokens"]
+                has_total = True
+            if row["status"] in {"ok", "success"}:
+                success_count += 1
+            if row["status"] == "rejected":
+                rejected_count += 1
+
+            cost_usd = self._analytics_cost_usd(row)
+            if cost_usd is not None:
+                known_cost_usd += cost_usd
+                point["cost_usd"] += cost_usd
+                point["has_cost"] = True
+            else:
+                unpriced_count += 1
+                point["unpriced_requests"] += 1
+
+            model_name = row["canonical_model_id"] or row["model_id"]
+            brand_identity = row["brand_id"] or row["provider_id"]
+            if not brand_identity and "::" in row["model_id"]:
+                public_brand, _, public_model = row["model_id"].partition("::")
+                brand_identity = f"public-snapshot:{public_brand}"
+                if model_name == row["model_id"]:
+                    model_name = public_model
+            if not brand_identity:
+                brand_identity = f"unknown-event:{row['id']}"
+            group_key = (brand_identity, model_name)
+            model_record_id = hashlib.sha256(f"{brand_identity}\0{model_name}".encode()).hexdigest()
+            model = model_groups.setdefault(group_key, {
+                "id": model_record_id, "model_id": model_name,
+                "provider_name": row["brand_snapshot"] or row["provider_name_snapshot"],
+                "requests": 0, "total_tokens": 0, "has_tokens": False,
+                "cost_usd": Decimal(0), "has_cost": False,
+            })
+            snapshot_name = row["brand_snapshot"] or row["provider_name_snapshot"]
+            if snapshot_name:
+                model["provider_name"] = snapshot_name
+            model["requests"] += 1
+            if row["total_tokens"] is not None:
+                model["total_tokens"] += row["total_tokens"]
+                model["has_tokens"] = True
+            if cost_usd is not None:
+                model["cost_usd"] += cost_usd
+                model["has_cost"] = True
+
+        local_start = window.start_utc.astimezone(zone).date()
+        local_end = window.end_utc.astimezone(zone).date()
+        series = []
+        day = local_start
+        while day <= local_end:
+            key = day.isoformat()
+            point = daily.get(key)
+            if point is None:
+                day_tokens = 0
+                day_spend = "0"
+            else:
+                day_tokens = point["total_tokens"] if point["has_tokens"] else None
+                day_spend = self._format_analytics_usd(point["cost_usd"]) if point["has_cost"] else None
+            series.append({
+                "day": key,
+                "requests": point["requests"] if point else 0,
+                "unpricedRequests": point["unpriced_requests"] if point else 0,
+                "totalTokens": day_tokens,
+                "estimatedSpendUsd": day_spend,
+            })
+            day += timedelta(days=1)
+
+        model_spend = [{
+            "id": model["id"], "modelId": model["model_id"], "providerName": model["provider_name"] or "Unknown provider",
+            "requests": model["requests"],
+            "totalTokens": model["total_tokens"] if model["has_tokens"] else None,
+            "spendUsd": self._format_analytics_usd(model["cost_usd"]) if model["has_cost"] else None,
+        } for model in model_groups.values()]
+        model_spend.sort(key=lambda model: (
+            -(Decimal(model["spendUsd"]) if model["spendUsd"] is not None else Decimal(-1)),
+            -model["requests"], model["modelId"],
+        ))
+        return {
+            "summary": {
+                "requests": len(rows), "successfulRequests": success_count, "rejectedRequests": rejected_count,
+                "inputTokens": input_tokens if has_input else None,
+                "outputTokens": output_tokens if has_output else None,
+                "totalTokens": total_tokens if has_total else None,
+                "knownSpendUsd": self._format_analytics_usd(known_cost_usd) or "0",
+                "unpricedRequests": unpriced_count,
+            },
+            "series": series,
+            "modelSpend": model_spend,
+            "topModels": [{
+                "model_id": model["modelId"], "provider_name": model["providerName"],
+                "requests": model["requests"], "total_tokens": model["totalTokens"],
+                "estimated_spend_usd": model["spendUsd"],
+            } for model in sorted(model_spend, key=lambda model: (-model["requests"], model["modelId"]))[:8]],
+            "knownSpendUsd": self._format_analytics_usd(known_cost_usd) or "0",
+            "unpricedRequests": unpriced_count,
+        }
 
     def usage_by_model(self, owner_user_id: str | None = None, *, limit: int = 8) -> list[dict[str, Any]]:
         limit = max(1, min(int(limit), 50))

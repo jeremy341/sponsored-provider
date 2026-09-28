@@ -25,6 +25,14 @@ export interface UsagePoint {
   estimated_spend_usd: string | null;
 }
 
+export interface AnalyticsUsagePoint {
+  day: string;
+  requests: number;
+  totalTokens: number | null;
+  estimatedSpendUsd: string | null;
+  unpricedRequests: number;
+}
+
 export interface ModelUsageRecord {
   modelId: string;
   providerName: string;
@@ -83,6 +91,35 @@ export interface ModelRecord {
   approved: boolean;
   available: boolean;
   syncedAt: string | null;
+  activeRouteCount: number | null;
+}
+
+export type DashboardRange = "current_month" | "7d" | "30d" | "90d";
+
+export interface ModelSpendRecord {
+  id: string;
+  modelId: string;
+  providerName: string;
+  requests: number;
+  totalTokens: number | null;
+  spendUsd: string | null;
+}
+
+export interface AnalyticsWindow {
+  range: DashboardRange;
+  from: string;
+  to: string;
+  timezone: "Europe/Berlin";
+}
+
+export interface DashboardAnalytics {
+  window: AnalyticsWindow;
+  summary: UsageSummary | null;
+  series: AnalyticsUsagePoint[];
+  topModels: ModelUsageRecord[];
+  modelSpend: ModelSpendRecord[];
+  knownSpendUsd: string | null;
+  unpricedRequests: number;
 }
 
 export interface PersonRecord {
@@ -306,6 +343,7 @@ export interface DeveloperDashboard {
     reservedNanoUsd?: number;
     limitNanoUsd?: number | null;
   } | null;
+  analytics?: DashboardAnalytics;
 }
 
 export interface OperatorDashboard {
@@ -315,6 +353,7 @@ export interface OperatorDashboard {
   providers: ProviderRecord[];
   recentActivity: ActivityEvent[];
   guardrails: GuardrailSnapshot | null;
+  analytics?: DashboardAnalytics;
 }
 
 export interface CreateKeyInput {
@@ -342,8 +381,8 @@ export interface PortalApi {
   logout(): Promise<void>;
   localLogin(input: { username: string; password: string }): Promise<{ role: "operator" | "developer" }>;
   localSignup(input: { username: string; password: string; invite: string }): Promise<{ role: "operator" | "developer" }>;
-  getDeveloperDashboard(): Promise<DeveloperDashboard>;
-  getOperatorDashboard(): Promise<OperatorDashboard>;
+  getDeveloperDashboard(range?: DashboardRange): Promise<DeveloperDashboard>;
+  getOperatorDashboard(range?: DashboardRange): Promise<OperatorDashboard>;
   listKeys(): Promise<ApiKeyRecord[]>;
   createKey(input: CreateKeyInput): Promise<CreateKeyResult>;
   updateKeyPolicy(keyId: string, input: UpdateKeyPolicyInput): Promise<ApiKeyRecord>;

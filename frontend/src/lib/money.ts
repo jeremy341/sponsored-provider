@@ -24,6 +24,14 @@ export function formatUsd(value: string | null, maxFractionDigits = 9): string {
   return `${formatted}…`;
 }
 
+export function formatUsdExact(value: string | null): string {
+  if (value == null) return "Not reported";
+
+  const fractionDigits = value.split(".")[1]?.length ?? 0;
+
+  return formatUsd(value, Math.max(2, fractionDigits));
+}
+
 export function ratioPercent(value: string | null, total: string | null): number | null {
   const decimal = /^(?:0|[1-9]\d*)(?:\.\d+)?$/;
 
