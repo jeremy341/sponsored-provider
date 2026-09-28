@@ -20,6 +20,7 @@ from .rate_limit import RateLimiter
 from .portal_api import BudgetEstimateUnavailable, PortalService, create_portal_router, estimate_request_budget
 from .portal_db import BudgetModelPolicyChanged, PortalDatabase, ResolvedOffer, UsageFields
 from .openai_compatible import OpenAICompatibleClient, UpstreamConnectFailure
+from .password_auth import hash_password, normalize_username
 
 @asynccontextmanager
 async def lifespan(_app):
@@ -28,6 +29,23 @@ async def lifespan(_app):
     print("Provider service ready")
     legacy_db = Database(settings.database_path, settings.provider_key_pepper, settings.provider_secret_key)
     portal_db = get_portal_db(settings)
+    configured_accounts = []
+    bootstrap_accounts = (
+        (settings.portal_bootstrap_operator_username, settings.portal_bootstrap_operator_password, "operator"),
+        (settings.portal_bootstrap_developer_username, settings.portal_bootstrap_developer_password, "developer"),
+    )
+    for raw_username, raw_password, role in bootstrap_accounts:
+        if not raw_username.strip() or not raw_password:
+            continue
+        portal_db.ensure_local_account(
+            username=raw_username.strip(),
+            normalized_username=normalize_username(raw_username),
+            password_hash=hash_password(raw_password),
+            role=role,
+        )
+        configured_accounts.append(raw_username.strip())
+    if configured_accounts:
+        print(f"Ensured configured local account(s): {', '.join(configured_accounts)}")
     public_origin = settings.portal_public_origin.strip().rstrip("/") or None
     portal_service = PortalService(
         portal_db,
@@ -56,11 +74,16 @@ rate_limiter = RateLimiter()
 @app.middleware("http")
 async def security_headers(request: Request, call_next):
     response = await call_next(request)
+    allow_framing = get_settings().portal_allow_framing
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
+    if not allow_framing:
+        response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    content_security_policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'"
+    if not allow_framing:
+        content_security_policy += "; frame-ancestors 'none'"
+    response.headers["Content-Security-Policy"] = content_security_policy
     if request.url.path.startswith(("/auth/", "/api/", "/v1/")):
         response.headers["Cache-Control"] = "no-store"
     return response

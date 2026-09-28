@@ -31,7 +31,7 @@ def _local_app(tmp_path, *, secure=False, attempts=5):
     )
     app = FastAPI()
     app.include_router(create_portal_router(service))
-    return TestClient(app, base_url="https://portal.example" if secure else "http://portal.example"), repository, token, invite
+    return TestClient(app, base_url="https://portal.example"), repository, token, invite
 
 
 def test_password_hash_uses_argon2id_and_verifies_password():
@@ -169,8 +169,10 @@ def test_login_rotates_existing_session_and_sets_expected_cookie_attributes(tmp_
     cookies = response.headers.get_list("set-cookie")
     session_cookie = next(value for value in cookies if value.startswith("portal_session="))
     csrf_cookie = next(value for value in cookies if value.startswith("portal_csrf="))
-    assert "httponly" in session_cookie.lower() and "secure" in session_cookie.lower() and "samesite=lax" in session_cookie.lower()
+    assert "httponly" in session_cookie.lower() and "secure" in session_cookie.lower()
+    assert "samesite=none" in session_cookie.lower() and "partitioned" in session_cookie.lower()
     assert "secure" in csrf_cookie.lower() and "httponly" not in csrf_cookie.lower()
+    assert "samesite=none" in csrf_cookie.lower() and "partitioned" in csrf_cookie.lower()
 
 
 def test_local_auth_rejects_cross_origin_posts_and_logout_requires_csrf(tmp_path):
@@ -394,3 +396,100 @@ def test_cli_bootstrap_prompts_for_password_without_echoing_it(tmp_path, monkeyp
     output = capsys.readouterr().out
     assert "First operator created." in output
     assert "correct horse battery staple" not in output
+
+
+def test_login_cookies_stay_lax_without_https_public_origin(tmp_path):
+    from fastapi import FastAPI
+    from app.password_auth import normalize_username
+
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    repository.ensure_local_account(
+        username="plain-op",
+        normalized_username=normalize_username("plain-op"),
+        password_hash=hash_password("correct horse battery staple"),
+        role="operator",
+    )
+    service = PortalService(repository, identity=None, cookie_secure=False, public_origin=None)
+    app = FastAPI()
+    app.include_router(create_portal_router(service))
+    client = TestClient(app, base_url="http://portal.example")
+
+    response = client.post("/auth/login", json={"username": "plain-op", "password": "correct horse battery staple"}, headers={"Origin": "http://portal.example"})
+
+    assert response.status_code == 200
+    session_cookie = next(value for value in response.headers.get_list("set-cookie") if value.startswith("portal_session="))
+    assert "samesite=lax" in session_cookie.lower()
+    assert "secure" not in session_cookie.lower()
+    assert "partitioned" not in session_cookie.lower()
+
+
+def test_ensure_local_account_creates_account_and_resets_password_without_changing_role(tmp_path):
+    from app.password_auth import normalize_username
+
+    repository = PortalDatabase(str(tmp_path / "portal.db"), key_pepper="p" * 40)
+    created = repository.ensure_local_account(
+        username="DemoOp",
+        normalized_username=normalize_username("DemoOp"),
+        password_hash=hash_password("first password 1"),
+        role="operator",
+    )
+    assert created["role"] == "operator"
+    assert created["status"] == "active"
+
+    reassigned = repository.ensure_local_account(
+        username="demoop",
+        normalized_username=normalize_username("demoop"),
+        password_hash=hash_password("second password 2"),
+        role="developer",
+    )
+    assert reassigned["id"] == created["id"]
+    assert reassigned["role"] == "operator", "bootstrap must not escalate an existing account's role"
+    assert verify_password("second password 2", reassigned["password_hash"])
+    assert not verify_password("first password 1", reassigned["password_hash"])
+
+
+def test_lifespan_bootstrap_creates_configured_accounts_and_resets_on_restart(tmp_path):
+    from fastapi import FastAPI
+    from app.config import Settings, get_settings
+    from app.main import lifespan
+
+    settings = Settings(
+        database_path=str(tmp_path / "provider.db"),
+        provider_key_pepper="p" * 40,
+        portal_bootstrap_operator_username="BootOp",
+        portal_bootstrap_operator_password="bootstrappass1",
+        portal_bootstrap_developer_username="bootdev",
+        portal_bootstrap_developer_password="bootdevpass1",
+        _env_file=None,
+    )
+    local_app = FastAPI(lifespan=lifespan)
+    local_app.dependency_overrides[get_settings] = lambda: settings
+    headers = {"Origin": "https://portal.example"}
+
+    with TestClient(local_app, base_url="https://portal.example") as client:
+        assert client.post("/auth/login", json={"username": "bootop", "password": "bootstrappass1"}, headers=headers).status_code == 200
+        assert client.post("/auth/login", json={"username": "BOOTDEV", "password": "bootdevpass1"}, headers=headers).status_code == 200
+
+    settings = settings.model_copy(update={"portal_bootstrap_operator_password": "rotated-pass-99"})
+    local_app.dependency_overrides[get_settings] = lambda: settings
+    with TestClient(local_app, base_url="https://portal.example") as client:
+        assert client.post("/auth/login", json={"username": "bootop", "password": "bootstrappass1"}, headers=headers).status_code == 401
+        assert client.post("/auth/login", json={"username": "bootop", "password": "rotated-pass-99"}, headers=headers).status_code == 200
+
+
+def test_security_headers_block_framing_by_default_and_allow_when_configured(monkeypatch):
+    from app import main as app_main
+
+    class StubSettings:
+        portal_allow_framing = False
+
+    monkeypatch.setattr(app_main, "get_settings", lambda: StubSettings())
+    client = TestClient(app_main.app)
+    blocked = client.get("/")
+    assert blocked.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in blocked.headers["content-security-policy"]
+
+    StubSettings.portal_allow_framing = True
+    allowed = client.get("/")
+    assert "x-frame-options" not in allowed.headers
+    assert "frame-ancestors" not in allowed.headers["content-security-policy"]

@@ -101,7 +101,35 @@ class PortalService:
         self.auth_rate_limit_attempts = auth_rate_limit_attempts
         self.auth_rate_limit_window_seconds = auth_rate_limit_window_seconds
         self.public_origin = public_origin.rstrip("/") if public_origin else None
+        # When the portal is served from an HTTPS public origin it is typically
+        # reached through an embedding host (preview proxies, dashboards). Browsers
+        # treat that context as cross-site, so session cookies must opt into
+        # SameSite=None; Secure; Partitioned (CHIPS) to survive at all.
+        self.cookie_partitioned = bool(self.public_origin and self.public_origin.startswith("https://"))
+        self.cookie_secure = cookie_secure or self.cookie_partitioned
         self.models_dev_catalog = models_dev_catalog
+
+    def _apply_cookie(self, response: Response, *, name: str, value: str, httponly: bool, path: str = "/") -> None:
+        if not self.cookie_partitioned:
+            response.set_cookie(name, value, max_age=self.session_ttl_seconds, httponly=httponly, secure=self.cookie_secure, samesite="lax", path=path)
+            return
+        # Starlette only emits Partitioned cookies on Python 3.14+, so build the
+        # header directly to stay version-independent.
+        attributes = [f"{name}={value}", f"Max-Age={self.session_ttl_seconds}", f"Path={path}", "SameSite=None", "Secure"]
+        if httponly:
+            attributes.append("HttpOnly")
+        attributes.append("Partitioned")
+        response.raw_headers.append((b"set-cookie", "; ".join(attributes).encode("latin-1")))
+
+    def _expire_cookie(self, response: Response, *, name: str, httponly: bool, path: str = "/") -> None:
+        if not self.cookie_partitioned:
+            response.delete_cookie(name, path=path, secure=self.cookie_secure, httponly=httponly, samesite="lax")
+            return
+        attributes = [f"{name}=", "Max-Age=0", f"Path={path}", "SameSite=None", "Secure"]
+        if httponly:
+            attributes.append("HttpOnly")
+        attributes.append("Partitioned")
+        response.raw_headers.append((b"set-cookie", "; ".join(attributes).encode("latin-1")))
 
 
 def _public_user(user: dict[str, Any]) -> dict[str, Any]:
@@ -374,8 +402,8 @@ def create_portal_router(service: PortalService) -> APIRouter:
         if previous:
             repo.revoke_session(previous)
         session = repo.create_session(user_id, ttl_seconds=service.session_ttl_seconds)
-        response.set_cookie("portal_session", session.raw_token, max_age=service.session_ttl_seconds, httponly=True, secure=service.cookie_secure, samesite="lax", path="/")
-        response.set_cookie("portal_csrf", session.csrf_token, max_age=service.session_ttl_seconds, httponly=False, secure=service.cookie_secure, samesite="lax", path="/")
+        service._apply_cookie(response, name="portal_session", value=session.raw_token, httponly=True)
+        service._apply_cookie(response, name="portal_csrf", value=session.csrf_token, httponly=False)
 
     @router.post("/auth/signup", status_code=201)
     async def signup(request: Request):
@@ -486,8 +514,8 @@ def create_portal_router(service: PortalService) -> APIRouter:
 
         response = RedirectResponse("/", status_code=303)
         response.delete_cookie("portal_oauth_state", path="/auth/callback", secure=service.cookie_secure, httponly=True, samesite="lax")
-        response.set_cookie("portal_session", session.raw_token, max_age=service.session_ttl_seconds, httponly=True, secure=service.cookie_secure, samesite="lax", path="/")
-        response.set_cookie("portal_csrf", session.csrf_token, max_age=service.session_ttl_seconds, httponly=False, secure=service.cookie_secure, samesite="lax", path="/")
+        service._apply_cookie(response, name="portal_session", value=session.raw_token, httponly=True)
+        service._apply_cookie(response, name="portal_csrf", value=session.csrf_token, httponly=False)
         return response
 
     @router.post("/auth/logout", status_code=204)
@@ -503,8 +531,8 @@ def create_portal_router(service: PortalService) -> APIRouter:
         if portal_session:
             repo.revoke_session(portal_session)
         response = Response(status_code=204)
-        response.delete_cookie("portal_session", path="/", secure=service.cookie_secure, httponly=True, samesite="lax")
-        response.delete_cookie("portal_csrf", path="/", secure=service.cookie_secure, httponly=False, samesite="lax")
+        service._expire_cookie(response, name="portal_session", httponly=True)
+        service._expire_cookie(response, name="portal_csrf", httponly=False)
         return response
 
     @router.get("/api/session")

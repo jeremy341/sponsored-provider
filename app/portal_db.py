@@ -1085,6 +1085,35 @@ class PortalDatabase:
                 raise PermissionError("Only an operator without local credentials can be adopted")
             return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
 
+    def ensure_local_account(self, *, username: str, normalized_username: str, password_hash: str, role: str) -> dict[str, Any]:
+        """Create a local account with the given role, or reset its password.
+
+        Intended only for explicitly configured bootstrap credentials at startup.
+        An existing account keeps its role; only its password (and active status)
+        is aligned with the configured bootstrap values.
+        """
+        if not password_hash:
+            raise ValueError("Password hash is required")
+        if role not in {"operator", "developer"}:
+            raise ValueError("Bootstrap role must be operator or developer")
+        now = _iso()
+        user_id = uuid.uuid4().hex
+        with self.connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute("SELECT id FROM portal_users WHERE username_normalized=?", (normalized_username,)).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE portal_users SET password_hash=?,password_hash_algorithm='argon2id',password_hash_updated_at=?,status='active' WHERE id=?",
+                    (password_hash, now, existing["id"]),
+                )
+                return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (existing["id"],)).fetchone())
+            conn.execute(
+                "INSERT INTO portal_users(id,oidc_subject,email,email_verified,display_name,role,status,created_at,last_login_at,username,username_normalized,password_hash,password_hash_algorithm,password_hash_updated_at) "
+                "VALUES(?,NULL,NULL,0,?,?,'active',?,?,?,?,?,'argon2id',?)",
+                (user_id, username, role, now, now, username, normalized_username, password_hash, now),
+            )
+            return dict(conn.execute("SELECT * FROM portal_users WHERE id=?", (user_id,)).fetchone())
+
     def reset_local_password(self, *, user_id: str, password_hash: str) -> bool:
         if not password_hash:
             raise ValueError("Password hash is required")
