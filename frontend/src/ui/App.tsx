@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
-import * as Tabs from "@radix-ui/react-tabs";
 import {
   Activity, ArrowRight, BadgeCheck, Ban, Boxes, ChartNoAxesColumn,
   ChevronDown, CircleHelp, Clock3, Code2, Copy, ExternalLink, Gauge, KeyRound, LayoutDashboard,
@@ -17,12 +16,14 @@ import { AllowanceDialog } from "./operator/people/AllowanceEditor";
 import { formatUsd, remainingUsd } from "../lib/money";
 import { AllowanceSummary } from "./developer/AllowanceSummary";
 import { ModelCatalogPage as ModelCatalogSurface } from "./developer/ModelCatalogPage";
+import { ModelDetailPage } from "./developer/ModelDetailPage";
+import { DashboardAnalyticsPanel } from "./DashboardAnalyticsPanel";
 import { DeveloperActivityPage as DeveloperActivitySurface } from "./developer/DeveloperActivityPage";
 import { ModelAccessPicker } from "./developer/ModelAccessPicker";
 import { MoneyRunway } from "./operator/MoneyRunway";
 import { count, dateTime, money, tokens } from "../lib/format";
 import type {
-  ActivityEvent, ApiKeyRecord, CreateKeyInput, CreateKeyResult, InviteRecord, ModelRecord, ModelUsageRecord, UsagePoint,
+  ActivityEvent, ApiKeyRecord, CreateKeyInput, CreateKeyResult, DashboardRange, InviteRecord, ModelRecord, ModelUsageRecord,
   PersonRecord, ProviderRecord, UsageSummary,
 } from "../contracts/api";
 
@@ -188,6 +189,7 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
         <Route path="/developer" element={<DeveloperHome />} />
         <Route path="/developer/keys" element={<KeysPage />} />
         <Route path="/developer/models" element={<ModelsPage />} />
+        <Route path="/developer/models/*" element={<ModelDetailPage portalApi={api} />} />
         <Route path="/developer/activity" element={<ActivityPage />} />
         <Route path="/developer/quickstart" element={<QuickstartPage />} />
         <Route path="/operator" element={<OperatorOverview />} />
@@ -207,7 +209,7 @@ function PageHeader({ title, description, action }: { title: string; description
 }
 
 function StatStrip({ usage }: { usage: UsageSummary | null }) {
-  if (!usage) return <EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact />;
+  if (!usage) return <section className="lifetime-summary" aria-label="Lifetime usage"><span className="eyebrow">Lifetime</span><EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact /></section>;
 
   const rows = [
     ["Requests", count(usage.requests), `${count(usage.successfulRequests)} successful · ${count(usage.rejectedRequests)} rejected`],
@@ -216,7 +218,7 @@ function StatStrip({ usage }: { usage: UsageSummary | null }) {
     ["Estimated spend", usage.estimatedSpendUsd == null ? "Not reported" : formatUsd(usage.estimatedSpendUsd), usage.source === "provider_reported" ? "Provider reported" : usage.source === "mixed" ? "Mixed source" : "Gateway estimate"],
   ];
 
-  return <div className="stat-strip" aria-label="Usage summary">{rows.map(([label, value, context], index) => <div className={`stat-cell${index === 0 ? " stat-cell-primary" : ""}`} key={label}><span>{label}</span><strong>{value}</strong><small>{context}</small></div>)}</div>;
+  return <section className="lifetime-summary" aria-label="Lifetime usage"><span className="eyebrow">Lifetime totals</span><div className="stat-strip" aria-label="Lifetime usage summary">{rows.map(([label, value, context], index) => <div className={`stat-cell${index === 0 ? " stat-cell-primary" : ""}`} key={label}><span>{label}</span><strong>{value}</strong><small>{context}</small></div>)}</div></section>;
 }
 
 function DataNotice({ error, onRetry }: { error: string | null; onRetry?: () => void }) {
@@ -229,32 +231,8 @@ function EmptyState({ title, body, action, compact = false }: { title: string; b
   return <div className={`empty-state${compact ? " empty-compact" : ""}`}><span className="empty-mark"><CircleHelp size={19} /></span><div><h3>{title}</h3><p>{body}</p>{action && <div className="empty-action">{action}</div>}</div></div>;
 }
 
-function MetricPanel({ usage, series }: { usage: UsageSummary | null; series: UsagePoint[] }) {
-  const [metric, setMetric] = useState("requests");
-
-  const selected = series.map((point) => ({
-    point,
-    value: metric === "requests" ? point.requests : metric === "tokens" ? point.total_tokens : point.estimated_spend_usd,
-  }));
-
-  const largest = Math.max(0, ...selected.map((entry) => entry.value == null ? 0 : Number(entry.value)));
-  const metricName = metric === "requests" ? "Requests" : metric === "tokens" ? "Tokens" : "Estimated spend";
-
-  function valueText(value: number | string | null) {
-    if (value == null) return "Not reported";
-
-    return metric === "spend" ? formatUsd(String(value)) : count(Number(value));
-  }
-
-  return <section className="section-block"><div className="section-heading"><div><h2>Usage trend</h2><p>{usage ? `Last 14 days · ${metricName} · gateway-reported activity` : "Trend will appear when usage data is available."}</p></div><Tabs.Root value={metric} onValueChange={setMetric} className="metric-tabs"><Tabs.List aria-label="Usage trend unit"><Tabs.Trigger value="requests">Requests</Tabs.Trigger><Tabs.Trigger value="tokens">Tokens</Tabs.Trigger><Tabs.Trigger value="spend">Spend</Tabs.Trigger></Tabs.List></Tabs.Root></div>
-    {selected.length ? <div className="usage-chart-wrap"><div className="usage-bars" role="img" aria-label={`${metricName} over the last ${selected.length} days`}>{selected.map(({ point, value }) => { const height = largest > 0 && value != null ? Math.max(2, Number(value) / largest * 100) : 0;
-
- return <div className="usage-bar-column" key={point.day} title={`${point.day}: ${valueText(value)}`}><span className="usage-bar-value">{valueText(value)}</span><span className="usage-bar" style={{ height: `${height}%` }} /><time dateTime={point.day}>{point.day.slice(5)}</time></div>; })}</div><table className="sr-only"><caption>{metricName} by day</caption><thead><tr><th>Date</th><th>{metricName}</th></tr></thead><tbody>{selected.map(({ point, value }) => <tr key={point.day}><td>{point.day}</td><td>{valueText(value)}</td></tr>)}</tbody></table></div> : <div className="chart-placeholder"><ChartNoAxesColumn size={21} /><span>No usage data yet</span><small>The chart will fill from recorded request events.</small></div>}
-  </section>;
-}
-
 function ModelUsagePanel({ models, loading }: { models: ModelUsageRecord[]; loading: boolean }) {
-  return <section className="section-block model-usage-panel"><div className="section-heading"><div><h2>Models in use</h2><p>Request count, reported tokens, and local cost estimate.</p></div><Boxes size={18} /></div>{loading ? <LoadingLine /> : models.length ? <div className="table-scroll"><table><thead><tr><th>Model</th><th>Provider</th><th>Requests</th><th>Tokens</th><th>Estimated spend</th></tr></thead><tbody>{models.map((model) => <tr key={model.modelId}><td><strong className="mono">{model.modelId}</strong></td><td>{model.providerName}</td><td>{count(model.requests)}</td><td>{model.totalTokens == null ? "Not reported" : count(model.totalTokens)}</td><td>{model.estimatedSpendUsd == null ? "Not reported" : formatUsd(model.estimatedSpendUsd)}</td></tr>)}</tbody></table></div> : <EmptyState title="No model usage yet" body="Real requests will add models here. No sample usage is shown." compact />}</section>;
+  return <section className="section-block model-usage-panel"><div className="section-heading"><div><h2>Lifetime models in use</h2><p>All-time request count, reported tokens, and recorded cost.</p></div><Boxes size={18} /></div>{loading ? <LoadingLine /> : models.length ? <div className="table-scroll"><table><thead><tr><th>Model</th><th>Provider</th><th>Requests</th><th>Tokens</th><th>Estimated spend</th></tr></thead><tbody>{models.map((model) => <tr key={`${model.providerName}\u0000${model.modelId}`}><td><strong className="mono">{model.modelId}</strong></td><td>{model.providerName}</td><td>{count(model.requests)}</td><td>{model.totalTokens == null ? "Not reported" : count(model.totalTokens)}</td><td>{model.estimatedSpendUsd == null ? "Not reported" : formatUsd(model.estimatedSpendUsd)}</td></tr>)}</tbody></table></div> : <EmptyState title="No model usage yet" body="Real requests will add models here. No sample usage is shown." compact />}</section>;
 }
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: React.DependencyList = []): LoadResult<T> {
@@ -301,7 +279,8 @@ function useLoad<T>(loader: () => Promise<T>, dependencies: React.DependencyList
 function LoadingLine() { return <div className="loading-line" role="status"><span className="sr-only">Loading</span></div>; }
 
 function DeveloperHome() {
-  const data = useLoad(api.getDeveloperDashboard);
+  const [range, setRange] = useState<DashboardRange>("current_month");
+  const data = useLoad(() => api.getDeveloperDashboard(range), [range]);
   const models = useLoad(api.listModels);
   const dash = data.value;
 
@@ -318,13 +297,13 @@ function DeveloperHome() {
     <div className="content-grid home-grid">
       <AllowanceSummary allowance={dash?.allowance ?? null} />
       <QuickstartExample models={models.value ?? []} loading={models.loading} />
-      <MetricPanel usage={dash?.usage ?? null} series={dash?.series ?? []} />
       <section className="section-block"><div className="section-heading"><div><h2>API keys</h2><p>Only keys issued to your account.</p></div><NavLink className="text-link" to="/developer/keys">Manage <ArrowRight size={15} /></NavLink></div>
         {data.loading ? <LoadingLine /> : dash?.keys.length ? <KeyTable keys={dash.keys.slice(0, 4)} /> : <EmptyState title="No keys yet" body="Create a key to use approved models through the OpenAI-compatible endpoint." action={<NavLink className="button button-secondary" to="/developer/keys">Create an API key <ArrowRight size={15} /></NavLink>} compact />}
       </section>
       <ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} developer />
       <DeveloperInviteCard />
     </div>
+    <DashboardAnalyticsPanel analytics={dash?.analytics ?? null} range={range} onRangeChange={setRange} loading={data.loading} />
     <ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
   </>;
 }
@@ -595,7 +574,7 @@ function ActivityPage() {
 }
 
 function ActivityFilters({ model, onModelChange, status, onStatusChange }: { model: string; onModelChange: (value: string) => void; status: string; onStatusChange: (value: string) => void }) {
-  return <div className="toolbar activity-toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Filter by model</span><input value={model} onChange={(event) => onModelChange(event.target.value)} placeholder="Filter by model" /></label><label className="select-filter"><span className="sr-only">Filter by result</span><select value={status} onChange={(event) => onStatusChange(event.target.value)}><option value="all">All results</option><option value="success">Success</option><option value="error">Error</option><option value="rejected">Rejected</option><option value="interrupted">Interrupted</option></select><ChevronDown size={14} /></label><span className="filter-note"><SlidersHorizontal size={14} /> User-scoped logs</span></div>;
+  return <div className="toolbar activity-toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Filter by model</span><input value={model} onChange={(event) => onModelChange(event.target.value)} placeholder="Filter by model" /></label><label className="select-filter"><span className="sr-only">Filter by result</span><select value={status} onChange={(event) => onStatusChange(event.target.value)}><option value="all">All results</option><option value="success">Success</option><option value="error">Error</option><option value="rejected">Rejected</option><option value="interrupted">Interrupted</option></select></label><span className="filter-note"><SlidersHorizontal size={14} /> User-scoped logs</span></div>;
 }
 
 function ActivityTable({ rows, developer }: { rows: ActivityEvent[]; developer: boolean }) {
@@ -616,11 +595,13 @@ function QuickstartPage() {
 }
 
 function OperatorOverview() {
-  const data = useLoad(api.getOperatorDashboard);
+  const [range, setRange] = useState<DashboardRange>("current_month");
+  const data = useLoad(() => api.getOperatorDashboard(range), [range]);
   const dash = data.value;
 
   return <><PageHeader title="Overview" description="Protect the shared upstream budget and see what needs attention." action={<span className="period-chip"><Clock3 size={14} /> Current period</span>} /><DataNotice error={data.error} onRetry={data.reload} />{data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} />}
-    <div className="content-grid operator-grid"><section className="section-block runway-block"><div className="section-heading"><div><h2>Global usage runway</h2><p>Local estimate plus active reservations when provided by the API.</p></div><Wallet size={18} /></div><AllowanceRunway allowance={dash?.guardrails ? { usedUsd: dash.guardrails.globalSpendUsedUsd, limitUsd: dash.guardrails.globalSpendCapUsd, period: "global cap", resetAt: null } : null} />{dash?.guardrails && <p className="source-note">Safety reserve: {money(dash.guardrails.safetyReserveUsd)} · {dash.guardrails.globalStopped ? "Global stop is active" : "Global stop is not active"}</p>}</section><MetricPanel usage={dash?.usage ?? null} series={dash?.series ?? []} /><section className="section-block"><div className="section-heading"><div><h2>Provider health</h2><p>Connection and model-catalog freshness.</p></div><NavLink to="/operator/providers" className="text-link">Manage <ArrowRight size={15} /></NavLink></div>{data.loading ? <LoadingLine /> : dash?.providers.length ? <ProviderList providers={dash.providers} /> : <EmptyState title="No provider status available" body="Connectors will be listed after the operator API returns provider health." compact />}</section><ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} /></div><ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} /></>;
+    <div className="content-grid operator-grid"><section className="section-block runway-block"><div className="section-heading"><div><h2>Global usage runway</h2><p>Local estimate plus active reservations when provided by the API.</p></div><Wallet size={18} /></div><AllowanceRunway allowance={dash?.guardrails ? { usedUsd: dash.guardrails.globalSpendUsedUsd, limitUsd: dash.guardrails.globalSpendCapUsd, period: "global cap", resetAt: null } : null} />{dash?.guardrails && <p className="source-note">Safety reserve: {money(dash.guardrails.safetyReserveUsd)} · {dash.guardrails.globalStopped ? "Global stop is active" : "Global stop is not active"}</p>}</section><section className="section-block"><div className="section-heading"><div><h2>Provider health</h2><p>Connection and model-catalog freshness.</p></div><NavLink to="/operator/providers" className="text-link">Manage <ArrowRight size={15} /></NavLink></div>{data.loading ? <LoadingLine /> : dash?.providers.length ? <ProviderList providers={dash.providers} /> : <EmptyState title="No provider status available" body="Connectors will be listed after the operator API returns provider health." compact />}</section><ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} /></div><DashboardAnalyticsPanel analytics={dash?.analytics ?? null} range={range} onRangeChange={setRange} loading={data.loading} /><ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
+  </>;
 }
 
 function PeoplePage() {

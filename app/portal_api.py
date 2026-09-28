@@ -22,6 +22,7 @@ import httpx
 from app.identity import HackClubOIDC
 from app.catalog import ModelsDevCatalog, PriceSuggestion, normalize_openai_models
 from app.portal_db import PortalDatabase
+from app.periods import DashboardRange, dashboard_window
 from app.database import Database
 from app.config import Settings
 from app.openai_compatible import OpenAICompatibleClient
@@ -182,6 +183,8 @@ def _api_model(model: dict[str, Any], *, public_id: bool = False) -> dict[str, A
     }
     if not public_id:
         record.update({"upstreamModelId": model["model_id"], "providerId": model["provider_id"]})
+    else:
+        record["activeRouteCount"] = model.get("active_route_count")
     return record
 
 
@@ -684,8 +687,26 @@ def create_portal_router(service: PortalService) -> APIRouter:
             "p95LatencyMs": latency["p95"], "sampleCount": latency["sample_count"], "period": "all time", "source": "gateway_estimate" if known_cost is not None else "mixed",
         }
 
+    def _dashboard_analytics(owner_id: str | None, range_key: DashboardRange) -> dict[str, Any]:
+        window = dashboard_window(range_key, datetime.now(timezone.utc))
+        analytics = repo.dashboard_analytics(owner_id, window)
+        return {
+            "period": {
+                "key": window.range_key,
+                "from": window.start_utc.isoformat(),
+                "to": window.end_utc.isoformat(),
+                "timezone": window.timezone_name,
+            },
+            "summary": analytics["summary"],
+            "series": analytics["series"],
+            "topModels": [_model_usage_record(item) for item in analytics["topModels"]],
+            "modelSpend": analytics["modelSpend"],
+            "knownSpendUsd": analytics["knownSpendUsd"],
+            "unpricedRequests": analytics["unpricedRequests"],
+        }
+
     @router.get("/api/developer/dashboard")
-    async def developer_dashboard(session=Depends(developer)):
+    async def developer_dashboard(session=Depends(developer), range_key: DashboardRange = Query(default="current_month", alias="range")):
         user, _csrf_hash = session
         keys = repo.list_user_keys(user["id"])
         activity = repo.list_usage(user["id"], limit=8)
@@ -697,6 +718,7 @@ def create_portal_router(service: PortalService) -> APIRouter:
         consumed_nano = used_nano + reserved_nano
         return {
             "usage": summary if summary["requests"] else None,
+            "analytics": _dashboard_analytics(user["id"], range_key),
             "series": repo.usage_timeseries(user["id"], days=14),
             "topModels": [_model_usage_record(item) for item in repo.usage_by_model(user["id"], limit=8)],
             "keys": [_key_record(item) for item in keys],
@@ -713,10 +735,11 @@ def create_portal_router(service: PortalService) -> APIRouter:
         }
 
     @router.get("/api/operator/dashboard")
-    async def operator_dashboard(session=Depends(operator)):
+    async def operator_dashboard(session=Depends(operator), range_key: DashboardRange = Query(default="current_month", alias="range")):
         activity = repo.list_all_usage(limit=8)
         return {
             "usage": _dashboard_usage(None),
+            "analytics": _dashboard_analytics(None, range_key),
             "series": repo.usage_timeseries(days=14),
             "topModels": [_model_usage_record(item) for item in repo.usage_by_model(limit=8)],
             "providers": repo.list_providers(),

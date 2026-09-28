@@ -532,7 +532,7 @@ def test_session_and_dashboard_endpoints_match_portal_contract(tmp_path):
     repository.assign_user_allowance(user["id"], 250_000_000, "weekly", actor["id"])
     dashboard = client.get("/api/developer/dashboard")
     assert dashboard.status_code == 200
-    assert set(dashboard.json()) == {"usage", "series", "topModels", "keys", "recentActivity", "allowance"}
+    assert set(dashboard.json()) == {"usage", "series", "topModels", "analytics", "keys", "recentActivity", "allowance"}
     assert dashboard.json()["allowance"]["limitNanoUsd"] == 250_000_000
     assert dashboard.json()["allowance"]["resetAt"]
     assert client.get("/api/operator/dashboard").status_code == 403
@@ -1406,3 +1406,68 @@ def test_operator_offer_response_lists_manageable_route_ids_without_credentials(
     response = client.get("/api/operator/offers")
     assert "provider-secret-never-return" not in response.text
     assert "encrypted_api_key" not in response.text
+
+
+def test_public_model_exposes_only_count_of_eligible_active_routes(tmp_path):
+    client, repository, legacy, _operator, headers = _operator_app(tmp_path)
+    with respx.mock(assert_all_called=True) as router:
+        router.get("https://93.184.216.34/v1/models").mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "shared-model"}]})
+        )
+        first = _create_provider(client, headers, name="Acme one", brand_slug="acme", connection_label="Private one")
+        second = _create_provider(client, headers, name="Acme two", brand_slug="acme", connection_label="Private two")
+
+    assert first.status_code == second.status_code == 201
+    offer = next(item for item in client.get("/api/operator/offers").json() if item["canonicalModelId"] == "shared-model")
+    _approve_offer_price(client, headers, offer)
+    assert client.patch(f"/api/operator/offers/{offer['id']}/availability", headers=headers, json={"enabled": True}).status_code == 200
+
+    client.cookies.clear()
+    _login(client, repository, "route-count-developer")
+    response = client.get("/api/models")
+
+    assert response.status_code == 200
+    assert response.json()[0]["activeRouteCount"] == 2
+    assert "Private one" not in response.text and "Private two" not in response.text
+    assert first.json()["id"] not in response.text and second.json()["id"] not in response.text
+
+    client.cookies.clear()
+    _login(client, repository, "operator-task4", role="operator")
+    operator_headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    legacy.update_upstream_models(first.json()["id"], ["shared-model"], "degraded")
+    assert len(repository.list_offer_routes(offer["id"])) == 2
+    client.cookies.clear()
+    _login(client, repository, "route-count-developer")
+    assert client.get("/api/models").json()[0]["activeRouteCount"] == 1
+
+    client.cookies.clear()
+    _login(client, repository, "operator-task4", role="operator")
+    operator_headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    legacy.update_upstream_models(second.json()["id"], ["shared-model"], "unhealthy")
+    assert len(repository.list_offer_routes(offer["id"])) == 2
+    client.cookies.clear()
+    _login(client, repository, "route-count-developer")
+    assert client.get("/api/models").json() == []
+
+    client.cookies.clear()
+    _login(client, repository, "operator-task4", role="operator")
+    operator_headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    legacy.update_upstream_models(second.json()["id"], ["shared-model"], "error")
+    client.cookies.clear()
+    _login(client, repository, "route-count-developer")
+    assert client.get("/api/models").json() == []
+
+    client.cookies.clear()
+    _login(client, repository, "operator-task4", role="operator")
+    operator_headers = {"X-CSRF-Token": client.cookies.get("portal_csrf")}
+    legacy.update_upstream_models(first.json()["id"], ["shared-model"], "healthy")
+    legacy.update_upstream_models(second.json()["id"], ["shared-model"], "healthy")
+    public_offer = next(item for item in client.get("/api/operator/offers").json() if item["id"] == offer["id"])
+    disabled = client.patch(
+        f"/api/operator/routes/{public_offer['routes'][0]['id']}/availability",
+        headers=operator_headers, json={"enabled": False},
+    )
+    assert disabled.status_code == 200
+    client.cookies.clear()
+    _login(client, repository, "route-count-developer")
+    assert client.get("/api/models").json()[0]["activeRouteCount"] == 1

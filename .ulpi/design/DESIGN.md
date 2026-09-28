@@ -19,29 +19,36 @@ The usage runway is the signature. It shows the operator’s shared provider cei
 
 ## Color (locked)
 
-| role | OKLCH | hex | use |
-|---|---|---|---|
-| background | 0.18 0.025 255 | #171a24 | page canvas |
-| surface | 0.23 0.028 255 | #222633 | panels |
-| elevated | 0.28 0.032 255 | #2b3040 | menus/dialogs |
-| text | 0.96 0.018 95 | #f1f0ea | primary text |
-| muted | 0.74 0.035 250 | #a7adbd | secondary text |
-| border | 0.40 0.030 255 | #5a6073 | dividers/focus |
-| accent | 0.78 0.17 92 | #e5d75b | budget/action accent |
-| success | 0.70 0.13 155 | #55bd8a | healthy/live |
-| warning | 0.78 0.16 75 | #e8a84c | approaching limit |
-| danger | 0.68 0.18 28 | #ed765e | stopped/error |
-| info | 0.70 0.12 245 | #8ba9ed | informational |
+The signed-in portals use the approved HCAI-inspired zinc/red system. These values are the implementation authority in `frontend/src/ui/styles.css`.
 
-Contrast checked against the locked backgrounds: primary text is 15.20:1 on background and 13.20:1 on surface; muted text is 7.73:1 and 6.72:1; accent is 11.74:1 and 10.20:1. Success, warning, danger, and info are each above 4.5:1 on the background and surface. Semantic colors are always paired with labels/icons, never used as the only status signal.
+| role | hex | use |
+|---|---|---|
+| canvas | #18181b | page background |
+| surface | #27272a | cards, tables, and menus |
+| elevated | #303035 | dialogs and raised surfaces |
+| heading | #fafafa | primary text |
+| body | #d4d4d8 | body and secondary text |
+| quiet | #a1a1aa | tertiary labels |
+| border | #303035 | dividers; pair with fill for control boundaries |
+| strong border | #71717a | inputs and important boundaries |
+| accent | #ec3750 | primary action and selected state |
+| accent hover | #d62640 | hover and pressed primary action |
+| accent text | #ff8495 | small accent text and links |
+| success | #22c55e | healthy/success state |
+| warning | #f59e0b | approaching limit or incomplete coverage |
+| danger | #f87171 | error/stopped text |
+| info | #60a5fa | informational state |
+
+Contrast checks on the approved palette: `#fafafa` is 16.97:1 on canvas and 14.27:1 on surface; `#d4d4d8` is 11.99:1 and 10.08:1; `#ff8495` is 6.37:1 on surface; `#101114` on the accent fill is 4.70:1. Use semantic status colors with text or icons, never as the only status signal. The accent red is for fills, large marks, and selected states; use accent text for small text on dark surfaces.
 
 ## Type (locked)
 
 | role | family | use |
 |---|---|---|
-| display | Cabinet Grotesk, fallback sans-serif | page/view headlines |
-| body | IBM Plex Sans, fallback sans-serif | explanatory text/forms |
-| utility | IBM Plex Mono, fallback monospace | IDs, timestamps, metrics, API values |
+| UI | IBM Plex Sans, self-hosted via Fontsource | headings, body, labels, and controls; local substitute for the reference Google Sans hierarchy |
+| utility | IBM Plex Mono, self-hosted via Fontsource | IDs, timestamps, metrics, and code |
+
+Do not add remote font requests or change the Content Security Policy for typography without a separate approved task.
 
 ## Icons (locked)
 
@@ -50,10 +57,17 @@ Use Lucide icons only. Pair every status icon with text; no icon-only destructiv
 ## Scales (locked)
 
 - spacing: 4px base; 4, 8, 12, 16, 24, 32, 48, 64
-- radius: 4px controls, 8px panels, 12px modal only
+- radius: 8px controls and menus, 16px panels/dialogs, 24px prominent metric strip
 - motion: 120ms feedback, 240ms panel transitions; `cubic-bezier(0.16, 1, 0.3, 1)`; no bounce; honor reduced motion
 - focus: 2px solid accent with 3px offset
 - breakpoints: 640px, 768px, 1024px, 1280px
+
+## Controls and data color
+
+- Native `select` controls share the same zinc surface, strong boundary, 8px radius, dark option palette, and visible accent focus. Filters keep the platform arrow; only the workspace switcher uses a custom chevron wrapper and suppresses the native arrow with matching right padding.
+- Selects have distinct hover and disabled treatments. Disclosure buttons such as provider groups expose `aria-expanded` and have visible hover, pressed, and keyboard-focus states.
+- On phone widths, model-ID copy, catalog show-all, code-language tabs, analytics tabs, and selects have at least 44px hit areas.
+- Charts use Hack Club red with zinc neutrals (`--chart-primary`, `--chart-secondary`, `--chart-tertiary`, `--chart-muted`, `--chart-grid`). Do not reuse warning/error colors as decorative series; semantic success, warning, danger, and info remain reserved for status and coverage meaning.
 
 ## Voice
 
@@ -67,7 +81,7 @@ Technical, direct, non-alarmist. Use short, human wording. Actions use consisten
 
 ## Layout rules
 
-- Use a persistent desktop sidebar with no more than five primary destinations per role. On mobile, use a compact bottom bar plus a `More` sheet.
+- Use the compact top header with no more than five primary destinations per role. On mobile, use the compact header and accessible navigation sheet.
 - Prefer a stat strip, chart with a useful legend, and table-first activity views. Do not stack nested cards or duplicate every figure in multiple widgets.
 - Operator screens can be dense but must keep one primary action per view. Developer screens should foreground the model/key setup and personal allowance.
 - Dense tables use server-side filters and pagination; preserve horizontal swipe on mobile while hiding decorative scrollbars.
