@@ -1,14 +1,10 @@
 import { useEffect, useState } from "react";
 import { BrowserRouter, NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
-import {
-  Activity, ArrowRight, BadgeCheck, Ban, Boxes, ChartNoAxesColumn,
-  ChevronDown, CircleHelp, Clock3, Code2, Copy, ExternalLink, Gauge, KeyRound, LayoutDashboard,
-  LockKeyhole, LogOut, Menu, Network, Plus, Search, Shield, ShieldAlert, SlidersHorizontal,
-  Users, Wallet, X,
-} from "lucide-react";
 import { api, ApiError } from "../lib/api";
 import { getLayoutPreviewRole } from "../lib/preview";
+import { PixelIcon } from "./icons/PixelIcon";
+import type { PixelIconName } from "./icons/pixelIconData";
 import { AuthPage } from "./AuthPage";
 import { ProviderListPage } from "./operator/providers/ProviderListPage";
 import { OperatorUsagePage as OperatorUsageSurface } from "./operator/usage/OperatorUsagePage";
@@ -29,6 +25,8 @@ import type {
 
 type PortalRole = "developer" | "operator";
 
+type NavItem = { path: string; label: string; icon: PixelIconName; end?: boolean };
+
 type SessionState =
   | { status: "loading" }
   | { status: "preview"; role: PortalRole }
@@ -46,20 +44,20 @@ function isPortalRole(value: string): value is PortalRole {
   return value === "developer" || value === "operator";
 }
 
-const developerNav = [
-  { path: "/developer", label: "Home", icon: LayoutDashboard, end: true },
-  { path: "/developer/keys", label: "API keys", icon: KeyRound },
-  { path: "/developer/models", label: "Models", icon: Boxes },
-  { path: "/developer/activity", label: "Activity", icon: Activity },
-  { path: "/developer/quickstart", label: "Quickstart", icon: Code2 },
+const developerNav: NavItem[] = [
+  { path: "/developer", label: "Home", icon: "dashboard", end: true },
+  { path: "/developer/keys", label: "API keys", icon: "key" },
+  { path: "/developer/models", label: "Models", icon: "models" },
+  { path: "/developer/activity", label: "Activity", icon: "activity" },
+  { path: "/developer/quickstart", label: "Quickstart", icon: "code" },
 ];
 
-const operatorNav = [
-  { path: "/operator", label: "Overview", icon: LayoutDashboard, end: true },
-  { path: "/operator/people", label: "People & keys", icon: Users },
-  { path: "/operator/providers", label: "Providers & models", icon: Network },
-  { path: "/operator/usage", label: "Usage", icon: ChartNoAxesColumn },
-  { path: "/operator/guardrails", label: "Guardrails & audit", icon: Shield },
+const operatorNav: NavItem[] = [
+  { path: "/operator", label: "Overview", icon: "dashboard", end: true },
+  { path: "/operator/people", label: "People & keys", icon: "people" },
+  { path: "/operator/providers", label: "Providers & models", icon: "provider" },
+  { path: "/operator/usage", label: "Usage", icon: "usage" },
+  { path: "/operator/guardrails", label: "Guardrails & audit", icon: "shield" },
 ];
 
 function usePortalSession(): SessionState {
@@ -109,9 +107,9 @@ function AuthenticatedPortal() {
   const requestedRole: PortalRole = location.pathname.startsWith("/operator") ? "operator" : "developer";
   const role = session.status === "ready" || session.status === "preview" ? session.role : requestedRole;
 
-  if (session.status === "loading") return <main className="session-screen" aria-live="polite"><div className="session-mark"><Gauge size={20} /> Provider Console</div><p>Checking your session…</p></main>;
+  if (session.status === "loading") return <main className="session-screen" aria-live="polite"><div className="session-mark"><PixelIcon name="brand" size={20} /> Provider Console</div><p>Checking your session…</p></main>;
 
-  if (session.status === "error") return <main className="session-screen"><div className="session-mark"><LockKeyhole size={20} /> Provider Console</div><h1>Sign-in required</h1><p>{session.message}</p><a className="button button-primary" href="/auth/login">Sign in <ArrowRight size={16} /></a></main>;
+  if (session.status === "error") return <main className="session-screen"><div className="session-mark"><PixelIcon name="lock" size={20} /> Provider Console</div><h1>Sign-in required</h1><p>{session.message}</p><a className="button button-primary" href="/auth/login">Sign in <PixelIcon name="arrowRight" size={16} /></a></main>;
 
   if (session.status === "ready" && requestedRole !== session.role) return <Navigate to={session.role === "operator" ? "/operator" : "/developer"} replace />;
 
@@ -140,7 +138,7 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
     <header className="portal-header">
       <div className="portal-header-inner">
         <a className="brand" href={role === "operator" ? "/operator" : "/developer"}>
-          <span className="brand-symbol"><Gauge size={17} strokeWidth={2.2} /></span>
+          <span className="brand-symbol"><PixelIcon name="brand" size={16} /></span>
           <span>provider<span className="brand-dot">.</span></span>
         </a>
         <span className="workspace-context">{title}</span>
@@ -149,41 +147,41 @@ function PortalShell({ role, preview, userName }: { role: PortalRole; preview: b
             <option value="developer">Developer portal</option>
             <option value="operator">Operator portal</option>
           </select>
-          <ChevronDown size={14} aria-hidden="true" />
+          <PixelIcon name="chevronDown" size={16} />
         </div>}
         <nav className="primary-nav" aria-label="Primary navigation">
           {nav.map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `nav-link${isActive ? " is-active" : ""}`}>
-            <item.icon size={17} strokeWidth={1.8} aria-hidden="true" /> <span>{item.label}</span>
+            <PixelIcon name={item.icon} size={16} /> <span>{item.label}</span>
           </NavLink>)}
         </nav>
         <div className="account-row">
           <span className="account-avatar" aria-hidden="true">{userName ? userName.slice(0, 1).toUpperCase() : "P"}</span>
           <span className="account-copy"><strong>{userName ?? "Layout preview"}</strong><small>{preview ? "No account data" : title + " access"}</small></span>
-          {preview ? <CircleHelp size={16} aria-label="Preview only" /> : <button className="icon-button" type="button" aria-label="Sign out" onClick={() => { void api.logout().then(() => window.location.assign("/")).catch(() => window.location.reload()); }}><LogOut size={16} /></button>}
+          {preview ? <PixelIcon name="preview" size={16} decorative={false} label="Preview only" /> : <button className="icon-button" type="button" aria-label="Sign out" onClick={() => { void api.logout().then(() => window.location.assign("/")).catch(() => window.location.reload()); }}><PixelIcon name="logout" size={16} /></button>}
         </div>
       </div>
     </header>
 
     <div className="mobile-topbar">
-      <a className="brand" href={role === "operator" ? "/operator" : "/developer"}><span className="brand-symbol"><Gauge size={17} /></span><span>provider<span className="brand-dot">.</span></span></a>
+      <a className="brand" href={role === "operator" ? "/operator" : "/developer"}><span className="brand-symbol"><PixelIcon name="brand" size={16} /></span><span>provider<span className="brand-dot">.</span></span></a>
       <span className="mobile-workspace-context">{title}{userName ? ` · ${userName}` : ""}</span>
       <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}>
-        <Dialog.Trigger asChild><button type="button" className="icon-button mobile-menu-button" aria-label="Open navigation"><Menu size={19} /></button></Dialog.Trigger>
+        <Dialog.Trigger asChild><button type="button" className="icon-button mobile-menu-button" aria-label="Open navigation"><PixelIcon name="menu" size={20} /></button></Dialog.Trigger>
         <Dialog.Portal>
           <Dialog.Overlay className="dialog-overlay" />
           <Dialog.Content className="mobile-nav-sheet">
-            <div className="sheet-heading"><Dialog.Title>Navigation</Dialog.Title><Dialog.Close asChild><button className="icon-button" aria-label="Close navigation"><X size={18} /></button></Dialog.Close></div>
-            {canSwitchWorkspace && <><label className="portal-label" htmlFor="mobile-portal">Workspace</label><div className="portal-select-wrap"><select id="mobile-portal" value={role} onChange={switchRole}><option value="developer">Developer portal</option><option value="operator">Operator portal</option></select><ChevronDown size={14} /></div></>}
-            <nav className="sheet-nav">{nav.map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `nav-link${isActive ? " is-active" : ""}`}><item.icon size={17} /><span>{item.label}</span></NavLink>)}</nav>
+            <div className="sheet-heading"><Dialog.Title>Navigation</Dialog.Title><Dialog.Close asChild><button className="icon-button" aria-label="Close navigation"><PixelIcon name="close" size={20} /></button></Dialog.Close></div>
+            {canSwitchWorkspace && <><label className="portal-label" htmlFor="mobile-portal">Workspace</label><div className="portal-select-wrap"><select id="mobile-portal" value={role} onChange={switchRole}><option value="developer">Developer portal</option><option value="operator">Operator portal</option></select><PixelIcon name="chevronDown" size={16} /></div></>}
+            <nav className="sheet-nav">{nav.map((item) => <NavLink key={item.path} to={item.path} end={item.end} className={({ isActive }) => `nav-link${isActive ? " is-active" : ""}`}><PixelIcon name={item.icon} size={16} /><span>{item.label}</span></NavLink>)}</nav>
             <Dialog.Description className="muted-copy">{preview ? "Layout preview only. No account data is loaded." : `Signed in as ${userName ?? "your account"}.`}</Dialog.Description>
-            {!preview && <button className="button button-quiet mobile-signout" type="button" onClick={() => { void api.logout().then(() => window.location.assign("/")).catch(() => window.location.reload()); }}><LogOut size={16} /> Sign out</button>}
+            {!preview && <button className="button button-quiet mobile-signout" type="button" onClick={() => { void api.logout().then(() => window.location.assign("/")).catch(() => window.location.reload()); }}><PixelIcon name="logout" size={16} /> Sign out</button>}
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
     </div>
 
     <main id="main-content" className="main-content">
-      {preview && <div className="preview-notice"><CircleHelp size={15} /><span>Layout preview · portal data is not connected, so no usage, keys, or models are shown.</span></div>}
+      {preview && <div className="preview-notice"><PixelIcon name="preview" size={16} /><span>Layout preview · portal data is not connected, so no usage, keys, or models are shown.</span></div>}
       <Routes>
         <Route path="/" element={<Navigate to={role === "operator" ? "/operator" : "/developer"} replace />} />
         <Route path="/developer" element={<DeveloperHome />} />
@@ -208,8 +206,8 @@ function PageHeader({ title, description, action }: { title: string; description
   return <header className="page-header"><div><h1>{title}</h1><p>{description}</p></div>{action && <div className="page-header-action">{action}</div>}</header>;
 }
 
-function StatStrip({ usage }: { usage: UsageSummary | null }) {
-  if (!usage) return <section className="lifetime-summary" aria-label="Lifetime usage"><span className="eyebrow">Lifetime</span><EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact /></section>;
+function StatStrip({ usage, developer = false }: { usage: UsageSummary | null; developer?: boolean }) {
+  if (!usage) return <section className="lifetime-summary" aria-label="Lifetime usage"><span className="eyebrow">Lifetime</span><EmptyState title="Usage data isn’t connected" body="No usage figures are available from the portal API yet. This view will never substitute sample numbers." compact developer={developer} /></section>;
 
   const rows = [
     ["Requests", count(usage.requests), `${count(usage.successfulRequests)} successful · ${count(usage.rejectedRequests)} rejected`],
@@ -221,18 +219,18 @@ function StatStrip({ usage }: { usage: UsageSummary | null }) {
   return <section className="lifetime-summary" aria-label="Lifetime usage"><span className="eyebrow">Lifetime totals</span><div className="stat-strip" aria-label="Lifetime usage summary">{rows.map(([label, value, context], index) => <div className={`stat-cell${index === 0 ? " stat-cell-primary" : ""}`} key={label}><span>{label}</span><strong>{value}</strong><small>{context}</small></div>)}</div></section>;
 }
 
-function DataNotice({ error, onRetry }: { error: string | null; onRetry?: () => void }) {
+function DataNotice({ error, onRetry, developer = false }: { error: string | null; onRetry?: () => void; developer?: boolean }) {
   if (!error) return null;
 
-  return <div className="inline-notice notice-error" role="alert"><ShieldAlert size={17} /><span>{error}</span>{onRetry && <button type="button" className="button button-small" onClick={onRetry}>Retry</button>}</div>;
+  return <div className={`inline-notice notice-error${developer ? " developer-notice" : " operator-notice"}`} role="alert"><PixelIcon name="shield" /><span>{error}</span>{onRetry && <button type="button" className="button button-small" onClick={onRetry}>Retry</button>}</div>;
 }
 
-function EmptyState({ title, body, action, compact = false }: { title: string; body: string; action?: React.ReactNode; compact?: boolean }) {
-  return <div className={`empty-state${compact ? " empty-compact" : ""}`}><span className="empty-mark"><CircleHelp size={19} /></span><div><h3>{title}</h3><p>{body}</p>{action && <div className="empty-action">{action}</div>}</div></div>;
+function EmptyState({ title, body, action, compact = false, developer = false }: { title: string; body: string; action?: React.ReactNode; compact?: boolean; developer?: boolean }) {
+  return <div className={`empty-state${compact ? " empty-compact" : ""}${developer ? " empty-developer" : " empty-operator"}`}><span className="empty-mark"><PixelIcon name="help" size={20} /></span><div><h3>{title}</h3><p>{body}</p>{action && <div className="empty-action">{action}</div>}</div></div>;
 }
 
-function ModelUsagePanel({ models, loading }: { models: ModelUsageRecord[]; loading: boolean }) {
-  return <section className="section-block model-usage-panel"><div className="section-heading"><div><h2>Lifetime models in use</h2><p>All-time request count, reported tokens, and recorded cost.</p></div><Boxes size={18} /></div>{loading ? <LoadingLine /> : models.length ? <div className="table-scroll"><table><thead><tr><th>Model</th><th>Provider</th><th>Requests</th><th>Tokens</th><th>Estimated spend</th></tr></thead><tbody>{models.map((model) => <tr key={`${model.providerName}\u0000${model.modelId}`}><td><strong className="mono">{model.modelId}</strong></td><td>{model.providerName}</td><td>{count(model.requests)}</td><td>{model.totalTokens == null ? "Not reported" : count(model.totalTokens)}</td><td>{model.estimatedSpendUsd == null ? "Not reported" : formatUsd(model.estimatedSpendUsd)}</td></tr>)}</tbody></table></div> : <EmptyState title="No model usage yet" body="Real requests will add models here. No sample usage is shown." compact />}</section>;
+function ModelUsagePanel({ models, loading, developer = false }: { models: ModelUsageRecord[]; loading: boolean; developer?: boolean }) {
+  return <section className="section-block model-usage-panel"><div className="section-heading"><div><h2>Lifetime models in use</h2><p>All-time request count, reported tokens, and recorded cost.</p></div><PixelIcon name="models" size={20} /></div>{loading ? <LoadingLine /> : models.length ? <div className="table-scroll"><table><thead><tr><th>Model</th><th>Provider</th><th>Requests</th><th>Tokens</th><th>Estimated spend</th></tr></thead><tbody>{models.map((model) => <tr key={`${model.providerName}\u0000${model.modelId}`}><td><strong className="mono">{model.modelId}</strong></td><td>{model.providerName}</td><td>{count(model.requests)}</td><td>{model.totalTokens == null ? "Not reported" : count(model.totalTokens)}</td><td>{model.estimatedSpendUsd == null ? "Not reported" : formatUsd(model.estimatedSpendUsd)}</td></tr>)}</tbody></table></div> : <EmptyState title="No model usage yet" body="Real requests will add models here. No sample usage is shown." compact developer={developer} />}</section>;
 }
 
 function useLoad<T>(loader: () => Promise<T>, dependencies: React.DependencyList = []): LoadResult<T> {
@@ -286,25 +284,25 @@ function DeveloperHome() {
 
   return <>
     <PageHeader title="Home" description="Your sponsored usage, approved models, and API keys." />
-    <DataNotice error={data.error} onRetry={data.reload} />
-    {data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} />}
+    <DataNotice error={data.error} onRetry={data.reload} developer />
+    {data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} developer />}
     <nav className="developer-quick-links" aria-label="Developer shortcuts">
-      <NavLink to="/developer/keys"><KeyRound size={16} /> API keys <ArrowRight size={14} /></NavLink>
-      <NavLink to="/developer/models"><Boxes size={16} /> Models <ArrowRight size={14} /></NavLink>
-      <NavLink to="/developer/activity"><Activity size={16} /> Activity <ArrowRight size={14} /></NavLink>
-      <NavLink to="/developer/quickstart"><Code2 size={16} /> Quickstart <ArrowRight size={14} /></NavLink>
+      <NavLink to="/developer/keys"><PixelIcon name="key" /> API keys <PixelIcon name="arrowRight" /></NavLink>
+      <NavLink to="/developer/models"><PixelIcon name="models" /> Models <PixelIcon name="arrowRight" /></NavLink>
+      <NavLink to="/developer/activity"><PixelIcon name="activity" /> Activity <PixelIcon name="arrowRight" /></NavLink>
+      <NavLink to="/developer/quickstart"><PixelIcon name="code" /> Quickstart <PixelIcon name="arrowRight" /></NavLink>
     </nav>
     <div className="content-grid home-grid">
       <AllowanceSummary allowance={dash?.allowance ?? null} />
       <QuickstartExample models={models.value ?? []} loading={models.loading} />
-      <section className="section-block"><div className="section-heading"><div><h2>API keys</h2><p>Only keys issued to your account.</p></div><NavLink className="text-link" to="/developer/keys">Manage <ArrowRight size={15} /></NavLink></div>
-        {data.loading ? <LoadingLine /> : dash?.keys.length ? <KeyTable keys={dash.keys.slice(0, 4)} /> : <EmptyState title="No keys yet" body="Create a key to use approved models through the OpenAI-compatible endpoint." action={<NavLink className="button button-secondary" to="/developer/keys">Create an API key <ArrowRight size={15} /></NavLink>} compact />}
+      <section className="section-block developer-key-preview"><div className="section-heading"><div><h2>API keys</h2><p>Only keys issued to your account.</p></div><NavLink className="text-link" to="/developer/keys">Manage <PixelIcon name="arrowRight" /></NavLink></div>
+        {data.loading ? <LoadingLine /> : dash?.keys.length ? <KeyTable keys={dash.keys.slice(0, 4)} /> : <EmptyState title="No keys yet" body="Create a key to use approved models through the OpenAI-compatible endpoint." action={<NavLink className="button button-secondary" to="/developer/keys">Create an API key <PixelIcon name="arrowRight" /></NavLink>} compact developer />}
       </section>
       <ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} developer />
       <DeveloperInviteCard />
     </div>
     <DashboardAnalyticsPanel analytics={dash?.analytics ?? null} range={range} onRangeChange={setRange} loading={data.loading} />
-    <ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
+    <ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} developer />
   </>;
 }
 
@@ -328,13 +326,13 @@ function QuickstartExample({ models, loading }: { models: ModelRecord[]; loading
   }
 
   return <section className="section-block quickstart-example" aria-labelledby="first-call-title">
-    <div className="section-heading"><div><h2 id="first-call-title">Make your first request</h2><p>OpenAI-compatible endpoint · use your own sponsored key.</p></div><Code2 size={18} aria-hidden="true" /></div>
+    <div className="section-heading"><div><h2 id="first-call-title">Make your first request</h2><p>OpenAI-compatible endpoint · use your own sponsored key.</p></div><PixelIcon name="code" size={20} /></div>
     {available.length > 0 && <label className="quickstart-model"><span>Model ID</span><select aria-label="Quickstart model" value={modelId} onChange={(event) => { setSelectedId(event.target.value); setCopied(false); }}>
       {available.map((model) => <option value={model.id} key={model.id}>{model.providerName} · {model.id}</option>)}
     </select></label>}
     {loading && <LoadingLine />}
     {!loading && available.length === 0 && <p className="field-help">No approved model is available here. Choose an approved model from the catalog before sending a request.</p>}
-    <pre className="code-block"><code>{snippet}</code><button type="button" className="button button-secondary copy-code" onClick={() => { void copyExample(); }}><Copy size={14} />{copied ? "Copied" : "Copy example"}</button></pre>
+    <pre className="code-block"><code>{snippet}</code><button type="button" className="button button-secondary copy-code" onClick={() => { void copyExample(); }}><PixelIcon name="copy" />{copied ? "Copied" : "Copy example"}</button></pre>
     <span className="sr-only" aria-live="polite">{copied ? "Request example copied" : copyError}</span>
     {copyError && <p className="inline-notice notice-error" role="alert">{copyError}</p>}
   </section>;
@@ -368,11 +366,11 @@ export function DeveloperInviteCard() {
   }
 
   return <section className="section-block developer-invite" aria-labelledby="developer-invite-title">
-    <div className="section-heading"><div><h2 id="developer-invite-title">Your invite</h2><p>Each developer can issue one invite. Its safe status remains after the link is gone.</p></div><Users size={18} aria-hidden="true" /></div>
+    <div className="section-heading"><div><h2 id="developer-invite-title">Your invite</h2><p>Each developer can issue one invite. Its safe status remains after the link is gone.</p></div><PixelIcon name="people" size={20} /></div>
     {status.loading ? <LoadingLine /> : status.error ? <p className="inline-notice notice-error" role="alert">{status.error}</p> : token
-      ? <div className="created-key-state"><p className="inline-notice notice-success">Invitation created. The link is shown only now; save it before leaving this page.</p><label className="field-label" htmlFor="developer-invite-link">Invitation link</label><div className="secret-field"><input id="developer-invite-link" className="mono" readOnly value={url} /><button className="button button-secondary" type="button" onClick={() => { void copyInvite(); }}><Copy size={15} />{copied ? "Copied" : "Copy"}</button></div></div>
+      ? <div className="created-key-state"><p className="inline-notice notice-success">Invitation created. The link is shown only now; save it before leaving this page.</p><label className="field-label" htmlFor="developer-invite-link">Invitation link</label><div className="secret-field"><input id="developer-invite-link" className="mono" readOnly value={url} /><button className="button button-secondary" type="button" onClick={() => { void copyInvite(); }}><PixelIcon name="copy" />{copied ? "Copied" : "Copy"}</button></div></div>
       : invite ? <div className="invite-status"><StatusLabel status={invite.status} /><p>Created {dateTime(invite.created_at)} · {invite.uses_count}/{invite.max_uses} uses · expires {dateTime(invite.expires_at)}</p><p>The raw link is not available after leaving this page.</p></div>
-        : status.value?.can_issue ? <button className="button button-secondary" type="button" disabled={creating} onClick={() => { void createInvite(); }}><Plus size={15} />{creating ? "Creating…" : "Create invite"}</button> : <p>Your one-time invite has already been issued.</p>}
+        : status.value?.can_issue ? <button className="button button-secondary" type="button" disabled={creating} onClick={() => { void createInvite(); }}><PixelIcon name="add" />{creating ? "Creating…" : "Create invite"}</button> : <p>Your one-time invite has already been issued.</p>}
     {error && <p className="auth-error" role="alert">{error}</p>}
   </section>;
 }
@@ -427,10 +425,10 @@ function KeysPage() {
   }
 
   return <>
-    <PageHeader title="API keys" description="Create and manage your own access keys." action={<button className="button button-primary" onClick={() => { setCreated(null); setOpen(true); }}><Plus size={16} /> Create key</button>} />
-    <DataNotice error={keys.error ?? actionError} onRetry={keys.reload} />
+    <PageHeader title="API keys" description="Create and manage your own access keys." action={<button className="button button-primary" onClick={() => { setCreated(null); setOpen(true); }}><PixelIcon name="add" /> Create key</button>} />
+    <DataNotice error={keys.error ?? actionError} onRetry={keys.reload} developer />
     <section className="section-block table-section"><div className="section-heading"><div><h2>Your keys</h2><p>Secrets are shown once at creation. Existing secrets cannot be viewed again.</p></div><span className="count-label">{keys.value ? `${keys.value.length} keys` : "— keys"}</span></div>
-      {keys.loading ? <LoadingLine /> : keys.value?.length ? <KeyTable keys={keys.value} onEdit={setEditing} onRevoke={revokeKey} onArchive={archiveKey} /> : <EmptyState title="No API keys found" body="Choose Create key to issue a credential for your coding agent. You can limit approved models, spend, and RPM." />}
+      {keys.loading ? <LoadingLine /> : keys.value?.length ? <KeyTable keys={keys.value} onEdit={setEditing} onRevoke={revokeKey} onArchive={archiveKey} /> : <EmptyState title="No API keys found" body="Choose Create key to issue a credential for your coding agent. You can limit approved models, spend, and RPM." developer />}
     </section>
     <CreateKeyDialog open={open} onOpenChange={setOpen} created={created} onCreated={setCreated} onSaved={keys.reload} />
     <EditKeyDialog keyRecord={editing} onClose={() => setEditing(null)} onSaved={keys.reload} />
@@ -490,7 +488,7 @@ function EditKeyDialog({ keyRecord, onClose, onSaved }: { keyRecord: ApiKeyRecor
     }
   }
 
-  return <Dialog.Root open={Boolean(keyRecord)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="edit-key-description"><div className="dialog-title-row"><div><Dialog.Title>Edit key policy</Dialog.Title><Dialog.Description id="edit-key-description">{keyRecord?.label} · values can only tighten the account-level allowance.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div><form onSubmit={save} className="dialog-form"><ModelAccessPicker models={approvedModels} loading={models.loading} error={models.error} onRetry={models.reload} mode={mode} selectedModelIds={selectedModels} onModeChange={setMode} onSelectedChange={setSelectedModels} /><div className="form-two-col"><label><span className="field-label">Spend cap (USD)</span><input type="number" inputMode="decimal" min="0.000000001" step="any" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit allowance" /></label><label><span className="field-label">Reset period</span><select value={spendPeriod ?? "week"} disabled={!spendCap} onChange={(event) => { const period = event.target.value; setSpendPeriod(period === "day" || period === "week" || period === "month" || period === "lifetime" ? period : "week"); }}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></label></div><label><span className="field-label">Requests per minute</span><input type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Inherit user limit" /></label>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save policy"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root open={Boolean(keyRecord)} onOpenChange={(open) => { if (!open) onClose(); }}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="edit-key-description"><div className="dialog-title-row"><div><Dialog.Title>Edit key policy</Dialog.Title><Dialog.Description id="edit-key-description">{keyRecord?.label} · values can only tighten the account-level allowance.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><PixelIcon name="close" /></button></Dialog.Close></div><form onSubmit={save} className="dialog-form"><ModelAccessPicker models={approvedModels} loading={models.loading} error={models.error} onRetry={models.reload} mode={mode} selectedModelIds={selectedModels} onModeChange={setMode} onSelectedChange={setSelectedModels} /><div className="form-two-col"><label><span className="field-label">Spend cap (USD)</span><input type="number" inputMode="decimal" min="0.000000001" step="any" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit allowance" /></label><label><span className="field-label">Reset period</span><select value={spendPeriod ?? "week"} disabled={!spendCap} onChange={(event) => { const period = event.target.value; setSpendPeriod(period === "day" || period === "week" || period === "month" || period === "lifetime" ? period : "week"); }}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></label></div><label><span className="field-label">Requests per minute</span><input type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Inherit user limit" /></label>{error && <div className="inline-notice notice-error" role="alert"><PixelIcon name="shield" /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save policy"}</button></div></form></Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
 
 export function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSaved }: { open: boolean; onOpenChange: (open: boolean) => void; created: CreateKeyResult | null; onCreated: (result: CreateKeyResult | null) => void; onSaved: () => void }) {
@@ -552,13 +550,13 @@ export function CreateKeyDialog({ open, onOpenChange, created, onCreated, onSave
 
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="create-key-description">
-      <div className="dialog-title-row"><div><Dialog.Title>{created ? "Your key is ready" : "Create API key"}</Dialog.Title><Dialog.Description id="create-key-description">{created ? "Copy this secret now. It will not be shown again." : "The server enforces your account allowance and approved model policy."}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div>
-      {created ? <div className="created-key-state"><div className="inline-notice notice-success"><BadgeCheck size={17} /><span>Key created. The secret is visible only in this dialog.</span></div><label className="field-label" htmlFor="created-secret">API key</label><div className="secret-field"><input id="created-secret" className="mono" readOnly value={created.secret} autoComplete="off" /><button type="button" className="button button-secondary" onClick={copySecret}><Copy size={15} />{copied ? "Copied" : "Copy"}</button></div><p className="field-help">Close this dialog when you’ve stored it securely. Never commit it to a repository.</p><div className="dialog-actions"><Dialog.Close asChild><button className="button button-primary">Done</button></Dialog.Close></div></div> : <form onSubmit={submit} className="dialog-form">
+      <div className="dialog-title-row"><div><Dialog.Title>{created ? "Your key is ready" : "Create API key"}</Dialog.Title><Dialog.Description id="create-key-description">{created ? "Copy this secret now. It will not be shown again." : "The server enforces your account allowance and approved model policy."}</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><PixelIcon name="close" /></button></Dialog.Close></div>
+      {created ? <div className="created-key-state"><div className="inline-notice notice-success"><PixelIcon name="confirm" /><span>Key created. The secret is visible only in this dialog.</span></div><label className="field-label" htmlFor="created-secret">API key</label><div className="secret-field"><input id="created-secret" className="mono" readOnly value={created.secret} autoComplete="off" /><button type="button" className="button button-secondary" onClick={copySecret}><PixelIcon name={copied ? "confirm" : "copy"} />{copied ? "Copied" : "Copy"}</button></div><p className="field-help">Close this dialog when you’ve stored it securely. Never commit it to a repository.</p><div className="dialog-actions"><Dialog.Close asChild><button className="button button-primary">Done</button></Dialog.Close></div></div> : <form onSubmit={submit} className="dialog-form">
         <label className="field-label" htmlFor="key-label">Key name</label><input id="key-label" required maxLength={64} autoFocus value={label} onChange={(event) => setLabel(event.target.value)} placeholder="e.g. OpenCode laptop" />
         <ModelAccessPicker models={approvedModels} loading={models.loading} error={models.error} onRetry={models.reload} mode={mode} selectedModelIds={selectedModels} onModeChange={setMode} onSelectedChange={setSelectedModels} />
         <div className="form-two-col"><div><label className="field-label" htmlFor="spend-cap">Optional spend cap (USD)</label><input id="spend-cap" type="number" inputMode="decimal" min="0.000000001" step="any" value={spendCap} onChange={(event) => setSpendCap(event.target.value)} placeholder="Inherit account allowance" /><p className="field-help">A key cap can only tighten your account allowance. Minimum: $0.000000001.</p></div><div><label className="field-label" htmlFor="spend-period">Cap reset</label><select id="spend-period" value={spendPeriod} onChange={(event) => setSpendPeriod(event.target.value)} disabled={!spendCap}><option value="day">Daily</option><option value="week">Weekly</option><option value="month">Monthly</option><option value="lifetime">Lifetime</option></select></div></div>
         <div><label className="field-label" htmlFor="key-rpm">Optional requests per minute</label><input id="key-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Inherit account limit" /><p className="field-help">A per-key RPM can only be lower than your user-wide limit.</p></div>
-        {error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}
+        {error && <div className="inline-notice notice-error" role="alert"><PixelIcon name="shield" /><span>{error}</span></div>}
         <div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Creating…" : "Create key"}</button></div>
       </form>}
     </Dialog.Content></Dialog.Portal>
@@ -574,7 +572,7 @@ function ActivityPage() {
 }
 
 function ActivityFilters({ model, onModelChange, status, onStatusChange }: { model: string; onModelChange: (value: string) => void; status: string; onStatusChange: (value: string) => void }) {
-  return <div className="toolbar activity-toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Filter by model</span><input value={model} onChange={(event) => onModelChange(event.target.value)} placeholder="Filter by model" /></label><label className="select-filter"><span className="sr-only">Filter by result</span><select value={status} onChange={(event) => onStatusChange(event.target.value)}><option value="all">All results</option><option value="success">Success</option><option value="error">Error</option><option value="rejected">Rejected</option><option value="interrupted">Interrupted</option></select></label><span className="filter-note"><SlidersHorizontal size={14} /> User-scoped logs</span></div>;
+  return <div className="toolbar activity-toolbar"><label className="search-field"><PixelIcon name="search" /><span className="sr-only">Filter by model</span><input value={model} onChange={(event) => onModelChange(event.target.value)} placeholder="Filter by model" /></label><label className="select-filter"><span className="sr-only">Filter by result</span><select value={status} onChange={(event) => onStatusChange(event.target.value)}><option value="all">All results</option><option value="success">Success</option><option value="error">Error</option><option value="rejected">Rejected</option><option value="interrupted">Interrupted</option></select></label><span className="filter-note"><PixelIcon name="filter" /> User-scoped logs</span></div>;
 }
 
 function ActivityTable({ rows, developer }: { rows: ActivityEvent[]; developer: boolean }) {
@@ -582,8 +580,8 @@ function ActivityTable({ rows, developer }: { rows: ActivityEvent[]; developer: 
 }
 
 function ActivitySection({ rows, loading, error, developer = false }: { rows: ActivityEvent[]; loading: boolean; error: string | null; developer?: boolean }) {
-  return <section className="section-block activity-preview"><div className="section-heading"><div><h2>Recent activity</h2><p>{developer ? "Your latest requests" : "Latest gateway requests"}</p></div><NavLink to={developer ? "/developer/activity" : "/operator/usage"} className="text-link">View activity <ArrowRight size={15} /></NavLink></div>
-    {loading ? <LoadingLine /> : rows.length ? <ActivityTable rows={rows.slice(0, 6)} developer={developer} /> : <EmptyState title={error ? "Activity unavailable" : "No recent activity"} body={error ? "The API could not load activity records." : "No request events have been returned for this period."} compact />}
+  return <section className="section-block activity-preview"><div className="section-heading"><div><h2>Recent activity</h2><p>{developer ? "Your latest requests" : "Latest gateway requests"}</p></div><NavLink to={developer ? "/developer/activity" : "/operator/usage"} className="text-link">View activity <PixelIcon name="arrowRight" /></NavLink></div>
+    {loading ? <LoadingLine /> : rows.length ? <ActivityTable rows={rows.slice(0, 6)} developer={developer} /> : <EmptyState title={error ? "Activity unavailable" : "No recent activity"} body={error ? "The API could not load activity records." : "No request events have been returned for this period."} compact developer={developer} />}
   </section>;
 }
 
@@ -591,7 +589,7 @@ function QuickstartPage() {
   const models = useLoad(api.listModels);
   const base = `${window.location.origin}/v1`;
 
-  return <><PageHeader title="Quickstart" description="Use your sponsored key with any OpenAI-compatible client." /><div className="quickstart-layout"><div><ol className="steps-list"><li><span>1</span><div><strong>Create an API key</strong><p>Choose all approved models or pick a subset. The secret is shown once.</p><NavLink className="text-link" to="/developer/keys">Open API keys <ArrowRight size={14} /></NavLink></div></li><li><span>2</span><div><strong>Set your client endpoint</strong><p>Base URL for compatible clients:</p><code className="endpoint-value">{base}</code></div></li><li><span>3</span><div><strong>Choose an approved model</strong><p>Select a model from the published catalog before you send a request.</p><NavLink className="text-link" to="/developer/models">Browse models <ArrowRight size={14} /></NavLink></div></li></ol><QuickstartExample models={models.value ?? []} loading={models.loading} /></div><aside className="quickstart-aside"><section className="section-block"><h2>What gets tracked</h2><p>Request totals, reported token counts, latency, result, and estimated or provider-reported cost.</p><p>Prompts and completions are not stored.</p></section><section className="section-block"><h2>Usage truth</h2><p>Missing provider token or cost data is shown as “Not reported,” never as zero or free.</p></section><a className="text-link" href="/docs" target="_blank" rel="noreferrer">API documentation <ExternalLink size={14} /></a></aside></div></>;
+  return <><PageHeader title="Quickstart" description="Use your sponsored key with any OpenAI-compatible client." /><div className="quickstart-layout"><div><ol className="steps-list"><li><span>1</span><div><strong>Create an API key</strong><p>Choose all approved models or pick a subset. The secret is shown once.</p><NavLink className="text-link" to="/developer/keys">Open API keys <PixelIcon name="arrowRight" /></NavLink></div></li><li><span>2</span><div><strong>Set your client endpoint</strong><p>Base URL for compatible clients:</p><code className="endpoint-value">{base}</code></div></li><li><span>3</span><div><strong>Choose an approved model</strong><p>Select a model from the published catalog before you send a request.</p><NavLink className="text-link" to="/developer/models">Browse models <PixelIcon name="arrowRight" /></NavLink></div></li></ol><QuickstartExample models={models.value ?? []} loading={models.loading} /></div><aside className="quickstart-aside"><section className="section-block"><h2>What gets tracked</h2><p>Request totals, reported token counts, latency, result, and estimated or provider-reported cost.</p><p>Prompts and completions are not stored.</p></section><section className="section-block"><h2>Usage truth</h2><p>Missing provider token or cost data is shown as “Not reported,” never as zero or free.</p></section><a className="text-link" href="/docs" target="_blank" rel="noreferrer">API documentation <PixelIcon name="arrowRight" /></a></aside></div></>;
 }
 
 function OperatorOverview() {
@@ -599,8 +597,8 @@ function OperatorOverview() {
   const data = useLoad(() => api.getOperatorDashboard(range), [range]);
   const dash = data.value;
 
-  return <><PageHeader title="Overview" description="Protect the shared upstream budget and see what needs attention." action={<span className="period-chip"><Clock3 size={14} /> Current period</span>} /><DataNotice error={data.error} onRetry={data.reload} />{data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} />}
-    <div className="content-grid operator-grid"><section className="section-block runway-block"><div className="section-heading"><div><h2>Global usage runway</h2><p>Local estimate plus active reservations when provided by the API.</p></div><Wallet size={18} /></div><AllowanceRunway allowance={dash?.guardrails ? { usedUsd: dash.guardrails.globalSpendUsedUsd, limitUsd: dash.guardrails.globalSpendCapUsd, period: "global cap", resetAt: null } : null} />{dash?.guardrails && <p className="source-note">Safety reserve: {money(dash.guardrails.safetyReserveUsd)} · {dash.guardrails.globalStopped ? "Global stop is active" : "Global stop is not active"}</p>}</section><section className="section-block"><div className="section-heading"><div><h2>Provider health</h2><p>Connection and model-catalog freshness.</p></div><NavLink to="/operator/providers" className="text-link">Manage <ArrowRight size={15} /></NavLink></div>{data.loading ? <LoadingLine /> : dash?.providers.length ? <ProviderList providers={dash.providers} /> : <EmptyState title="No provider status available" body="Connectors will be listed after the operator API returns provider health." compact />}</section><ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} /></div><DashboardAnalyticsPanel analytics={dash?.analytics ?? null} range={range} onRangeChange={setRange} loading={data.loading} /><ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
+  return <><PageHeader title="Overview" description="Protect the shared upstream budget and see what needs attention." action={<span className="period-chip"><PixelIcon name="calendar" /> Current period</span>} /><DataNotice error={data.error} onRetry={data.reload} />{data.loading ? <LoadingLine /> : <StatStrip usage={dash?.usage ?? null} />}
+    <div className="content-grid operator-grid"><section className="section-block runway-block"><div className="section-heading"><div><h2>Global usage runway</h2><p>Local estimate plus active reservations when provided by the API.</p></div><PixelIcon name="usage" size={20} /></div><AllowanceRunway allowance={dash?.guardrails ? { usedUsd: dash.guardrails.globalSpendUsedUsd, limitUsd: dash.guardrails.globalSpendCapUsd, period: "global cap", resetAt: null } : null} />{dash?.guardrails && <p className="source-note">Safety reserve: {money(dash.guardrails.safetyReserveUsd)} · {dash.guardrails.globalStopped ? "Global stop is active" : "Global stop is not active"}</p>}</section><section className="section-block"><div className="section-heading"><div><h2>Provider health</h2><p>Connection and model-catalog freshness.</p></div><NavLink to="/operator/providers" className="text-link">Manage <PixelIcon name="arrowRight" /></NavLink></div>{data.loading ? <LoadingLine /> : dash?.providers.length ? <ProviderList providers={dash.providers} /> : <EmptyState title="No provider status available" body="Connectors will be listed after the operator API returns provider health." compact />}</section><ActivitySection rows={dash?.recentActivity ?? []} loading={data.loading} error={data.error} /></div><DashboardAnalyticsPanel analytics={dash?.analytics ?? null} range={range} onRangeChange={setRange} loading={data.loading} /><ModelUsagePanel models={dash?.topModels ?? []} loading={data.loading} />
   </>;
 }
 
@@ -627,7 +625,7 @@ function PeoplePage() {
     }
   }
 
-  return <><PageHeader title="People & keys" description="Manage invitations, account allowances, and user-owned keys." action={<button className="button button-primary" onClick={() => { setCreatedInvite(null); setInviteOpen(true); }}><Plus size={16} /> Invite person</button>} /><DataNotice error={people.error ?? peopleActionError} onRetry={people.reload} /><section className="section-block table-section"><div className="toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Search people</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people" /></label><span className="count-label">{people.value ? `${filtered.length} people` : "— people"}</span></div>{people.loading ? <LoadingLine /> : filtered.length ? <PeopleTable people={filtered} onEditPolicy={setPolicyPerson} onToggle={togglePerson} /> : <EmptyState title="No people returned" body="Create an invitation, then assign an allowance after the developer signs in." />}</section><InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} token={createdInvite} setToken={setCreatedInvite} /><AllowanceDialog person={policyPerson} onClose={() => setPolicyPerson(null)} onSave={(input) => api.updatePersonPolicy(policyPerson!.id, input).then(people.reload)} /></>;
+  return <><PageHeader title="People & keys" description="Manage invitations, account allowances, and user-owned keys." action={<button className="button button-primary" onClick={() => { setCreatedInvite(null); setInviteOpen(true); }}><PixelIcon name="add" /> Invite person</button>} /><DataNotice error={people.error ?? peopleActionError} onRetry={people.reload} /><section className="section-block table-section"><div className="toolbar"><label className="search-field"><PixelIcon name="search" /><span className="sr-only">Search people</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search people" /></label><span className="count-label">{people.value ? `${filtered.length} people` : "— people"}</span></div>{people.loading ? <LoadingLine /> : filtered.length ? <PeopleTable people={filtered} onEditPolicy={setPolicyPerson} onToggle={togglePerson} /> : <EmptyState title="No people returned" body="Create an invitation, then assign an allowance after the developer signs in." />}</section><InviteDialog open={inviteOpen} onOpenChange={setInviteOpen} token={createdInvite} setToken={setCreatedInvite} /><AllowanceDialog person={policyPerson} onClose={() => setPolicyPerson(null)} onSave={(input) => api.updatePersonPolicy(policyPerson!.id, input).then(people.reload)} /></>;
 }
 
 export function InviteDialog({ open, onOpenChange, token, setToken }: { open: boolean; onOpenChange: (open: boolean) => void; token: string | null; setToken: (token: string | null) => void }) {
@@ -682,7 +680,7 @@ export function InviteDialog({ open, onOpenChange, token, setToken }: { open: bo
     } catch { setError("The invitation could not be revoked."); }
   }
 
-  return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content invite-manager" aria-describedby="invite-dialog-description"><div className="dialog-title-row"><div><Dialog.Title>Invitations</Dialog.Title><Dialog.Description id="invite-dialog-description">Create local account links and manage existing invitations.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close invitations"><X size={18} /></button></Dialog.Close></div>{token ? <div className="created-key-state"><div className="inline-notice notice-success"><BadgeCheck size={17} /><span>Invitation created. This raw link is visible only once. Copy it before closing.</span></div><label className="field-label" htmlFor="invite-link">Invitation link</label><div className="secret-field"><input id="invite-link" className="mono" readOnly value={inviteUrl} /><button type="button" className="button button-secondary" onClick={() => { void copyInvite(); }}><Copy size={15} />{copied ? "Copied" : "Copy"}</button></div><div className="dialog-actions"><button type="button" className="button button-primary" onClick={() => setToken(null)}>Create another</button><Dialog.Close asChild><button type="button" className="button button-quiet">Done</button></Dialog.Close></div></div> : <form className="dialog-form invite-form" onSubmit={(event) => { void submit(event); }}><div className="form-two-col"><div><label className="field-label" htmlFor="invite-max-uses">Maximum uses</label><input id="invite-max-uses" type="number" min="1" max="1000" step="1" required value={maxUses} onChange={(event) => setMaxUses(event.target.value)} /></div><div><label className="field-label" htmlFor="invite-expiry">Expires in (days)</label><input id="invite-expiry" type="number" min="1" max="30" step="1" required value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} /></div></div><p className="field-help">Defaults: five uses and seven days. Invite links are not bound to an email.</p>{error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Close</button></Dialog.Close><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Creating…" : "Create invite"}</button></div></form>}
+  return <Dialog.Root open={open} onOpenChange={onOpenChange}><Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content invite-manager" aria-describedby="invite-dialog-description"><div className="dialog-title-row"><div><Dialog.Title>Invitations</Dialog.Title><Dialog.Description id="invite-dialog-description">Create local account links and manage existing invitations.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close invitations"><PixelIcon name="close" /></button></Dialog.Close></div>{token ? <div className="created-key-state"><div className="inline-notice notice-success"><PixelIcon name="confirm" /><span>Invitation created. This raw link is visible only once. Copy it before closing.</span></div><label className="field-label" htmlFor="invite-link">Invitation link</label><div className="secret-field"><input id="invite-link" className="mono" readOnly value={inviteUrl} /><button type="button" className="button button-secondary" onClick={() => { void copyInvite(); }}><PixelIcon name="copy" />{copied ? "Copied" : "Copy"}</button></div><div className="dialog-actions"><button type="button" className="button button-primary" onClick={() => setToken(null)}>Create another</button><Dialog.Close asChild><button type="button" className="button button-quiet">Done</button></Dialog.Close></div></div> : <form className="dialog-form invite-form" onSubmit={(event) => { void submit(event); }}><div className="form-two-col"><div><label className="field-label" htmlFor="invite-max-uses">Maximum uses</label><input id="invite-max-uses" type="number" min="1" max="1000" step="1" required value={maxUses} onChange={(event) => setMaxUses(event.target.value)} /></div><div><label className="field-label" htmlFor="invite-expiry">Expires in (days)</label><input id="invite-expiry" type="number" min="1" max="30" step="1" required value={expiryDays} onChange={(event) => setExpiryDays(event.target.value)} /></div></div><p className="field-help">Defaults: five uses and seven days. Invite links are not bound to an email.</p>{error && <div className="inline-notice notice-error" role="alert"><PixelIcon name="shield" /><span>{error}</span></div>}<div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Close</button></Dialog.Close><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Creating…" : "Create invite"}</button></div></form>}
       <section className="invite-list" aria-labelledby="invite-list-title"><h3 id="invite-list-title">Existing invites</h3>{loadingInvites ? <LoadingLine /> : invites.length ? invites.map((invite) => <div className="invite-row" key={invite.id}><div><strong>{invite.email_bound ? "Email-bound legacy invite" : "Local account invite"}</strong><p>{invite.uses_count}/{invite.max_uses} uses · expires {dateTime(invite.expires_at)}</p>{invite.email_bound && <small>This invite cannot be used for local signup. Revoke it and create a replacement.</small>}</div><div className="invite-row-actions"><StatusLabel status={invite.status} />{invite.status === "active" && <button className="button button-quiet button-small" type="button" onClick={() => { void revoke(invite); }}>Revoke</button>}</div></div>) : <p className="field-help">No invitations have been created.</p>}</section>
     </Dialog.Content></Dialog.Portal></Dialog.Root>;
 }
@@ -741,7 +739,7 @@ export function PersonPolicyDialog({ person, onClose, onSaved }: { person: Perso
             <Dialog.Title>Account limits</Dialog.Title>
             <Dialog.Description id="person-policy-description">{person?.displayName} · limits apply across all of this person’s keys.</Dialog.Description>
           </div>
-          <Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close>
+          <Dialog.Close asChild><button className="icon-button" aria-label="Close"><PixelIcon name="close" /></button></Dialog.Close>
         </div>
         <form className="dialog-form" onSubmit={save}>
           <label className="field-label" htmlFor="person-allowance">USD allowance</label>
@@ -759,7 +757,7 @@ export function PersonPolicyDialog({ person, onClose, onSaved }: { person: Perso
           <label className="field-label" htmlFor="person-rpm">Requests per minute</label>
           <input id="person-rpm" type="number" min="1" step="1" value={rpm} onChange={(event) => setRpm(event.target.value)} placeholder="Unlimited" />
           <p className="field-help">Each key the person owns shares this user-wide RPM bucket.</p>
-          {error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}
+          {error && <div className="inline-notice notice-error" role="alert"><PixelIcon name="shield" /><span>{error}</span></div>}
           <div className="dialog-actions">
             <Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close>
             <button className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save limits"}</button>
@@ -775,7 +773,7 @@ function ProvidersPage() {
 }
 
 function ProviderList({ providers, onSync, syncingId }: { providers: Array<ProviderRecord | import("../contracts/api").ProviderConnectionRecord>; onSync?: (providerId: string) => void; syncingId?: string | null }) {
-  return <div className="provider-list">{providers.map((provider) => <div className="provider-row" key={provider.id}><span className="provider-icon"><Network size={17} /></span><div className="provider-copy"><strong>{"brandName" in provider ? `${provider.brandName} · ${provider.connectionLabel}` : provider.name}</strong><small className="mono">{provider.baseUrlDisplay}</small></div><div className="provider-model-count">{count(provider.approvedModels)} / {count(provider.discoveredModels)} models approved</div><StatusLabel status={provider.health} /><span className="provider-sync">Synced {dateTime(provider.lastSyncAt)}</span>{onSync && <button className="button button-secondary button-small" type="button" disabled={syncingId === provider.id} onClick={() => onSync(provider.id)}>{syncingId === provider.id ? "Syncing…" : "Sync models"}</button>}</div>)}</div>;
+  return <div className="provider-list">{providers.map((provider) => <div className="provider-row" key={provider.id}><span className="provider-icon"><PixelIcon name="provider" size={20} /></span><div className="provider-copy"><strong>{"brandName" in provider ? `${provider.brandName} · ${provider.connectionLabel}` : provider.name}</strong><small className="mono">{provider.baseUrlDisplay}</small></div><div className="provider-model-count">{count(provider.approvedModels)} / {count(provider.discoveredModels)} models approved</div><StatusLabel status={provider.health} /><span className="provider-sync">Synced {dateTime(provider.lastSyncAt)}</span>{onSync && <button className="button button-secondary button-small" type="button" disabled={syncingId === provider.id} onClick={() => onSync(provider.id)}>{syncingId === provider.id ? "Syncing…" : "Sync models"}</button>}</div>)}</div>;
 }
 
 export function ProviderCreateDialog({ open, onOpenChange, onCreated }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: () => void }) {
@@ -804,13 +802,13 @@ export function ProviderCreateDialog({ open, onOpenChange, onCreated }: { open: 
 
   return <Dialog.Root open={open} onOpenChange={onOpenChange}>
     <Dialog.Portal><Dialog.Overlay className="dialog-overlay" /><Dialog.Content className="dialog-content" aria-describedby="provider-dialog-description">
-      <div className="dialog-title-row"><div><Dialog.Title>Add a provider</Dialog.Title><Dialog.Description id="provider-dialog-description">Credentials are encrypted on the server and cannot be viewed again.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><X size={18} /></button></Dialog.Close></div>
+      <div className="dialog-title-row"><div><Dialog.Title>Add a provider</Dialog.Title><Dialog.Description id="provider-dialog-description">Credentials are encrypted on the server and cannot be viewed again.</Dialog.Description></div><Dialog.Close asChild><button className="icon-button" aria-label="Close"><PixelIcon name="close" /></button></Dialog.Close></div>
       <form onSubmit={submit} className="dialog-form">
         <label className="field-label" htmlFor="provider-name">Provider name</label><input id="provider-name" required maxLength={80} value={name} onChange={(event) => setName(event.target.value)} placeholder="e.g. Team inference" />
         <label className="field-label" htmlFor="provider-base-url">OpenAI-compatible base URL</label><input id="provider-base-url" type="url" required value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="https://api.example.com/v1" />
         <label className="field-label" htmlFor="provider-api-key">Upstream API key</label><input id="provider-api-key" type="password" required autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="Entered once, never returned" />
         <p className="field-help">Use a public HTTPS endpoint. The key is sent only to this server and is never included in logs or API responses.</p>
-        {error && <div className="inline-notice notice-error" role="alert"><ShieldAlert size={16} /><span>{error}</span></div>}
+        {error && <div className="inline-notice notice-error" role="alert"><PixelIcon name="shield" /><span>{error}</span></div>}
         <div className="dialog-actions"><Dialog.Close asChild><button type="button" className="button button-quiet">Cancel</button></Dialog.Close><button type="submit" className="button button-primary" disabled={saving}>{saving ? "Saving…" : "Save provider"}</button></div>
       </form>
     </Dialog.Content></Dialog.Portal>
@@ -968,9 +966,9 @@ function GuardrailsPage() {
     }
   }
 
-  return <><PageHeader title="Guardrails & audit" description="Control access and investigate abuse without losing historical records." /><DataNotice error={data.error ?? actionError} onRetry={data.reload} /><div className="content-grid guardrail-grid"><section className="section-block"><div className="section-heading"><div><h2>Global hard stop</h2><p>Emergency stop and safety reserve.</p></div><ShieldAlert size={18} /></div>{data.loading ? <LoadingLine /> : snapshot ? <div className="guardrail-value"><StatusLabel status={snapshot.globalStopped ? "stopped" : "active"} /><strong>{snapshot.globalStopped ? "Requests are stopped" : "Requests are not globally stopped"}</strong><p>Spend cap: {money(snapshot.globalSpendCapUsd)} · accounted usage: {money(snapshot.globalSpendUsedUsd)} · reserve: {money(snapshot.safetyReserveUsd)}</p><button className="button button-secondary" disabled={saving} onClick={() => { void toggleStop(); }}>{snapshot.globalStopped ? "Resume gateway" : "Stop gateway"}</button><form className="guardrail-budget-form" onSubmit={saveBudget}><label><span className="field-label">Global spend cap (USD)</span><input required type="number" min="0.01" step="0.01" value={globalCap} onChange={(event) => setGlobalCap(event.target.value)} /></label><label><span className="field-label">Safety reserve (USD)</span><input required type="number" min="0" step="0.01" value={safetyReserve} onChange={(event) => setSafetyReserve(event.target.value)} /></label><button className="button button-secondary" disabled={saving}>{saving ? "Saving…" : "Save budget"}</button></form></div> : <EmptyState title="Guardrail state unavailable" body="The operator API could not confirm current stop status." compact />}</section><section className="section-block"><div className="section-heading"><div><h2>Blocked IPs</h2><p>Block a source after reviewing abuse signals.</p></div><Ban size={18} /></div><form className="ip-block-form" onSubmit={blockAddress}><label><span className="field-label">IP address</span><input required value={ip} onChange={(event) => setIp(event.target.value)} placeholder="203.0.113.24" /></label><label><span className="field-label">Reason</span><input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Observed request abuse" /></label><button className="button button-secondary" disabled={saving}>{saving ? "Saving…" : "Block IP"}</button></form>{snapshot?.blockedIps.length ? <div className="simple-list">{snapshot.blockedIps.map((entry) => <div key={`${entry.ip}:${entry.createdAt}`}><code>{entry.ip}</code><span>{entry.reason ?? "No reason recorded"}</span><button type="button" className="button button-quiet button-small" disabled={saving} onClick={() => { void unblockAddress(entry.ip); }}>Unblock</button></div>)}</div> : <EmptyState title="No blocked IPs" body="No IP blocks are currently reported." compact />}</section><section className="section-block audit-section"><div className="section-heading"><div><h2>Recent audit events</h2><p>Policy actions with secret values redacted.</p></div><LockKeyhole size={18} /></div>{snapshot?.recentAudit.length ? <div className="audit-list">{snapshot.recentAudit.map((event) => <div className="audit-row" key={event.id}><span><strong>{event.action}</strong><small>{event.actor} · {event.target}</small></span><time>{dateTime(event.occurredAt)}</time></div>)}</div> : <EmptyState title="No recent audit events" body="Operator changes will be recorded here." compact />}</section></div></>;
+  return <><PageHeader title="Guardrails & audit" description="Control access and investigate abuse without losing historical records." /><DataNotice error={data.error ?? actionError} onRetry={data.reload} /><div className="content-grid guardrail-grid"><section className="section-block"><div className="section-heading"><div><h2>Global hard stop</h2><p>Emergency stop and safety reserve.</p></div><PixelIcon name="shield" size={20} /></div>{data.loading ? <LoadingLine /> : snapshot ? <div className="guardrail-value"><StatusLabel status={snapshot.globalStopped ? "stopped" : "active"} /><strong>{snapshot.globalStopped ? "Requests are stopped" : "Requests are not globally stopped"}</strong><p>Spend cap: {money(snapshot.globalSpendCapUsd)} · accounted usage: {money(snapshot.globalSpendUsedUsd)} · reserve: {money(snapshot.safetyReserveUsd)}</p><button className="button button-secondary guardrail-stop-button" disabled={saving} onClick={() => { void toggleStop(); }}><PixelIcon name={snapshot.globalStopped ? "activity" : "shield"} />{snapshot.globalStopped ? "Resume gateway" : "Stop gateway"}</button><form className="guardrail-budget-form" onSubmit={saveBudget}><label><span className="field-label">Global spend cap (USD)</span><input required type="number" min="0.01" step="0.01" value={globalCap} onChange={(event) => setGlobalCap(event.target.value)} /></label><label><span className="field-label">Safety reserve (USD)</span><input required type="number" min="0" step="0.01" value={safetyReserve} onChange={(event) => setSafetyReserve(event.target.value)} /></label><button className="button button-secondary" disabled={saving}>{saving ? "Saving…" : "Save budget"}</button></form></div> : <EmptyState title="Guardrail state unavailable" body="The operator API could not confirm current stop status." compact />}</section><section className="section-block"><div className="section-heading"><div><h2>Blocked IPs</h2><p>Block a source after reviewing abuse signals.</p></div><PixelIcon name="block" size={20} /></div><form className="ip-block-form" onSubmit={blockAddress}><label><span className="field-label">IP address</span><input required value={ip} onChange={(event) => setIp(event.target.value)} placeholder="203.0.113.24" /></label><label><span className="field-label">Reason</span><input value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Observed request abuse" /></label><button className="button button-secondary" disabled={saving}>{saving ? "Saving…" : "Block IP"}</button></form>{snapshot?.blockedIps.length ? <div className="simple-list">{snapshot.blockedIps.map((entry) => <div key={`${entry.ip}:${entry.createdAt}`}><code>{entry.ip}</code><span>{entry.reason ?? "No reason recorded"}</span><button type="button" className="button button-quiet button-small" disabled={saving} onClick={() => { void unblockAddress(entry.ip); }}>Unblock</button></div>)}</div> : <EmptyState title="No blocked IPs" body="No IP blocks are currently reported." compact />}</section><section className="section-block audit-section"><div className="section-heading"><div><h2>Recent audit events</h2><p>Policy actions with secret values redacted.</p></div><PixelIcon name="lock" size={20} /></div>{snapshot?.recentAudit.length ? <div className="audit-list">{snapshot.recentAudit.map((event) => <div className="audit-row" key={event.id}><span><strong>{event.action}</strong><small>{event.actor} · {event.target}</small></span><time>{dateTime(event.occurredAt)}</time></div>)}</div> : <EmptyState title="No recent audit events" body="Operator changes will be recorded here." compact />}</section></div></>;
 }
 
 function NotFound() {
-  return <section className="section-block"><PageHeader title="Page not found" description="That page isn’t part of this portal." /><NavLink className="button button-secondary" to="/developer">Go to developer home <ArrowRight size={15} /></NavLink></section>;
+  return <section className="section-block"><PageHeader title="Page not found" description="That page isn’t part of this portal." /><NavLink className="button button-secondary" to="/developer">Go to developer home <PixelIcon name="arrowRight" /></NavLink></section>;
 }

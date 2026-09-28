@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { Check, Copy, Search } from "lucide-react";
+import { PixelIcon } from "../icons/PixelIcon";
 import type { ModelRecord, PortalApi } from "../../contracts/api";
 import { formatUsd } from "../../lib/money";
 import { getLayoutPreviewRole } from "../../lib/preview";
@@ -102,7 +102,7 @@ export function ModelCatalogPage({ portalApi }: { portalApi: Pick<PortalApi, "li
     {error && <div className="inline-notice notice-error" role="alert">{error} <button type="button" className="button button-small" onClick={() => { void load(); }}>Retry</button></div>}
     <section className="section-block table-section" aria-label="Published model catalog">
       <div className="toolbar model-catalog-toolbar">
-        <label className="search-field"><Search size={16} aria-hidden="true" /><span className="sr-only">Search models</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search providers or models" /></label>
+        <label className="search-field"><PixelIcon name="search" /><span className="sr-only">Search models</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search providers or models" /></label>
         <label className="select-filter"><span className="sr-only">Filter by provider</span><select aria-label="Filter by provider" value={provider} onChange={(event) => setProvider(event.target.value)}><option value="all">All providers</option>{providers.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
         <label className="select-filter"><span className="sr-only">Filter by capability</span><select aria-label="Filter by capability" value={capability} onChange={(event) => setCapability(event.target.value)}><option value="all">All capabilities</option><option value="text">Text</option><option value="vision">Vision</option></select></label>
         <label className="select-filter"><span className="sr-only">Sort by input price</span><select aria-label="Sort by input price" value={priceSort} onChange={(event) => setPriceSort(event.target.value)}><option value="provider">Provider order</option><option value="input_asc">Lowest input price</option><option value="input_desc">Highest input price</option></select></label>
@@ -121,7 +121,7 @@ export function ModelCatalogPage({ portalApi }: { portalApi: Pick<PortalApi, "li
             return <article className="developer-model-card" key={model.id} aria-label={displayName}>
               <div className="developer-model-card-top"><span className="provider-kicker">{model.providerName}</span><span className={`model-state${model.available ? " is-available" : ""}`}>{model.available ? "Available" : "Unavailable"}</span></div>
               <h3><Link to={destination} state={{ from: `${location.pathname}${filtersQuery()}` }}>{displayName}</Link></h3>
-              <div className="developer-model-public-id"><code title={model.id}>{model.id}</code><button type="button" className="icon-button model-copy-button" aria-label={`Copy model ID ${model.id}`} onClick={() => { void copyId(model.id); }}>{copiedId === model.id ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}</button></div>
+              <div className="developer-model-public-id"><code title={model.id}>{model.id}</code><button type="button" className="icon-button model-copy-button" aria-label={`Copy model ID ${model.id}`} onClick={() => { void copyId(model.id); }}><PixelIcon name={copiedId === model.id ? "confirm" : "copy"} /></button></div>
               <div className="model-capability-list">{model.capabilities.map((item) => <span className="model-capability" key={item}>{item}</span>)}</div>
               <div className="developer-model-card-prices">
                 <div><span>Input</span><strong>{model.pricingVerified ? formatUsd(model.inputUsdPerMillion) : "Price not verified"}</strong><small>USD / 1M tokens</small></div>

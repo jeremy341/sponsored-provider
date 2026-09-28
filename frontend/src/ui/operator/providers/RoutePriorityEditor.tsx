@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { PixelIcon } from "../../icons/PixelIcon";
 import type { CatalogOfferRecord, OfferRouteRecord, PortalApi } from "../../../contracts/api";
 
 export function RoutePriorityEditor({ offer, portalApi }: { offer: CatalogOfferRecord; portalApi: PortalApi }) {
@@ -24,7 +24,7 @@ export function RoutePriorityEditor({ offer, portalApi }: { offer: CatalogOfferR
       const routeIndex = reorderable.findIndex((item) => item.id === route.id);
       const canReorder = routeIndex >= 0;
 
-      return <li key={route.id} className="route-priority-row"><RouteStatus route={route} index={index} /><div className="route-move-actions"><button type="button" className="button button-quiet button-small" aria-label={`Move ${route.connectionLabel} up`} disabled={!canReorder || routeIndex === 0} onClick={() => { void move(route.id, -1); }}><ArrowUp size={15} /><span>Move up</span></button><button type="button" className="button button-quiet button-small" aria-label={`Move ${route.connectionLabel} down`} disabled={!canReorder || routeIndex === reorderable.length - 1} onClick={() => { void move(route.id, 1); }}><ArrowDown size={15} /><span>Move down</span></button></div></li>;
+      return <li key={route.id} className="route-priority-row"><RouteStatus route={route} index={index} /><div className="route-move-actions"><button type="button" className="button button-quiet button-small" aria-label={`Move ${route.connectionLabel} up`} disabled={!canReorder || routeIndex === 0} onClick={() => { void move(route.id, -1); }}><PixelIcon name="arrowUp" /><span>Move up</span></button><button type="button" className="button button-quiet button-small" aria-label={`Move ${route.connectionLabel} down`} disabled={!canReorder || routeIndex === reorderable.length - 1} onClick={() => { void move(route.id, 1); }}><PixelIcon name="arrowDown" /><span>Move down</span></button></div></li>;
     })}</ol>
     <p className="sr-only" aria-live="polite">{message}</p>
   </section>;
