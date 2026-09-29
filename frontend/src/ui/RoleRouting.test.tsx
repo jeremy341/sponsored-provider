@@ -23,7 +23,7 @@ describe("role routing", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/operator"));
-    expect(await screen.findByRole("navigation", { name: "Primary navigation" })).toHaveTextContent("People & keys");
+    expect(await screen.findByRole("navigation", { name: "Primary navigation" })).toHaveTextContent("Users");
   });
 
   it("redirects a developer who opens an operator-only route", async () => {
@@ -32,7 +32,7 @@ describe("role routing", () => {
     render(<App />);
 
     await waitFor(() => expect(window.location.pathname).toBe("/developer"));
-    expect(await screen.findByRole("navigation", { name: "Primary navigation" })).toHaveTextContent("API keys");
+    expect(await screen.findByRole("navigation", { name: "Primary navigation" })).toHaveTextContent("API Keys");
   });
 
   it("shows the not-found page instead of redirecting when an operator opens an unknown path", async () => {

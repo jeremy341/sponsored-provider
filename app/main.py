@@ -18,7 +18,7 @@ from .config import Settings, get_settings
 from .database import Database
 from .errors import ProviderError
 from .rate_limit import RateLimiter
-from .portal_api import BudgetEstimateUnavailable, PortalService, create_portal_router, estimate_request_budget
+from .portal_api import BudgetEstimateUnavailable, PortalService, create_portal_router, ensure_request_origin, estimate_request_budget
 from .portal_db import BudgetModelPolicyChanged, PortalDatabase, ResolvedOffer, UsageFields
 from .openai_compatible import OpenAICompatibleClient, UpstreamConnectFailure
 from .password_auth import hash_password, normalize_username
@@ -506,6 +506,103 @@ async def provider_error_handler(_, exc: ProviderError):
 async def health(settings: Settings = Depends(get_settings), portal_db: PortalDatabase = Depends(get_portal_db)):
     stopped = bool(settings.emergency_stop or portal_db.get_runtime_setting("global_stopped", False))
     return {"ok": not stopped, "service": "sponsored-provider", "stopped": stopped}
+
+
+@app.get("/health/live")
+async def health_live():
+    return {"status": "live"}
+
+
+@app.get("/health/ready")
+async def health_ready(portal_db: PortalDatabase = Depends(get_portal_db)):
+    try:
+        portal_db.get_runtime_setting("global_stopped", False)
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "database_unavailable"})
+    if not (PORTAL_DIST / "index.html").is_file():
+        return JSONResponse(status_code=503, content={"status": "not_ready", "reason": "portal_frontend_not_built"})
+    return {"status": "ready"}
+
+
+def _portal_session_principal(request: Request) -> dict:
+    """Authenticate a portal write by session cookie + CSRF for non-router endpoints."""
+    service = getattr(request.app.state, "portal_service", None)
+    if service is None:
+        raise ProviderError("The portal is not ready.", "portal_unavailable", 503)
+    ensure_request_origin(request, service)
+    token = request.cookies.get("portal_session")
+    found = service.repository.get_session(token) if token else None
+    if not found:
+        raise ProviderError("Sign-in required.", "invalid_session", 401)
+    user, csrf_hash = found
+    if user["status"] != "active":
+        raise ProviderError("This account is not active.", "invalid_session", 401)
+    supplied = request.headers.get("x-csrf-token") or request.cookies.get("portal_csrf")
+    if not supplied or not service.repository.verify_csrf(csrf_hash, supplied):
+        raise ProviderError("A valid CSRF token is required.", "csrf_required", 403)
+    return user
+
+
+@app.post("/api/developer/playground")
+async def playground(request: Request, settings: Settings = Depends(get_settings), db: Database = Depends(get_db), portal_db: PortalDatabase = Depends(get_portal_db)):
+    """Run one real sponsored inference from the console against a caller-owned key.
+
+    Uses the exact /v1 pipeline: key policy, rate limits, allowance reservation,
+    provider funding reservation, routing, and metadata-only telemetry.
+    """
+    user = _portal_session_principal(request)
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise ProviderError("Request body must be valid JSON.", "invalid_request", 400) from exc
+    if not isinstance(body, dict):
+        raise ProviderError("Request body must be a JSON object.", "invalid_request", 400)
+    key_record = portal_db.gateway_key_by_id(body.get("keyId") if isinstance(body.get("keyId"), str) else "", owner_user_id=user["id"])
+    if not key_record:
+        raise ProviderError("An active API key of yours is required for the playground.", "invalid_api_key", 403)
+    key = key_record | {
+        "_portal_key": True,
+        "id": key_record["key_id"],
+        "requests_per_minute": key_record["rpm_limit"],
+        "token_limit": None,
+        "allowed_models": ", ".join(key_record["effective_model_ids"]),
+        "allowed_upstreams": "",
+        "risk_approved": True,
+    }
+    payload = body.get("payload")
+    if not isinstance(payload, dict):
+        raise ProviderError("payload must be a JSON object.", "invalid_request", 400)
+    model = payload.get("model")
+    if not isinstance(model, str) or not model.strip():
+        raise ProviderError("model must be a non-empty string.", "invalid_request", 400)
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or not messages:
+        raise ProviderError("messages must be a non-empty list.", "invalid_request", 400)
+    for token_field in ("max_completion_tokens", "max_tokens"):
+        if token_field in payload and payload[token_field] is not None:
+            if isinstance(payload[token_field], bool) or not isinstance(payload[token_field], int) or payload[token_field] < 1:
+                raise ProviderError(f"{token_field} must be a positive integer.", "invalid_request", 400)
+    client_ip = client_ip_for(request)
+    if db.is_ip_blocked(client_ip):
+        raise ProviderError("Requests from this IP address are blocked.", "ip_blocked", 403)
+    if settings.emergency_stop or portal_db.get_runtime_setting("global_stopped", False):
+        record_rejected_request(db, portal_db, key, model=model, client_ip=client_ip, error_code="provider_stopped")
+        raise ProviderError("The provider is temporarily stopped.", "provider_stopped", 503)
+    global_limit_usd = float(portal_db.get_runtime_setting("global_spend_cap_usd", settings.provider_hard_stop_usd))
+    estimate_reserve_usd = float(portal_db.get_runtime_setting("safety_reserve_usd", settings.provider_estimate_reserve_usd))
+    request_ceiling_usd = max(0, global_limit_usd - estimate_reserve_usd)
+    user_rate_limit = key["user_rpm_limit"] if key["user_rpm_limit"] is not None else settings.rate_limit_requests_per_minute
+    if not portal_db.allow_portal_request(key["owner_id"], key["key_id"], user_limit=user_rate_limit, key_limit=key["rpm_limit"], window=int(time.time() // 60)):
+        record_rejected_request(db, portal_db, key, model=model, client_ip=client_ip, error_code="rate_limited")
+        raise ProviderError("This user's or API key's request limit has been reached.", "rate_limited", 429)
+    offer = portal_db.get_offer_for_request(model, key["key_id"])
+    if offer is None:
+        record_rejected_request(db, portal_db, key, model=model, client_ip=client_ip, error_code="model_not_found")
+        raise ProviderError("The requested model is not available on this key.", "model_not_found", 404)
+    return await _portal_chat_completion(
+        payload, key=key, offer=offer, db=db, portal_db=portal_db,
+        settings=settings, client_ip=client_ip, global_limit_usd=request_ceiling_usd,
+    )
 
 
 def portal_index():

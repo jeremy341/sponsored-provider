@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ArrowRight, LockKeyhole } from "lucide-react";
 import { api } from "../lib/api";
@@ -19,6 +20,12 @@ import { ModelsPricingPage } from "./operator/models/ModelsPricingPage";
 import { AuditLogPage } from "./operator/AuditLogPage";
 import { OperatorUsagePage as OperatorUsageSurface } from "./operator/usage/OperatorUsagePage";
 import { AppShell } from "./shell/AppShell";
+import { PlaygroundPage } from "./console/PlaygroundPage";
+import { LogsPage } from "./console/LogsPage";
+import { DeveloperProvidersPage } from "./console/DeveloperProvidersPage";
+import { SettingsPage } from "./console/SettingsPage";
+import { InvitesPage } from "./operator/InvitesPage";
+import { SystemPage } from "./operator/SystemPage";
 import { developerNav, operatorNav } from "./shell/nav";
 import { NavLink } from "react-router-dom";
 
@@ -31,8 +38,16 @@ type SessionState =
   | { status: "ready"; role: PortalRole; displayName: string; email: string | null }
   | { status: "error"; message: string };
 
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: { retry: 1, refetchOnWindowFocus: true, staleTime: 10_000 },
+  },
+});
+
 export function App() {
-  return <BrowserRouter><PortalApp /></BrowserRouter>;
+  return <QueryClientProvider client={queryClient}>
+    <BrowserRouter><PortalApp /></BrowserRouter>
+  </QueryClientProvider>;
 }
 
 function PortalApp() {
@@ -78,6 +93,10 @@ function PortalShell({ role, preview, userName, email }: { role: PortalRole; pre
       <Route path="/" element={<Navigate to={home} replace />} />
       <Route path="/developer" element={<DeveloperHome />} />
       <Route path="/developer/keys" element={<KeysPage />} />
+      <Route path="/developer/playground" element={<PlaygroundPage />} />
+      <Route path="/developer/logs" element={<LogsPage title="Logs" description="Every request made with your keys — metadata only. Prompts and responses are never stored." />} />
+      <Route path="/developer/providers" element={<DeveloperProvidersPage />} />
+      <Route path="/developer/settings" element={<SettingsPage />} />
       <Route path="/developer/models" element={<ModelCatalogSurface portalApi={api} />} />
       <Route path="/developer/models/*" element={<ModelDetailPage portalApi={api} />} />
       <Route path="/developer/activity" element={<DeveloperActivitySurface portalApi={api} />} />
@@ -85,6 +104,10 @@ function PortalShell({ role, preview, userName, email }: { role: PortalRole; pre
       <Route path="/developer/quickstart" element={<QuickstartPage />} />
       <Route path="/operator" element={<OperatorOverview />} />
       <Route path="/operator/people" element={<PeoplePage />} />
+      <Route path="/operator/invites" element={<InvitesPage />} />
+      <Route path="/operator/requests" element={<LogsPage operator title="Requests" description="Every request through the gateway across all users — metadata only. Prompts and responses are never stored." />} />
+      <Route path="/operator/system" element={<SystemPage />} />
+      <Route path="/operator/settings" element={<SettingsPage />} />
       <Route path="/operator/providers" element={<ProvidersSurface portalApi={api} />} />
       <Route path="/operator/models" element={<ModelsPricingPage portalApi={api} />} />
       <Route path="/operator/usage" element={<OperatorUsageSurface portalApi={api} />} />

@@ -418,3 +418,67 @@ export interface PortalApi {
   blockIp(input: { ip: string; reason: string }): Promise<void>;
   unblockIp(ip: string): Promise<void>;
 }
+
+export interface DeveloperProviderStatus {
+  provider: string;
+  models: number;
+  health: "healthy" | "degraded" | "unhealthy" | "unknown";
+  sampleSize: number;
+  successRate: number | null;
+  p50LatencyMs: number | null;
+  p95LatencyMs: number | null;
+  lastActivityAt: string | null;
+}
+
+export interface OperatorSystemSnapshot {
+  version: string;
+  uptimeSeconds: number;
+  pythonVersion: string;
+  platform: string;
+  inference: {
+    stopped: boolean;
+    stopSource: "emergency_stop" | "operator_stop" | null;
+    globalSpendCapUsd: number | null;
+    safetyReserveUsd: number | null;
+  };
+  jobs: {
+    lastProviderSyncAt: string | null;
+    backupStatus: string;
+    lastBackupAt: string | null;
+    lastRestoreTestAt: string | null;
+  };
+  database: {
+    engine: string;
+    sqliteVersion: string;
+    path: string | null;
+    sizeBytes: number;
+    tableCount: number;
+    schemaVersion: number;
+  };
+  counts: {
+    users: number;
+    activeApiKeys: number;
+    providerConnections: number;
+    activeOffers: number;
+    usageEvents30d: number;
+  };
+}
+
+export interface PlaygroundMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+export interface PlaygroundTelemetry {
+  status: "idle" | "running" | "success" | "error" | "stopped";
+  model: string | null;
+  provider: string | null;
+  ttftMs: number | null;
+  latencyMs: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  costUsd: number | null;
+  costSource: "measured" | "estimate" | "settling" | null;
+  error: string | null;
+  errorCode: string | null;
+}

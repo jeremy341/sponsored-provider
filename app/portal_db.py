@@ -2444,6 +2444,42 @@ class PortalDatabase:
             "created_at": record["created_at"], "last_used_at": record["last_used_at"],
         }
 
+    def gateway_key_by_id(self, key_id: str, *, owner_user_id: str | None = None) -> dict[str, Any] | None:
+        """Resolve an active portal key by id using the find_gateway_key record shape."""
+        if not isinstance(key_id, str) or not key_id:
+            return None
+        with self.connect() as conn:
+            row = conn.execute("""SELECT k.*,u.status AS owner_status,u.display_name AS owner_name,
+                    u.email AS owner_email,u.allowance_usd AS user_allowance_usd,
+                    u.allowance_period AS user_allowance_period,u.rpm_limit AS user_rpm_limit
+                FROM portal_keys k JOIN portal_users u ON u.id=k.owner_user_id
+                WHERE k.id=?""", (key_id,)).fetchone()
+            if not row:
+                return None
+            record = dict(row)
+            if owner_user_id is not None and record["owner_user_id"] != owner_user_id:
+                return None
+            if record["owner_status"] != "active" or record["revoked_at"] or record["archived_at"]:
+                return None
+            models = json.loads(record["allowed_models_json"])
+            allowed_mode = record["allowed_models_mode"]
+        eligible = self.list_models(approved_only=True)
+        effective_models = [
+            item["public_model_id"] for item in eligible
+            if allowed_mode == "all_approved" or item["public_model_id"] in models
+        ]
+        return {
+            "key_id": record["id"], "provider_key_id": record["id"], "owner_id": record["owner_user_id"],
+            "owner_status": record["owner_status"], "owner_name": record["owner_name"], "owner_email": record["owner_email"],
+            "label": record["label"], "key_prefix": record["key_prefix"], "enabled": True,
+            "allowed_models_mode": record["allowed_models_mode"], "allowed_models": models,
+            "effective_model_ids": effective_models,
+            "spend_limit_usd": record["spend_limit_usd"], "spend_period": record["spend_period"],
+            "rpm_limit": record["rpm_limit"], "user_allowance_usd": record["user_allowance_usd"],
+            "user_allowance_period": record["user_allowance_period"], "user_rpm_limit": record["user_rpm_limit"],
+            "created_at": record["created_at"], "last_used_at": record["last_used_at"],
+        }
+
     def touch_gateway_key(self, key_id: str) -> None:
         with self.connect() as conn:
             conn.execute("UPDATE portal_keys SET last_used_at=? WHERE id=? AND revoked_at IS NULL AND archived_at IS NULL", (_iso(), key_id))
@@ -3017,6 +3053,95 @@ class PortalDatabase:
             offset = max(0, math.ceil(0.95 * sample_count) - 1)
             value = conn.execute(f"SELECT latency_ms FROM portal_usage_events WHERE {where} ORDER BY latency_ms LIMIT 1 OFFSET ?", [*args, offset]).fetchone()[0]
         return {"p95": value, "sample_count": sample_count}
+
+    def get_usage_event_by_request_id(self, owner_user_id: str, request_id: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM portal_usage_events WHERE owner_user_id=? AND request_id=? ORDER BY occurred_at DESC LIMIT 1",
+                (owner_user_id, request_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def system_snapshot(self) -> dict[str, Any]:
+        """Real operational facts for the operator System page. No secret values."""
+        import os
+        import sqlite3 as _sqlite3
+        from datetime import timedelta
+        cutoff = (_now() - timedelta(days=30)).isoformat()
+        with self.connect() as conn:
+            tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+            counts = {
+                "users": conn.execute("SELECT COUNT(*) FROM portal_users").fetchone()[0],
+                "activeApiKeys": conn.execute("SELECT COUNT(*) FROM portal_keys WHERE revoked_at IS NULL AND archived_at IS NULL").fetchone()[0],
+                "providerConnections": conn.execute("SELECT COUNT(*) FROM provider_connections").fetchone()[0] if "provider_connections" in tables else 0,
+                "activeOffers": conn.execute("SELECT COUNT(*) FROM catalog_offers WHERE active=1 AND approved=1").fetchone()[0] if "catalog_offers" in tables else 0,
+                "usageEvents30d": conn.execute("SELECT COUNT(*) FROM portal_usage_events WHERE occurred_at >= ?", (cutoff,)).fetchone()[0] if "portal_usage_events" in tables else 0,
+            }
+        try:
+            size_bytes = os.path.getsize(self.path) if self.path != ":memory:" else 0
+        except OSError:
+            size_bytes = 0
+        return {
+            "database": {
+                "engine": "sqlite",
+                "sqliteVersion": _sqlite3.sqlite_version,
+                "path": None if self.path == ":memory:" else os.path.basename(self.path),
+                "sizeBytes": size_bytes,
+                "tableCount": len(tables),
+                "schemaVersion": user_version,
+            },
+            "counts": counts,
+        }
+
+    def provider_health_summary(self, *, since_iso: str, min_samples: int = 5) -> list[dict[str, Any]]:
+        """Passive per-provider health computed from real recorded request outcomes."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """SELECT provider_name_snapshot AS provider, status, latency_ms, occurred_at FROM portal_usage_events
+                   WHERE occurred_at >= ? AND provider_name_snapshot IS NOT NULL AND provider_name_snapshot != ''""",
+                (since_iso,),
+            ).fetchall()
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = grouped.setdefault(row["provider"], {"samples": 0, "success": 0, "failed": 0, "latencies": [], "last": None})
+            if entry["last"] is None or row["occurred_at"] > entry["last"]:
+                entry["last"] = row["occurred_at"]
+            entry["samples"] += 1
+            if row["status"] == "success":
+                entry["success"] += 1
+            elif row["status"] in {"failed", "error"}:
+                entry["failed"] += 1
+            if isinstance(row["latency_ms"], (int, float)) and row["latency_ms"] >= 0:
+                entry["latencies"].append(int(row["latency_ms"]))
+        summary = []
+        for provider, entry in grouped.items():
+            latencies = sorted(entry["latencies"])
+            success_rate = entry["success"] / entry["samples"] if entry["samples"] else None
+            if entry["samples"] < min_samples or success_rate is None:
+                health = "unknown"
+            elif success_rate >= 0.97:
+                health = "healthy"
+            elif success_rate >= 0.85:
+                health = "degraded"
+            else:
+                health = "unhealthy"
+            def percentile(values, fraction):
+                if not values:
+                    return None
+                index = min(len(values) - 1, max(0, round(fraction * (len(values) - 1))))
+                return values[index]
+            summary.append({
+                "provider": provider,
+                "health": health,
+                "sampleSize": entry["samples"],
+                "successRate": round(success_rate, 4) if success_rate is not None else None,
+                "failureCount": entry["failed"],
+                "p50LatencyMs": percentile(latencies, 0.50),
+                "p95LatencyMs": percentile(latencies, 0.95),
+                "lastActivityAt": entry["last"],
+            })
+        return sorted(summary, key=lambda item: (-item["sampleSize"], item["provider"]))
 
     def gateway_usage_summary(self) -> dict[str, Any]:
         with self.connect() as conn:

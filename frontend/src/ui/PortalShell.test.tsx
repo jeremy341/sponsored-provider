@@ -15,16 +15,16 @@ describe("portal shell", () => {
     const brands = screen.getAllByRole("link", { name: /sponsored.?provider/i });
     const navLinks = within(navigation).getAllByRole("link");
 
-    expect(within(navigation).getByRole("link", { name: /API keys/i })).toHaveAttribute("aria-current", "page");
+    expect(within(navigation).getByRole("link", { name: /API Keys/i })).toHaveAttribute("aria-current", "page");
     expect(within(navigation).getByRole("link", { name: "Models" })).toBeInTheDocument();
-    expect(within(navigation).queryByRole("link", { name: /People & keys/i })).not.toBeInTheDocument();
+    expect(within(navigation).queryByRole("link", { name: /Users/i })).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Skip to content" })).toHaveAttribute("href", "#main-content");
 
     expect(brands).toHaveLength(1);
 
     for (const brand of brands) expect(brand.querySelector(".brand-mark")).toBeInTheDocument();
 
-    expect(navLinks).toHaveLength(6);
+    expect(navLinks).toHaveLength(9);
 
     for (const link of navLinks) expect(link.querySelector("svg.lucide")).toHaveAttribute("aria-hidden", "true");
 
@@ -40,15 +40,15 @@ describe("portal shell", () => {
 
     const navigation = screen.getByRole("navigation", { name: "Primary navigation" });
 
-    expect(within(navigation).getByRole("link", { name: "People & keys" })).toBeInTheDocument();
-    expect(within(navigation).queryByRole("link", { name: "API keys" })).not.toBeInTheDocument();
+    expect(within(navigation).getByRole("link", { name: "Users" })).toBeInTheDocument();
+    expect(within(navigation).queryByRole("link", { name: "API Keys" })).not.toBeInTheDocument();
 
     const openNavigation = screen.getByRole("button", { name: "Open navigation" });
 
     await userEvent.click(openNavigation);
     const dialog = await screen.findByRole("dialog", { name: "Navigation" });
 
-    expect(dialog.querySelectorAll("svg.lucide")).toHaveLength(9);
+    expect(dialog.querySelectorAll("svg.lucide")).toHaveLength(12);
 
     await userEvent.keyboard("{Escape}");
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Navigation" })).not.toBeInTheDocument());
@@ -60,7 +60,7 @@ describe("portal shell", () => {
 
     const developerNavigation = screen.getByRole("navigation", { name: "Primary navigation" });
 
-    expect(await within(developerNavigation).findByRole("link", { name: "API keys" })).toBeInTheDocument();
-    expect(within(developerNavigation).queryByRole("link", { name: "People & keys" })).not.toBeInTheDocument();
+    expect(await within(developerNavigation).findByRole("link", { name: "API Keys" })).toBeInTheDocument();
+    expect(within(developerNavigation).queryByRole("link", { name: "Users" })).not.toBeInTheDocument();
   });
 });

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import platform
+import time
 import secrets
 import ipaddress
 import math
@@ -16,6 +18,9 @@ from typing import Any
 from urllib.parse import urlparse, urlsplit
 
 from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Request, Response
+
+PROCESS_STARTED_AT = time.time()
+PORTAL_VERSION = "0.1.0"
 from fastapi.responses import JSONResponse, RedirectResponse
 import httpx
 
@@ -194,6 +199,28 @@ def _key_record(key: dict[str, Any]) -> dict[str, Any]:
         "spendPeriod": period, "spendResetAt": key.get("spend_reset_at"), "rpmLimit": key["rpm_limit"],
         "createdAt": key["created_at"], "lastUsedAt": key.get("last_used_at"), "status": status,
     }
+
+
+def ensure_request_origin(request: Request, service: "PortalService") -> None:
+    """Same-origin (or configured public origin) enforcement for portal writes."""
+    supplied = request.headers.get("origin")
+    is_referer = False
+    if not supplied:
+        supplied = request.headers.get("referer")
+        is_referer = True
+    if not supplied or supplied == "null":
+        raise HTTPException(status_code=403, detail="Same-origin request required")
+    try:
+        parsed = urlsplit(supplied)
+        expected = urlsplit(service.public_origin or str(request.base_url))
+        if parsed.username or parsed.password or not parsed.hostname or not expected.hostname:
+            raise ValueError("Invalid origin")
+        if parsed.scheme.lower() != expected.scheme.lower() or parsed.netloc.lower() != expected.netloc.lower():
+            raise ValueError("Cross-origin request")
+        if not is_referer and parsed.path not in {"", "/"}:
+            raise ValueError("Invalid origin")
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail="Same-origin request required") from exc
 
 
 def _activity_record(event: dict[str, Any], *, operator: bool = False) -> dict[str, Any]:
@@ -397,24 +424,7 @@ def create_portal_router(service: PortalService) -> APIRouter:
                 "staleModels": summary.stale_count}
 
     def require_same_origin(request: Request) -> None:
-        supplied = request.headers.get("origin")
-        is_referer = False
-        if not supplied:
-            supplied = request.headers.get("referer")
-            is_referer = True
-        if not supplied or supplied == "null":
-            raise HTTPException(status_code=403, detail="Same-origin request required")
-        try:
-            parsed = urlsplit(supplied)
-            expected = urlsplit(service.public_origin or str(request.base_url))
-            if parsed.username or parsed.password or not parsed.hostname or not expected.hostname:
-                raise ValueError("Invalid origin")
-            if parsed.scheme.lower() != expected.scheme.lower() or parsed.netloc.lower() != expected.netloc.lower():
-                raise ValueError("Cross-origin request")
-            if not is_referer and parsed.path not in {"", "/"}:
-                raise ValueError("Invalid origin")
-        except ValueError as exc:
-            raise HTTPException(status_code=403, detail="Same-origin request required") from exc
+        ensure_request_origin(request, service)
 
     def rate_limit_auth(request: Request, username: Any) -> None:
         normalized = username.strip().casefold()[:256] if isinstance(username, str) else ""
@@ -770,6 +780,83 @@ def create_portal_router(service: PortalService) -> APIRouter:
             "modelSpend": analytics["modelSpend"],
             "knownSpendUsd": analytics["knownSpendUsd"],
             "unpricedRequests": analytics["unpricedRequests"],
+        }
+
+    @router.get("/api/developer/providers")
+    async def developer_providers(session=Depends(developer)):
+        """Read-only provider transparency for developers: measured health only."""
+        user, _csrf_hash = session
+        since = (datetime.now(timezone.utc) - timedelta(days=14)).isoformat()
+        health = {item["provider"]: item for item in repo.provider_health_summary(since_iso=since)}
+        models = repo.list_models(approved_only=True)
+        model_counts: dict[str, int] = {}
+        for item in models:
+            name = item.get("provider_name") or item.get("providerName")
+            if name:
+                model_counts[name] = model_counts.get(name, 0) + 1
+        providers = sorted(set(health) | set(model_counts))
+        return {"providers": [{
+            "provider": name,
+            "models": model_counts.get(name, 0),
+            "health": health.get(name, {}).get("health", "unknown"),
+            "sampleSize": health.get(name, {}).get("sampleSize", 0),
+            "successRate": health.get(name, {}).get("successRate"),
+            "p50LatencyMs": health.get(name, {}).get("p50LatencyMs"),
+            "p95LatencyMs": health.get(name, {}).get("p95LatencyMs"),
+            "lastActivityAt": health.get(name, {}).get("lastActivityAt"),
+        } for name in providers]}
+
+    @router.get("/api/developer/requests/{request_id}")
+    async def developer_request_detail(request_id: str, session=Depends(developer)):
+        """Metadata-only detail for one of the caller's own requests."""
+        user, _csrf_hash = session
+        if len(request_id) > 128:
+            raise HTTPException(status_code=422, detail="Invalid request id")
+        event = repo.get_usage_event_by_request_id(user["id"], request_id)
+        if not event:
+            raise HTTPException(status_code=404, detail="Request not found")
+        record = _activity_record(event)
+        price_snapshot = None
+        raw_snapshot = event.get("price_snapshot_json")
+        if raw_snapshot:
+            try:
+                price_snapshot = json.loads(raw_snapshot)
+            except (TypeError, ValueError):
+                price_snapshot = None
+        record["stream"] = bool(event.get("stream"))
+        record["origin"] = event.get("origin")
+        record["priceSnapshot"] = price_snapshot
+        return record
+
+    @router.get("/api/operator/system")
+    async def operator_system(session=Depends(operator)):
+        """Real operational facts only; no secret values and no shell access."""
+        _user, _csrf_hash = session
+        snapshot = repo.system_snapshot()
+        stopped = bool(repo.get_runtime_setting("global_stopped", False))
+        emergency = bool(service.settings.emergency_stop) if service.settings is not None else False
+        latest_sync = None
+        with repo.connect() as conn:
+            row = conn.execute("SELECT occurred_at FROM portal_audit_events WHERE action='provider.synced' ORDER BY occurred_at DESC LIMIT 1").fetchone()
+            latest_sync = row["occurred_at"] if row else None
+        return {
+            "version": PORTAL_VERSION,
+            "uptimeSeconds": int(time.time() - PROCESS_STARTED_AT),
+            "pythonVersion": platform.python_version(),
+            "platform": platform.platform(),
+            "inference": {
+                "stopped": stopped or emergency,
+                "stopSource": "emergency_stop" if emergency else ("operator_stop" if stopped else None),
+                "globalSpendCapUsd": repo.get_runtime_setting("global_spend_cap_usd", None),
+                "safetyReserveUsd": repo.get_runtime_setting("safety_reserve_usd", None),
+            },
+            "jobs": {
+                "lastProviderSyncAt": latest_sync,
+                "backupStatus": "not_configured",
+                "lastBackupAt": None,
+                "lastRestoreTestAt": None,
+            },
+            **snapshot,
         }
 
     @router.get("/api/developer/dashboard")
