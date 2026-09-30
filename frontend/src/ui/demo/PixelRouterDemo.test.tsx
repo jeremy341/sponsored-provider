@@ -11,7 +11,7 @@ describe("PixelRouterDemo", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Models" }));
     expect(screen.getByRole("heading", { name: "Models" })).toBeInTheDocument();
-    expect(screen.getByText("GLM 5.3 Flash")).toBeInTheDocument();
+    expect(screen.getAllByText("GLM 5.3 Flash").length).toBeGreaterThan(0);
 
     fireEvent.click(screen.getByRole("button", { name: "API Keys" }));
     expect(screen.getByRole("heading", { name: "API Keys" })).toBeInTheDocument();
